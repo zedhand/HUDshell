@@ -23,7 +23,7 @@ The three CI steps (`scripts/build-release.ps1`, `cargo build --features harness
 were run locally: `static` passed 16 / 16 under both PowerShell 7 and Windows PowerShell 5.1. Running it under PowerShell 7
 exposed a compile error in the `Add-Type` helper at the top of `test-all.ps1` (`Point` lives in `System.Drawing.Primitives`
 there); it now picks the reference by edition and compiles in both shells. The suites that use that helper (ui, clickfocus,
-and so on) were **not** re-run after this change. The workflow file itself has not run on GitHub, and the other suites were not run.
+and so on) were **not** re-run after this change. The workflow then ran on GitHub (`windows-latest`) after the push and passed all steps (with checkout@v4 and setup-node@v4). The other suites were not run.
 
 ## Behaviour verified earlier
 
