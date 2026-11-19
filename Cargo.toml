@@ -1,0 +1,26 @@
+[package]
+name = "hudshell"
+version = "0.1.0"
+edition = "2024"
+description = "A compact always-on-top PowerShell 7 terminal for Windows 11"
+license = "MIT"
+
+[dependencies]
+base64 = "0.23.1"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+webview2-com = "0.39.1"
+windows = { version = "0.62.2", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_UI_WindowsAndMessaging", "Win32_UI_Input_KeyboardAndMouse", "Win32_System_LibraryLoader", "Win32_UI_HiDpi", "Win32_System_Com", "Win32_System_Threading", "Win32_Security", "Win32_System_Console", "Win32_System_Pipes", "Win32_Storage_FileSystem", "Win32_System_JobObjects", "Win32_System_IO", "Win32_System_SystemInformation", "Wdk_System_SystemServices", "Win32_UI_Shell", "Win32_Graphics_Dwm"] }
+
+[profile.release]
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
+opt-level = "s"
+
+
+[features]
+# Test harness (scripted scenarios, DevTools-protocol key injection, input injectors). Never in a normal build.
+harness = []
+

@@ -1,0 +1,534 @@
+//! WebView2 hosted as an ordinary (windowed) child of the overlay HWND.
+//! xterm.js page served from memory under a private host name, bridged to the ConPTY host with
+//! byte-safe base64 JSON messages.
+
+use std::cell::{Cell, RefCell};
+use std::sync::mpsc;
+
+use base64::Engine;
+use webview2_com::Microsoft::Web::WebView2::Win32::{
+    CreateCoreWebView2EnvironmentWithOptions, ICoreWebView2, ICoreWebView2Controller,
+    ICoreWebView2Settings3, ICoreWebView2Settings5, ICoreWebView2Settings6,
+    COREWEBVIEW2_MOVE_FOCUS_REASON_PROGRAMMATIC, COREWEBVIEW2_WEB_RESOURCE_CONTEXT_ALL,
+};
+use webview2_com::{
+    take_pwstr, AddScriptToExecuteOnDocumentCreatedCompletedHandler,
+    CreateCoreWebView2ControllerCompletedHandler,
+    CreateCoreWebView2EnvironmentCompletedHandler,
+    FocusChangedEventHandler, NavigationStartingEventHandler, NewWindowRequestedEventHandler,
+    WebMessageReceivedEventHandler, WebResourceRequestedEventHandler,
+};
+use windows::Win32::UI::Shell::SHCreateMemStream;
+use windows::core::{Interface, BOOL, HSTRING, PCWSTR, PWSTR};
+use windows::Wdk::System::SystemServices::RtlGetVersion;
+use windows::Win32::Foundation::{E_POINTER, HWND, LPARAM, RECT};
+use windows::Win32::System::SystemInformation::OSVERSIONINFOW;
+use windows::Win32::UI::WindowsAndMessaging::{
+    EnumChildWindows, GetClassNameW, GetClientRect, GetWindowLongPtrW, GWL_EXSTYLE,
+};
+
+use crate::{log, pty};
+
+const HOST_ORIGIN: &str = "https://hudshell.local/";
+/// Max unacknowledged bytes in flight to the page (backpressure toward the pty reader).
+const MAX_INFLIGHT: usize = 256 * 1024;
+
+static OPT_UNICODE: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
+static OPT_SHIFT_ENTER: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
+
+static OPT_CONFIG: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
+
+/// JSON object (font, fontSize, scrollback, theme) merged into `window.__hudshell` before load.
+pub fn set_config_json(s: &str) {
+    if let Ok(mut c) = OPT_CONFIG.lock() {
+        *c = s.to_string();
+    }
+}
+
+/// Front-end options injected into the page before it loads.
+pub fn set_options(unicode: &str, shift_enter: &str) {
+    if let Ok(mut u) = OPT_UNICODE.lock() {
+        *u = unicode.to_string();
+    }
+    if let Ok(mut s) = OPT_SHIFT_ENTER.lock() {
+        *s = shift_enter.to_string();
+    }
+}
+
+/// Text of the most recent screen dump (used by the scripted test's skip-if checks).
+#[cfg(feature = "harness")]
+static LAST_DUMP: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
+
+#[cfg(feature = "harness")]
+pub fn last_dump() -> String {
+    LAST_DUMP.lock().map(|s| s.clone()).unwrap_or_default()
+}
+
+thread_local! {
+    static CONTROLLER: RefCell<Option<ICoreWebView2Controller>> = const { RefCell::new(None) };
+    static WEBVIEW: RefCell<Option<ICoreWebView2>> = const { RefCell::new(None) };
+    static INFLIGHT: Cell<usize> = const { Cell::new(0) };
+}
+
+fn windows_build() -> u32 {
+    let mut vi = OSVERSIONINFOW {
+        dwOSVersionInfoSize: std::mem::size_of::<OSVERSIONINFOW>() as u32,
+        ..Default::default()
+    };
+    let _ = unsafe { RtlGetVersion(&mut vi) };
+    if vi.dwBuildNumber == 0 { 26100 } else { vi.dwBuildNumber }
+}
+
+pub unsafe fn init(hwnd: HWND) -> Result<(), String> {
+    let data_dir =
+        format!("{}\\HUDshell\\WebView2", std::env::var("LOCALAPPDATA").unwrap_or_else(|_| ".".into()));
+    let data_dir_w = HSTRING::from(data_dir);
+
+    let (tx, rx) = mpsc::channel();
+    CreateCoreWebView2EnvironmentCompletedHandler::wait_for_async_operation(
+        Box::new(move |handler| unsafe {
+            CreateCoreWebView2EnvironmentWithOptions(PCWSTR::null(), &data_dir_w, None, &handler)
+                .map_err(webview2_com::Error::WindowsError)
+        }),
+        Box::new(move |error_code, environment| {
+            error_code?;
+            tx.send(environment.ok_or_else(|| windows::core::Error::from(E_POINTER)))
+                .expect("send env");
+            Ok(())
+        }),
+    )
+    .map_err(|e| format!("environment: {e:?}"))?;
+    let env = rx.recv().map_err(|e| e.to_string())?.map_err(|e| e.to_string())?;
+
+    let (tx, rx) = mpsc::channel();
+    let env2 = env.clone();
+    CreateCoreWebView2ControllerCompletedHandler::wait_for_async_operation(
+        Box::new(move |handler| unsafe {
+            env2.CreateCoreWebView2Controller(hwnd, &handler)
+                .map_err(webview2_com::Error::WindowsError)
+        }),
+        Box::new(move |error_code, controller| {
+            error_code?;
+            tx.send(controller.ok_or_else(|| windows::core::Error::from(E_POINTER)))
+                .expect("send controller");
+            Ok(())
+        }),
+    )
+    .map_err(|e| format!("controller: {e:?}"))?;
+    let controller = rx.recv().map_err(|e| e.to_string())?.map_err(|e| e.to_string())?;
+
+    let hwnd_i = hwnd.0 as isize;
+    let webview = unsafe { controller.CoreWebView2() }.map_err(|e| e.to_string())?;
+
+    // This is a terminal, not a browser: no DevTools window, browser shortcuts (Ctrl+Shift+C/I,
+    // F12, Ctrl+P, F5, zoom...), right-click menu, zoom, status bar or swipe navigation. Ctrl+C/V
+    // editing keys are not affected by AreBrowserAcceleratorKeysEnabled.
+    unsafe {
+        if let Ok(s) = webview.Settings() {
+            let _ = s.SetAreDevToolsEnabled(false);
+            let _ = s.SetAreDefaultContextMenusEnabled(false);
+            let _ = s.SetIsZoomControlEnabled(false);
+            let _ = s.SetIsStatusBarEnabled(false);
+            if let Ok(s3) = s.cast::<ICoreWebView2Settings3>() {
+                let _ = s3.SetAreBrowserAcceleratorKeysEnabled(false);
+            }
+            if let Ok(s5) = s.cast::<ICoreWebView2Settings5>() {
+                let _ = s5.SetIsPinchZoomEnabled(false);
+            }
+            if let Ok(s6) = s.cast::<ICoreWebView2Settings6>() {
+                let _ = s6.SetIsSwipeNavigationEnabled(false);
+            }
+            log("webview: DevTools, browser shortcuts, context menu, zoom and swipe disabled");
+        }
+    }
+    let mut rc = RECT::default();
+    let _ = unsafe { GetClientRect(hwnd, &mut rc) };
+    unsafe {
+        controller.SetBounds(rc).map_err(|e| e.to_string())?;
+        controller.SetIsVisible(true).map_err(|e| e.to_string())?;
+    }
+
+    let mut token = Default::default();
+    unsafe {
+        controller
+            .add_GotFocus(
+                &FocusChangedEventHandler::create(Box::new(|_, _| {
+                    log("webview: controller GotFocus");
+                    Ok(())
+                })),
+                &mut token,
+            )
+            .map_err(|e| e.to_string())?;
+        controller
+            .add_LostFocus(
+                &FocusChangedEventHandler::create(Box::new(|_, _| {
+                    log("webview: controller LostFocus");
+                    Ok(())
+                })),
+                &mut token,
+            )
+            .map_err(|e| e.to_string())?;
+
+        // Messages from the page; the source origin is checked first.
+        webview
+            .add_WebMessageReceived(
+                &WebMessageReceivedEventHandler::create(Box::new(move |_, args| {
+                    let Some(args) = args else { return Ok(()) };
+                    let mut src = PWSTR::null();
+                    let ok = unsafe { args.Source(&mut src) }.is_ok()
+                        && take_pwstr(src).starts_with(HOST_ORIGIN);
+                    if !ok {
+                        log("bridge: message from unexpected origin dropped");
+                        return Ok(());
+                    }
+                    let mut msg = PWSTR::null();
+                    if unsafe { args.TryGetWebMessageAsString(&mut msg) }.is_err() {
+                        return Ok(());
+                    }
+                    handle_term_message(hwnd_i, &take_pwstr(msg));
+                    Ok(())
+                })),
+                &mut token,
+            )
+            .map_err(|e| e.to_string())?;
+    }
+
+    {
+        unsafe {
+            // Never let terminal content navigate the host somewhere else or open windows.
+            webview
+                .add_NavigationStarting(
+                    &NavigationStartingEventHandler::create(Box::new(|_, args| {
+                        if let Some(args) = args {
+                            let mut uri = PWSTR::null();
+                            if unsafe { args.Uri(&mut uri) }.is_ok() {
+                                let u = take_pwstr(uri);
+                                if !u.starts_with(HOST_ORIGIN) {
+                                    let _ = unsafe { args.SetCancel(true) };
+                                    log(&format!("bridge: navigation blocked: {u}"));
+                                }
+                            }
+                        }
+                        Ok(())
+                    })),
+                    &mut token,
+                )
+                .map_err(|e| e.to_string())?;
+            webview
+                .add_NewWindowRequested(
+                    &NewWindowRequestedEventHandler::create(Box::new(|_, args| {
+                        if let Some(args) = args {
+                            let _ = unsafe { args.SetHandled(true) };
+                            log("bridge: new-window request blocked");
+                        }
+                        Ok(())
+                    })),
+                    &mut token,
+                )
+                .map_err(|e| e.to_string())?;
+
+            // Serve the UI that is compiled into this executable, from memory, for the private
+            // host name. Unknown paths get a 404; nothing is read from disk or the network.
+            let env_res = env.clone();
+            webview
+                .AddWebResourceRequestedFilter(
+                    &HSTRING::from("https://hudshell.local/*"),
+                    COREWEBVIEW2_WEB_RESOURCE_CONTEXT_ALL,
+                )
+                .map_err(|e| e.to_string())?;
+            webview
+                .add_WebResourceRequested(
+                    &WebResourceRequestedEventHandler::create(Box::new(move |_, args| {
+                        let Some(args) = args else { return Ok(()) };
+                        let request = unsafe { args.Request()? };
+                        let mut uri = PWSTR::null();
+                        unsafe { request.Uri(&mut uri)? };
+                        let u = take_pwstr(uri);
+                        let path = u
+                            .strip_prefix("https://hudshell.local")
+                            .unwrap_or("/")
+                            .split(['?', '#'])
+                            .next()
+                            .unwrap_or("/");
+                        let path = if path.is_empty() || path == "/" { "/index.html" } else { path };
+                        let (status, reason, body, mime): (i32, &str, &[u8], &str) =
+                            match crate::assets::find(path) {
+                                Some(a) => (200, "OK", a.data, a.mime),
+                                None => (404, "Not Found", b"not found", "text/plain"),
+                            };
+                        log(&format!("asset served from memory: {path} -> {status} ({} bytes)", body.len()));
+                        let stream = unsafe { SHCreateMemStream(Some(body)) };
+                        let headers = format!(
+                            "Content-Type: {mime}\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff"
+                        );
+                        let resp = unsafe {
+                            env_res.CreateWebResourceResponse(
+                                stream.as_ref(),
+                                status,
+                                &HSTRING::from(reason),
+                                &HSTRING::from(headers),
+                            )?
+                        };
+                        unsafe { args.SetResponse(&resp)? };
+                        Ok(())
+                    })),
+                    &mut token,
+                )
+                .map_err(|e| e.to_string())?;
+
+            // Tell xterm.js the real Windows build so its ConPTY reflow handling is right.
+            let build = windows_build();
+            log(&format!("terminal: windows build {build}"));
+            let uni = OPT_UNICODE.lock().map(|s| s.clone()).unwrap_or_default();
+            let uni = if uni.is_empty() { "11".to_string() } else { uni };
+            let se = OPT_SHIFT_ENTER.lock().map(|s| s.clone()).unwrap_or_default();
+            let se = if se.is_empty() { "kitty".to_string() } else { se };
+            log(&format!("terminal: options unicode={uni} shiftEnter={se}"));
+            let extra = OPT_CONFIG.lock().map(|s| s.clone()).unwrap_or_default();
+            let extra = if extra.is_empty() { "{}".to_string() } else { extra };
+            let script = HSTRING::from(format!(
+                "window.__hudshell=Object.assign({{build:{build},unicode:\"{uni}\",shiftEnter:\"{se}\"}},{extra});"
+            ));
+            webview
+                .AddScriptToExecuteOnDocumentCreated(
+                    &script,
+                    &AddScriptToExecuteOnDocumentCreatedCompletedHandler::create(Box::new(
+                        |_, _| Ok(()),
+                    )),
+                )
+                .map_err(|e| e.to_string())?;
+            webview
+                .Navigate(&HSTRING::from(format!("{HOST_ORIGIN}index.html")))
+                .map_err(|e| e.to_string())?;
+        }
+    }
+
+    WEBVIEW.with(|w| *w.borrow_mut() = Some(webview));
+    CONTROLLER.with(|c| *c.borrow_mut() = Some(controller));
+    Ok(())
+}
+
+fn handle_term_message(hwnd: isize, m: &str) {
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(m) else { return };
+    match v["t"].as_str() {
+        Some("ready") => {
+            let cols = v["cols"].as_i64().unwrap_or(100);
+            let rows = v["rows"].as_i64().unwrap_or(30);
+            if !pty::has_session() {
+                log(&format!("bridge: page ready at {cols}x{rows}, starting shell"));
+                match pty::spawn(hwnd, cols, rows) {
+                    Ok(path) => log(&format!("pty: started {path} at {cols}x{rows}")),
+                    Err(e) => log(&format!("pty: FAILED to start: {e}")),
+                }
+            }
+        }
+        Some("in") => {
+            if let Some(d) = v["d"].as_str() {
+                if d.len() <= 2_000_000 {
+                    if let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(d) {
+                        pty::write(bytes);
+                    }
+                }
+            }
+        }
+        Some("click") => crate::on_page_click(hwnd),
+        Some("settings") => crate::on_settings_message(hwnd, &v),
+        Some("applied") => log(&format!("terminal applied settings: {v}")),
+        Some("copied") => log(&format!("copy to clipboard: {v}")),
+        Some("resize") => {
+            let cols = v["cols"].as_i64().unwrap_or(0);
+            let rows = v["rows"].as_i64().unwrap_or(0);
+            if (1..=500).contains(&cols) && (1..=300).contains(&rows) {
+                pty::resize(cols, rows);
+            }
+        }
+        Some("ack") => {
+            let n = v["n"].as_u64().unwrap_or(0) as usize;
+            INFLIGHT.with(|i| i.set(i.get().saturating_sub(n)));
+            pump_output();
+        }
+        #[cfg(feature = "harness")]
+        Some("dump") => {
+            log(&format!(
+                "terminal dump: {}x{} buffer={} cursor={} unicode={} modes={}",
+                v["cols"], v["rows"], v["buf"], v["cursor"], v["unicode"], v["modes"]
+            ));
+            if let Some(lines) = v["lines"].as_array() {
+                if let Ok(mut d) = LAST_DUMP.lock() {
+                    *d = lines
+                        .iter()
+                        .map(|l| l.as_str().unwrap_or(""))
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                }
+                let mut last = 0;
+                for (i, l) in lines.iter().enumerate() {
+                    if l.as_str().map(|s| !s.trim().is_empty()).unwrap_or(false) {
+                        last = i + 1;
+                    }
+                }
+                for l in lines.iter().take(last) {
+                    log(&format!("  | {}", l.as_str().unwrap_or("")));
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+pub fn post(json: &str) {
+    WEBVIEW.with(|w| {
+        if let Some(w) = w.borrow().as_ref() {
+            let _ = unsafe { w.PostWebMessageAsString(&HSTRING::from(json)) };
+        }
+    });
+}
+
+/// Forward buffered pty output to the page while the in-flight byte budget allows.
+pub fn pump_output() {
+    loop {
+        if INFLIGHT.with(|i| i.get()) >= MAX_INFLIGHT {
+            break;
+        }
+        let Some(chunk) = pty::take_chunk() else { break };
+        INFLIGHT.with(|i| i.set(i.get() + chunk.len()));
+        let b64 = base64::engine::general_purpose::STANDARD.encode(&chunk);
+        post(&format!("{{\"t\":\"out\",\"d\":\"{b64}\"}}"));
+    }
+}
+
+// ---- Test-only input path: Chrome DevTools Protocol key events (no OS focus needed). ----
+// These produce real browser keydown/keypress/input events inside the page, so xterm.js's own
+// key handling and encoding are exercised, without sending any OS-level input to other apps.
+
+#[cfg(feature = "harness")]
+pub fn cdp(method: &str, params: &str) {
+    WEBVIEW.with(|w| {
+        if let Some(w) = w.borrow().as_ref() {
+            let h = webview2_com::CallDevToolsProtocolMethodCompletedHandler::create(Box::new(|_, _| Ok(())));
+            let _ = unsafe {
+                w.CallDevToolsProtocolMethod(&HSTRING::from(method), &HSTRING::from(params), &h)
+            };
+        }
+    });
+}
+
+#[cfg(feature = "harness")]
+fn key_event(kind: &str, key: &str, code: &str, vk: u32, mods: u32, text: &str) {
+    let mut o = serde_json::json!({
+        "type": kind, "key": key, "code": code,
+        "windowsVirtualKeyCode": vk, "nativeVirtualKeyCode": vk, "modifiers": mods,
+    });
+    if !text.is_empty() && kind == "keyDown" {
+        o["text"] = serde_json::Value::String(text.to_string());
+    }
+    cdp("Input.dispatchKeyEvent", &o.to_string());
+}
+
+/// "Enter", "Shift+Enter", "Ctrl+C", "Backspace", "Up", "Esc", "Tab", ...
+#[cfg(feature = "harness")]
+pub fn send_key(spec: &str) {
+    let mut mods = 0u32;
+    let mut name = "";
+    for part in spec.split('+') {
+        match part.to_ascii_lowercase().as_str() {
+            "alt" => mods |= 1,
+            "ctrl" | "control" => mods |= 2,
+            "meta" | "win" => mods |= 4,
+            "shift" => mods |= 8,
+            _ => name = part,
+        }
+    }
+    let (key, code, vk, text): (String, String, u32, &str) = match name.to_ascii_lowercase().as_str()
+    {
+        "enter" => ("Enter".into(), "Enter".into(), 13, "\r"),
+        "backspace" => ("Backspace".into(), "Backspace".into(), 8, ""),
+        "tab" => ("Tab".into(), "Tab".into(), 9, ""),
+        "esc" | "escape" => ("Escape".into(), "Escape".into(), 27, ""),
+        "home" => ("Home".into(), "Home".into(), 36, ""),
+        "end" => ("End".into(), "End".into(), 35, ""),
+        "delete" => ("Delete".into(), "Delete".into(), 46, ""),
+        "pageup" => ("PageUp".into(), "PageUp".into(), 33, ""),
+        "pagedown" => ("PageDown".into(), "PageDown".into(), 34, ""),
+        "up" => ("ArrowUp".into(), "ArrowUp".into(), 38, ""),
+        "down" => ("ArrowDown".into(), "ArrowDown".into(), 40, ""),
+        "left" => ("ArrowLeft".into(), "ArrowLeft".into(), 37, ""),
+        "right" => ("ArrowRight".into(), "ArrowRight".into(), 39, ""),
+        n if n.len() == 1 && n.as_bytes()[0].is_ascii_alphabetic() => {
+            let u = n.to_ascii_uppercase();
+            (n.to_string(), format!("Key{u}"), u.as_bytes()[0] as u32, "")
+        }
+        _ => return,
+    };
+    let printable_text = if mods & 0b11 == 0 { text } else { "" };
+    let kind = if printable_text.is_empty() { "rawKeyDown" } else { "keyDown" };
+    key_event(kind, &key, &code, vk, mods, printable_text);
+    key_event("keyUp", &key, &code, vk, mods, "");
+}
+
+#[cfg(feature = "harness")]
+pub fn type_text(s: &str) {
+    for c in s.chars() {
+        let (key, code, vk, mods): (String, String, u32, u32) = if c.is_ascii_alphabetic() {
+            let u = c.to_ascii_uppercase();
+            (c.to_string(), format!("Key{u}"), u as u32, if c.is_ascii_uppercase() { 8 } else { 0 })
+        } else if c.is_ascii_digit() {
+            (c.to_string(), format!("Digit{c}"), c as u32, 0)
+        } else if c == ' ' {
+            (" ".into(), "Space".into(), 32, 0)
+        } else {
+            (c.to_string(), String::new(), 0, 0)
+        };
+        let text = c.to_string();
+        key_event("keyDown", &key, &code, vk, mods, &text);
+        key_event("keyUp", &key, &code, vk, mods, "");
+    }
+}
+
+/// Goes through xterm.js's own paste handling (bracketed paste, newline normalization).
+#[cfg(feature = "harness")]
+pub fn paste_text(s: &str) {
+    post(&serde_json::json!({ "t": "paste", "text": s }).to_string());
+}
+
+pub fn notify_exit() {
+    post("{\"t\":\"exit\"}");
+}
+
+pub unsafe fn resize(hwnd: HWND) {
+    CONTROLLER.with(|c| {
+        if let Some(ctrl) = c.borrow().as_ref() {
+            let mut rc = RECT::default();
+            let _ = unsafe { GetClientRect(hwnd, &mut rc) };
+            let _ = unsafe { ctrl.SetBounds(rc) };
+        }
+    });
+}
+
+pub unsafe fn focus() {
+    CONTROLLER.with(|c| {
+        if let Some(ctrl) = c.borrow().as_ref() {
+            let r = unsafe { ctrl.MoveFocus(COREWEBVIEW2_MOVE_FOCUS_REASON_PROGRAMMATIC) };
+            log(&format!("webview: MoveFocus(programmatic) -> {:?}", r.is_ok()));
+        }
+    });
+    post("{\"t\":\"focus\"}");
+}
+
+unsafe extern "system" fn enum_cb(h: HWND, _l: LPARAM) -> BOOL {
+    let mut class = [0u16; 64];
+    let n = unsafe { GetClassNameW(h, &mut class) } as usize;
+    let ex = unsafe { GetWindowLongPtrW(h, GWL_EXSTYLE) } as u32;
+    log(&format!(
+        "child window 0x{:X} class='{}' exstyle=0x{:X}",
+        h.0 as usize,
+        String::from_utf16_lossy(&class[..n]),
+        ex
+    ));
+    BOOL(1)
+}
+
+pub unsafe fn log_children(hwnd: HWND) {
+    log("--- child window tree under the overlay ---");
+    let _ = unsafe { EnumChildWindows(Some(hwnd), Some(enum_cb), LPARAM(0)) };
+}
