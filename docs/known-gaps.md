@@ -18,7 +18,9 @@ Everything here is either untested or not implemented. Verified behaviour is in 
 | User names with spaces or non-ASCII characters | a test user profile |
 | Sleep/resume, display unplug/replug while running, remote desktop | by hand |
 | Long, busy sessions at low opacity over a game (readability) | judgement over real use |
-| Real-prompt suite (`-Suite real`) after the latest changes | run when both CLIs have usage available |
+| Whether Claude Code or Codex ring the terminal bell (the census does not count BEL; they sent no OSC 9 / OSC 777 in the real run) | count BEL in the census, or configure the CLIs' own notification setting (not done: it would edit their configuration) |
+| The permission prompt about pasting clipboard text seen once during a policy run | its source was not identified; no WebView2 permission request was logged and a search found no documented Windows prompt of that kind. If it recurs, note the exact wording and the step |
+| Clicking an OSC 8 link, the ghost tray menu item, the tray notification for attention requests, keyboard scrollback inside the CLIs | by hand |
 
 ## Not implemented
 
@@ -26,8 +28,8 @@ Everything here is either untested or not implemented. Verified behaviour is in 
 - Live config reload (config is read at start); `WM_DPICHANGED` handling; WebView2 crash recovery; shell-exit restart.
 - A friendly error when the shell cannot start (it is logged only).
 - Autostart with Windows; the second launch bringing the first to the front (it just exits).
-- OSC 8 link click policy and OSC 52 clipboard policy (neither is acted on nor blocked deliberately).
-- Mouse selection extras (copy on select, right-click menu) and keyboard scrollback keys.
+- Opening OSC 8 links: deliberately **not** done (clicks are ignored); copy the link text instead. OSC 52 is refused unless `osc52` is `write`.
+- A right-click context menu (right-click copies / pastes only when `right_click` is `paste`), kitty-style OSC 99 notifications, and per-game position profiles.
 - Background-only opacity (text stays crisp): needs composition hosting of the web view.
 - Installer, code signing, app icon and version resource, AppUserModelID (the notification header reads "hudshell.exe").
 - WebGL renderer (DOM renderer only), ligatures, bundled fonts, bundled ConPTY (`conpty.dll`/OpenConsole).

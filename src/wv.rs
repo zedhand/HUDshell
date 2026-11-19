@@ -9,13 +9,15 @@ use base64::Engine;
 use webview2_com::Microsoft::Web::WebView2::Win32::{
     CreateCoreWebView2EnvironmentWithOptions, ICoreWebView2, ICoreWebView2Controller,
     ICoreWebView2Settings3, ICoreWebView2Settings5, ICoreWebView2Settings6,
-    COREWEBVIEW2_MOVE_FOCUS_REASON_PROGRAMMATIC, COREWEBVIEW2_WEB_RESOURCE_CONTEXT_ALL,
+    COREWEBVIEW2_MOVE_FOCUS_REASON_PROGRAMMATIC, COREWEBVIEW2_PERMISSION_KIND,
+    COREWEBVIEW2_PERMISSION_STATE_DENY, COREWEBVIEW2_WEB_RESOURCE_CONTEXT_ALL,
 };
 use webview2_com::{
     take_pwstr, AddScriptToExecuteOnDocumentCreatedCompletedHandler,
     CreateCoreWebView2ControllerCompletedHandler,
     CreateCoreWebView2EnvironmentCompletedHandler,
     FocusChangedEventHandler, NavigationStartingEventHandler, NewWindowRequestedEventHandler,
+    PermissionRequestedEventHandler,
     WebMessageReceivedEventHandler, WebResourceRequestedEventHandler,
 };
 use windows::Win32::UI::Shell::SHCreateMemStream;
@@ -227,6 +229,23 @@ pub unsafe fn init(hwnd: HWND) -> Result<(), String> {
                 )
                 .map_err(|e| e.to_string())?;
 
+            // The page never needs a browser permission (the host does clipboard reads and writes), so
+            // every request is denied without showing WebView2's own prompt over the user's game.
+            webview
+                .add_PermissionRequested(
+                    &PermissionRequestedEventHandler::create(Box::new(|_, args| {
+                        if let Some(args) = args {
+                            let mut kind = COREWEBVIEW2_PERMISSION_KIND::default();
+                            let _ = unsafe { args.PermissionKind(&mut kind) };
+                            let _ = unsafe { args.SetState(COREWEBVIEW2_PERMISSION_STATE_DENY) };
+                            log(&format!("bridge: browser permission request denied (kind {})", kind.0));
+                        }
+                        Ok(())
+                    })),
+                    &mut token,
+                )
+                .map_err(|e| e.to_string())?;
+
             // Serve the UI that is compiled into this executable, from memory, for the private
             // host name. Unknown paths get a 404; nothing is read from disk or the network.
             let env_res = env.clone();
@@ -335,6 +354,10 @@ fn handle_term_message(hwnd: isize, m: &str) {
         Some("settings") => crate::on_settings_message(hwnd, &v),
         Some("applied") => log(&format!("terminal applied settings: {v}")),
         Some("copied") => log(&format!("copy to clipboard: {v}")),
+        Some("rightpaste") => crate::on_right_paste(),
+        Some("attention") => crate::on_attention(hwnd, v["kind"].as_str().unwrap_or("?"), v["text"].as_str().unwrap_or("")),
+        Some("osc52") => crate::on_osc52(v["b64"].as_str().unwrap_or("")),
+        Some("note") => log(&format!("page: {v}")),
         Some("resize") => {
             let cols = v["cols"].as_i64().unwrap_or(0);
             let rows = v["rows"].as_i64().unwrap_or(0);
@@ -350,8 +373,8 @@ fn handle_term_message(hwnd: isize, m: &str) {
         #[cfg(feature = "harness")]
         Some("dump") => {
             log(&format!(
-                "terminal dump: {}x{} buffer={} cursor={} unicode={} modes={}",
-                v["cols"], v["rows"], v["buf"], v["cursor"], v["unicode"], v["modes"]
+                "terminal dump: {}x{} buffer={} cursor={} unicode={} view={} cue={} modes={}",
+                v["cols"], v["rows"], v["buf"], v["cursor"], v["unicode"], v["view"], v["cue"], v["modes"]
             ));
             if let Some(lines) = v["lines"].as_array() {
                 if let Ok(mut d) = LAST_DUMP.lock() {

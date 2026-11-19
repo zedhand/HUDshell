@@ -21,7 +21,11 @@
   #settings .k { opacity: .6; }
   #settings .c { cursor: pointer; }
   #settings .c:hover { text-decoration: underline; }
-  #settings .on { font-weight: 700; }</style>
+  #settings .on { font-weight: 700; }
+  /* Attention cue: a short border pulse when a program asks for attention while HUDshell is passive. */
+  body.cue::after { content: ''; position: fixed; inset: 0; z-index: 20; pointer-events: none;
+                    border: 3px solid var(--fg); box-sizing: border-box; animation: cuepulse 1s ease-in-out 3; }
+  @keyframes cuepulse { 0%, 100% { opacity: 0; } 50% { opacity: .9; } }</style>
 <link rel="stylesheet" href="xterm.css">
 </head>
 <body>

@@ -21,6 +21,8 @@ pub struct Hotkeys {
     pub opacity_down: String,
     pub settings: String,
     pub quit: String,
+    /// Ghost preset: click-through plus a dimmed window in one key; press again to restore.
+    pub ghost: String,
 }
 
 impl Default for Hotkeys {
@@ -34,6 +36,7 @@ impl Default for Hotkeys {
             opacity_down: "Ctrl+Alt+[".into(),
             settings: "Ctrl+Alt+S".into(),
             quit: "Ctrl+Alt+Q".into(),
+            ghost: "Ctrl+Alt+X".into(),
         }
     }
 }
@@ -75,6 +78,19 @@ pub struct Config {
     pub scrollback: u32,
     pub unicode: String,
     pub shift_enter: String,
+    /// Opacity (percent, 20-100) used by the ghost preset. Never lowers it below the 20% floor.
+    pub ghost_opacity: u32,
+    /// Copy the selection to the clipboard when the mouse button is released (off by default).
+    pub copy_on_select: bool,
+    /// "off" or "paste": right-click copies the selection, or pastes when nothing is selected.
+    pub right_click: String,
+    /// "off" or "write": whether programs may SET the clipboard with OSC 52. Reads are never answered.
+    pub osc52: String,
+    /// Pulse the window border when a program rings the bell or sends an OSC 9 / OSC 777 notification
+    /// while HUDshell does not hold the keyboard.
+    pub attention_cue: bool,
+    /// Also show a tray notification for such requests while the window is hidden.
+    pub attention_toast: bool,
 }
 
 impl Default for Config {
@@ -93,6 +109,12 @@ impl Default for Config {
             scrollback: 2000,
             unicode: "11".into(),
             shift_enter: "kitty".into(),
+            ghost_opacity: 40,
+            copy_on_select: false,
+            right_click: "off".into(),
+            osc52: "off".into(),
+            attention_cue: true,
+            attention_toast: true,
         }
     }
 }
@@ -157,6 +179,13 @@ fn validate(cfg: &mut Config) {
     if !matches!(cfg.shift_enter.as_str(), "none" | "esc-cr" | "kitty") {
         cfg.shift_enter = "kitty".into();
     }
+    cfg.ghost_opacity = cfg.ghost_opacity.clamp(MIN_OPACITY, 100);
+    if !matches!(cfg.right_click.as_str(), "off" | "paste") {
+        cfg.right_click = "off".into();
+    }
+    if !matches!(cfg.osc52.as_str(), "off" | "write") {
+        cfg.osc52 = "off".into();
+    }
     if let Some(cc) = &cfg.custom_colours {
         let ok = [&cc.background, &cc.foreground, &cc.cursor, &cc.selection]
             .iter()
@@ -186,6 +215,7 @@ fn validate(cfg: &mut Config) {
         ("opacity_down", &mut cfg.hotkeys.opacity_down, def.opacity_down),
         ("settings", &mut cfg.hotkeys.settings, def.settings),
         ("quit", &mut cfg.hotkeys.quit, def.quit),
+        ("ghost", &mut cfg.hotkeys.ghost, def.ghost),
     ] {
         if parse_hotkey(hk).is_none() {
             crate::notice(&format!("Hotkey '{hk}' for {name} is not valid; using {fallback}"));
@@ -322,7 +352,7 @@ mod tests {
     #[test]
     fn default_hotkeys_are_all_valid_and_distinct() {
         let h = Hotkeys::default();
-        let all = [&h.click_through, &h.grab_focus, &h.show_hide, &h.cycle_colours, &h.opacity_up, &h.opacity_down, &h.settings, &h.quit];
+        let all = [&h.click_through, &h.grab_focus, &h.show_hide, &h.cycle_colours, &h.opacity_up, &h.opacity_down, &h.settings, &h.quit, &h.ghost];
         let mut seen = std::collections::HashSet::new();
         for s in all {
             let parsed = parse_hotkey(s).unwrap_or_else(|| panic!("default hotkey {s} must parse"));
@@ -355,6 +385,25 @@ mod tests {
         assert_eq!(c.theme, "midnight");
         let g = c.window.unwrap();
         assert_eq!((g.w, g.h), (240, 120));
+    }
+
+    #[test]
+    fn new_policy_settings_are_validated() {
+        let mut c = Config { ghost_opacity: 1, right_click: "x".into(), osc52: "read".into(), ..Config::default() };
+        validate(&mut c);
+        assert_eq!(c.ghost_opacity, MIN_OPACITY);
+        assert_eq!((c.right_click.as_str(), c.osc52.as_str()), ("off", "off"));
+        c.ghost_opacity = 900;
+        c.right_click = "paste".into();
+        c.osc52 = "write".into();
+        validate(&mut c);
+        assert_eq!(c.ghost_opacity, 100);
+        assert_eq!((c.right_click.as_str(), c.osc52.as_str()), ("paste", "write"));
+        let d = Config::default();
+        assert!(!d.copy_on_select, "copy-on-select is opt-in");
+        assert_eq!((d.right_click.as_str(), d.osc52.as_str()), ("off", "off"), "clipboard policies are opt-in");
+        assert!(d.attention_cue && d.attention_toast);
+        assert_eq!(d.ghost_opacity, 40);
     }
 
     #[test]

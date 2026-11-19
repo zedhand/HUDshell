@@ -1,7 +1,7 @@
 <#
 HUDshell full test runner (Windows PowerShell 5.1 or PowerShell 7).
 
-  scripts\test-all.ps1 [-Suite static,keys,width,hideshow,clickfocus,clipboard,autotest,ui,release,config,soak,real | all]
+  scripts\test-all.ps1 [-Suite static,keys,width,hideshow,clickfocus,clipboard,autotest,ui,scrollback,ghost,attention,policy,release,config,soak,real | all]
                        [-Sandbox <folder both Claude Code and Codex already trust>] [-SoakSeconds 300]
 
 What it touches (read before running):
@@ -33,7 +33,7 @@ New-Item -ItemType Directory -Force $scratch | Out-Null
 $env:HUDSHELL_TEST_DIR = $scratch
 if ($Sandbox) { $env:HUDSHELL_SANDBOX = $Sandbox } else { $env:HUDSHELL_SANDBOX = $scratch }
 $Suite = @($Suite | ForEach-Object { $_ -split ',' } | Where-Object { $_ })
-$want = if ($Suite -contains 'all') { @('static', 'keys', 'width', 'hideshow', 'clickfocus', 'clipboard', 'autotest', 'ui', 'release', 'config', 'soak') + $(if ($Sandbox) { 'real' } else { @() }) } else { $Suite }
+$want = if ($Suite -contains 'all') { @('static', 'keys', 'width', 'hideshow', 'clickfocus', 'clipboard', 'autotest', 'ui', 'scrollback', 'ghost', 'attention', 'policy', 'release', 'config', 'soak') + $(if ($Sandbox) { 'real' } else { @() }) } else { $Suite }
 
 $script:R = New-Object System.Collections.Generic.List[object]
 function Check([string]$suite, [string]$name, [bool]$ok, [string]$detail = '') {
@@ -260,6 +260,10 @@ function Suite-Ui {
     Press $LB 12; Check 'ui' 'cannot go below the 20% floor' ([GT]::Alpha($h) -eq 51) ([GT]::Alpha($h))
     Press $RB 10; Check 'ui' 'back to 100%' ([GT]::Alpha($h) -eq 255) ([GT]::Alpha($h))
     Check 'ui' 'opacity changes never took focus' (-not [GT]::IsFg($h))
+    [GT]::Hotkey(0x58); Start-Sleep -Milliseconds 500
+    Check 'ui' 'Ctrl+Alt+X (ghost) dims to 40%' ([GT]::Alpha($h) -eq 102) ([GT]::Alpha($h))
+    [GT]::Hotkey(0x58); Start-Sleep -Milliseconds 500
+    Check 'ui' 'a second Ctrl+Alt+X restores 100% and never took focus' (([GT]::Alpha($h) -eq 255) -and -not [GT]::IsFg($h)) ([GT]::Alpha($h))
     [GT]::Hotkey(0x53); Start-Sleep -Milliseconds 1500
     Check 'ui' 'Ctrl+Alt+S opens the panel and takes keyboard focus' ([GT]::IsFg($h))
     [GT]::Key(0x25); [GT]::Key(0x25); Start-Sleep -Milliseconds 700
@@ -297,10 +301,15 @@ function Suite-Ui {
   }
 }
 
-function Backup-Config { $script:hadCfg = Test-Path -LiteralPath $cfgPath; if ($script:hadCfg) { $script:cfgBak = Join-Path $scratch 'config.backup.json'; Copy-Item $cfgPath $script:cfgBak -Force; $script:cfgHash = (Get-FileHash $cfgPath).Hash } }
+function Backup-Config { $script:cfgExtras = @(Get-ChildItem $cfgDir -Force -ErrorAction SilentlyContinue | Where-Object { $_.Name -like 'config.json.*' } | ForEach-Object { $_.Name }); $script:hadCfg = Test-Path -LiteralPath $cfgPath; if ($script:hadCfg) { $script:cfgBak = Join-Path $scratch 'config.backup.json'; Copy-Item $cfgPath $script:cfgBak -Force; $script:cfgHash = (Get-FileHash $cfgPath).Hash } }
 function Restore-Config {
   Stop-HUDshell
-  if ($script:hadCfg) { Copy-Item $script:cfgBak $cfgPath -Force } else { foreach ($f in Get-ChildItem $cfgDir -Force -ErrorAction SilentlyContinue) { if ($f.Name -like 'config.json*') { Remove-Item -LiteralPath $f.FullName -Force } } }
+  if ($script:hadCfg) {
+    # Put the user's file back, and remove what the tests themselves left beside it (.bad-N, .tmp) -
+    # but never a file that was already there before the tests started.
+    foreach ($f in Get-ChildItem $cfgDir -Force -ErrorAction SilentlyContinue) { if ($f.Name -like 'config.json.*' -and $script:cfgExtras -notcontains $f.Name) { Remove-Item -LiteralPath $f.FullName -Force } }
+    Copy-Item $script:cfgBak $cfgPath -Force
+  } else { foreach ($f in Get-ChildItem $cfgDir -Force -ErrorAction SilentlyContinue) { if ($f.Name -like 'config.json*') { Remove-Item -LiteralPath $f.FullName -Force } } }
 }
 function Start-Rel([string]$exe = $rel) { $p = Start-Process $exe -PassThru; Start-Sleep 7; return $p }
 function Quit-Rel($p) { [GT]::Hotkey(0x51); $null = $p.WaitForExit(8000); if (-not $p.HasExited) { Stop-Process -Id $p.Id -Force } }
@@ -408,8 +417,144 @@ function Suite-Config {
     [IO.File]::WriteAllText($cfgPath, '{"opacity": 40}', (New-Object System.Text.UTF8Encoding($true)))
     $p = Start-Rel; $h = [GT]::Find([uint32]$p.Id)
     Check 'config' 'UTF-8 BOM config is accepted (opacity 40 applied)' (([GT]::Alpha($h) -eq 102) -and -not (Test-Path (Join-Path $cfgDir 'config.json.bad-1'))) ([GT]::Alpha($h))
-    Quit-Rel $p  } finally { Restore-Config }
+    Quit-Rel $p
+    # 7. Ghost opacity is clamped, and the dimmed value is never written to the settings file.
+    Fresh
+    [IO.File]::WriteAllText($cfgPath, '{"opacity": 80, "ghost_opacity": 5}')
+    $p = Start-Rel; $h = [GT]::Find([uint32]$p.Id)
+    [GT]::Hotkey(0x58); Start-Sleep -Milliseconds 600
+    Check 'config' 'ghost_opacity 5 is raised to the 20% floor' ([GT]::Alpha($h) -eq 51) ([GT]::Alpha($h))
+    [GT]::Hotkey(0x58); Start-Sleep -Milliseconds 600
+    Check 'config' 'leaving ghost restores the configured 80%' ([GT]::Alpha($h) -eq 204) ([GT]::Alpha($h))
+    [GT]::Hotkey(0x58); Start-Sleep -Milliseconds 600
+    [GT]::Hotkey(0x51); $null = $p.WaitForExit(8000)
+    Check 'config' 'quitting while ghosted does not save the dimmed opacity' ((Get-Content -LiteralPath $cfgPath -Raw) -match '"opacity":\s*80\b')
+    if (-not $p.HasExited) { Stop-Process -Id $p.Id -Force }
+    # 8. Unknown values for the new options fall back to the safe defaults.
+    Fresh
+    [IO.File]::WriteAllText($cfgPath, '{"right_click": "banana", "osc52": "read", "copy_on_select": true}')
+    $p = Start-Rel
+    Check 'config' 'bad right_click / osc52 values: app starts and no .bad file is made' ((-not $p.HasExited) -and -not (Test-Path (Join-Path $cfgDir 'config.json.bad-1')))
+    Quit-Rel $p
+    $saved = Get-Content -LiteralPath $cfgPath -Raw
+    Check 'config' 'bad values fell back to right_click=off, osc52=off; valid copy_on_select kept' (($saved -match '"right_click":\s*"off"') -and ($saved -match '"osc52":\s*"off"') -and ($saved -match '"copy_on_select":\s*true'))
+  } finally { Restore-Config }
   if ($script:hadCfg) { Check 'config' 'your config.json was restored byte-for-byte' ((Get-FileHash $cfgPath).Hash -eq $script:cfgHash) } else { Check 'config' 'test config files removed (none existed before)' (@(Get-ChildItem $cfgDir -Force -ErrorAction SilentlyContinue | Where-Object { $_.Name -like 'config.json*' }).Count -eq 0) }
+}
+
+# View position [top, bottom] from the dump header that follows "DUMP label=<label>".
+function Get-View($run, [string]$label) {
+  $i = -1
+  for ($k = 0; $k -lt $run.Count; $k++) { if ($run[$k] -match ("DUMP label=" + [regex]::Escape($label) + '(\s|$)')) { $i = $k; break } }
+  if ($i -lt 0) { return $null }
+  for ($k = $i + 1; $k -lt $run.Count; $k++) { if ($run[$k] -match 'terminal dump:.* view=\[(\d+),(\d+)\]') { return @([int]$Matches[1], [int]$Matches[2]) } }
+  return $null
+}
+function Get-DumpField($run, [string]$label, [string]$field) {
+  $i = -1
+  for ($k = 0; $k -lt $run.Count; $k++) { if ($run[$k] -match ("DUMP label=" + [regex]::Escape($label) + '(\s|$)')) { $i = $k; break } }
+  if ($i -lt 0) { return $null }
+  for ($k = $i + 1; $k -lt $run.Count; $k++) { if ($run[$k] -match ('terminal dump:.* ' + $field + '=(\S+)')) { return $Matches[1] } }
+  return $null
+}
+# STATE lines logged by the ghost scenario, keyed by label.
+function Get-States($run) {
+  $h = @{}
+  foreach ($l in $run) { if ($l -match 'STATE label=(\S+) (.*)$') { $o = @{}; foreach ($kv in ($Matches[2] -split ' ')) { $p = $kv -split '=', 2; if ($p.Count -eq 2) { $o[$p[0]] = $p[1] } }; $h[$Matches[1]] = $o } }
+  return $h
+}
+
+function Suite-Scrollback {
+  Write-Host "=== scrollback: keyboard scrolling of the history (no OS input) ==="
+  $run = Run-Scenario @('--term', '--scrolltest', '--delay', '2') 60000
+  $b = Get-View $run 'sb-bottom'
+  Check 'scrollback' '200 lines produced scrollback and the view starts at the bottom' ($b -and $b[1] -gt 100 -and $b[0] -eq $b[1]) ("view " + ($b -join ','))
+  $base = if ($b) { $b[1] } else { 0 }
+  $v = Get-View $run 'sb-pageup';        Check 'scrollback' 'Shift+PageUp scrolls up by a page' ($v -and $v[0] -lt $base -and $v[0] -ge $base - 40) ("view " + ($v -join ','))
+  $v = Get-View $run 'sb-top';           Check 'scrollback' 'Ctrl+Shift+Home jumps to the top' ($v -and $v[0] -eq 0) ("view " + ($v -join ','))
+  $v = Get-View $run 'sb-line-down';     Check 'scrollback' 'Ctrl+Shift+Down moves one line' ($v -and $v[0] -eq 1) ("view " + ($v -join ','))
+  $v = Get-View $run 'sb-pagedown';      Check 'scrollback' 'Shift+PageDown scrolls down by a page' ($v -and $v[0] -gt 10 -and $v[0] -lt $base) ("view " + ($v -join ','))
+  $v = Get-View $run 'sb-end';           Check 'scrollback' 'Ctrl+Shift+End jumps back to the bottom' ($v -and $v[0] -eq $base) ("view " + ($v -join ','))
+  $v = Get-View $run 'sb-line-up';       Check 'scrollback' 'Ctrl+Shift+Up moves one line up' ($v -and $v[0] -eq $base - 1) ("view " + ($v -join ','))
+  $v = Get-View $run 'sb-plain-pageup-does-not-scroll'; Check 'scrollback' 'a plain PageUp goes to the shell (typing returns the view to the bottom)' ($v -and $v[0] -eq $base) ("view " + ($v -join ','))
+}
+
+function Suite-Ghost {
+  Write-Host "=== ghost: click-through + dim preset (host functions, no OS input) ==="
+  $run = Run-Scenario @('--term', '--ghosttest', '--delay', '2') 60000
+  $s = Get-States $run
+  function St($k) { if ($s.ContainsKey($k)) { $s[$k] } else { @{} } }
+  Check 'ghost' 'default ghost hotkey Ctrl+Alt+X registered' (@($run | Where-Object { $_ -match 'hotkey Ctrl\+Alt\+X \(ghost .*registered' }).Count -eq 1)
+  $a = St 'start';      Check 'ghost' 'starts opaque, click-through on, not ghosted' ($a.pct -eq '100' -and $a.click_through -eq 'true' -and $a.ghost -eq 'false')
+  $a = St 'ghost-on';   Check 'ghost' 'ghost dims to 40% and keeps click-through on' ($a.pct -eq '40' -and $a.click_through -eq 'true' -and $a.ghost -eq 'true') ("pct=" + $a.pct)
+  Check 'ghost' 'ghost never changes the saved opacity' ($a.cfg_opacity -eq '100')
+  $a = St 'ghost-off';  Check 'ghost' 'second press restores 100%' ($a.pct -eq '100' -and $a.ghost -eq 'false') ("pct=" + $a.pct)
+  $a = St 'ghost-from-70'; Check 'ghost' 'from 70% it dims to 40% and the saved opacity stays 70' ($a.pct -eq '40' -and $a.cfg_opacity -eq '70')
+  $a = St 'restored-70';   Check 'ghost' '... and restores exactly 70%' ($a.pct -eq '70')
+  $a = St 'ghost-from-30-never-brightens'; Check 'ghost' 'when already dimmer than the ghost level (30%) it never brightens' ($a.pct -eq '30' -and $a.ghost -eq 'true') ("pct=" + $a.pct)
+  $a = St 'restored-30';   Check 'ghost' '... and restores 30%' ($a.pct -eq '30')
+  $a = St 'interactive';   Check 'ghost' 'precondition: click-through can be switched off' ($a.click_through -eq 'false')
+  $a = St 'ghost-forces-click-through'; Check 'ghost' 'ghost forces click-through on even when it was off' ($a.click_through -eq 'true' -and $a.pct -eq '40')
+  $a = St 'interactive-restored';       Check 'ghost' 'leaving ghost restores the previous (interactive) pointer mode and opacity' ($a.click_through -eq 'false' -and $a.pct -eq '100')
+  $a = St 'ct-toggle-leaves-ghost';     Check 'ghost' 'toggling click-through while ghosted ends ghost and applies the toggle' ($a.ghost -eq 'false' -and $a.pct -eq '100' -and $a.click_through -eq 'false')
+  $a = St 'opacity-change-leaves-ghost'; Check 'ghost' 'changing opacity while ghosted ends ghost, applies the new value and restores pointer mode' ($a.ghost -eq 'false' -and $a.pct -eq '60' -and $a.click_through -eq 'false')
+}
+
+function Suite-Attention {
+  Write-Host "=== attention: bell / OSC 9 / OSC 777 cue while passive (no OS input) ==="
+  $run = Run-Scenario @('--term', '--attention', '--delay', '2') 60000
+  $att = @($run | Where-Object { $_ -match 'attention:' } | ForEach-Object { Strip $_ })
+  Check 'attention' 'bell while passive pulses the window' ((($att -join '|') -match 'attention: bell -> border cue') -and (Get-DumpField $run 'cue-after-bell' 'cue') -eq 'true')
+  Check 'attention' 'a second request within 3 s is rate-limited' (($att -join '|') -match 'attention: osc9 ignored \(rate limit\)')
+  Check 'attention' 'the pulse ends by itself' ((Get-DumpField $run 'cue-faded' 'cue') -eq 'false')
+  Check 'attention' 'OSC 9 notification pulses the window' ((($att -join '|') -match 'attention: osc9 -> border cue') -and (Get-DumpField $run 'cue-after-osc9' 'cue') -eq 'true')
+  Check 'attention' 'OSC 9;4 progress and OSC 9;9 working-directory are not notifications' (((Get-DumpField $run 'no-cue-for-progress-and-cwd' 'cue') -eq 'false') -and @($att | Where-Object { $_ -match 'osc9' }).Count -eq 2) ("osc9 events " + @($att | Where-Object { $_ -match 'osc9' }).Count)
+  Check 'attention' 'OSC 777;notify pulses the window' ((($att -join '|') -match 'attention: osc777 -> border cue') -and (Get-DumpField $run 'cue-after-osc777' 'cue') -eq 'true')
+  Check 'attention' 'no cue while HUDshell holds the keyboard (simulated flag)' ((($att -join '|') -match 'while HUDshell has the keyboard: no cue') -and (Get-DumpField $run 'no-cue-while-focused' 'cue') -eq 'false')
+  Check 'attention' 'while hidden a tray notification is requested instead' (($att -join '|') -match 'while hidden -> tray notification')
+  Check 'attention' 'notification text never reaches the log' (@($run | Where-Object { $_ -match 'attention:|tray notification' -and $_ -match 'build finished|Body text|rate-limited$' }).Count -eq 0)
+  $run2 = Run-Scenario @('--term', '--attention', '--no-cue', '--delay', '2') 60000
+  Check 'attention' 'attention_cue=false suppresses the pulse' ((@($run2 | Where-Object { $_ -match 'cue disabled in config' }).Count -ge 1) -and (Get-DumpField $run2 'cue-after-bell' 'cue') -eq 'false')
+}
+
+function Suite-Policy {
+  Write-Host "=== policy: OSC 52, OSC 8, copy-on-select, right-click (DevTools mouse events; temporarily uses the clipboard) ==="
+  $had = $null
+  try { $had = Get-Clipboard -Raw -ErrorAction Stop } catch { $had = $null }
+  try {
+    $sentinel = 'echo RCLICK-PASTE-OK'
+    function ClipNow { try { (Get-Clipboard -Raw) } catch { '' } }
+    # a) defaults: everything opt-in is off
+    Set-Clipboard -Value $sentinel
+    $run = Run-Scenario @('--term', '--policytest', '--delay', '2') 60000
+    $applied = @($run | Where-Object { $_ -match 'terminal applied settings' }) -join ' '
+    Check 'policy' 'defaults reported by the page: copyOnSelect off, rightClick off, osc52 off, link handler installed' ($applied -match '"copyOnSelect":false' -and $applied -match '"rightClick":"off"' -and $applied -match '"osc52":"off"' -and $applied -match '"linkHandler":true') ''
+    Check 'policy' 'OSC 52 from a program is refused by default (clipboard untouched)' (((ClipNow).Trim() -eq $sentinel) -and @($run | Where-Object { $_ -match 'osc52-refused' }).Count -ge 1) ''
+    Check 'policy' 'no OSC 52 write was logged' (@($run | Where-Object { $_ -match 'OSC 52 clipboard write' }).Count -eq 0)
+    Check 'policy' 'OSC 8 link text is drawn (but never opened)' ((Dump-Has $run 'policy-screen' 'a link') -and @($run | Where-Object { $_ -match 'new window blocked|navigation blocked' }).Count -eq 0)
+    Check 'policy' 'right-click with right_click=off does not paste' ((Dump-Count $run 'after-right-click-no-selection' 'RCLICK-PASTE-OK') -eq 0)
+    Check 'policy' 'copy on select is off by default (a drag leaves the clipboard alone)' ((ClipNow).Trim() -eq $sentinel)
+    # b) OSC 52 write allowed; reads never answered
+    Set-Clipboard -Value $sentinel
+    $run = Run-Scenario @('--term', '--policytest', '--osc52', 'write', '--log-input', '--delay', '2') 60000
+    Check 'policy' 'osc52=write: a program can set the clipboard (hello)' (((ClipNow).Trim() -eq 'hello') -and @($run | Where-Object { $_ -match 'OSC 52 clipboard write from a program' }).Count -eq 1) ("clipboard '" + (ClipNow).Trim() + "'")
+    Check 'policy' 'osc52=write: the read query (OSC 52;c;?) is not answered' (@($run | Where-Object { $_ -match 'PTY-IN' -and $_ -match ']52;' }).Count -eq 0)
+    # c) copy on select
+    Set-Clipboard -Value $sentinel
+    $run = Run-Scenario @('--term', '--policytest', '--copy-on-select', '--delay', '2') 60000
+    $now = (ClipNow).Trim()
+    Check 'policy' 'copy-on-select: releasing a drag selection copies it' ($now.Length -gt 0 -and $now -ne $sentinel -and $now -ne 'hello') ("clipboard " + $now.Length + " chars")
+    # d) right-click paste / copy
+    Set-Clipboard -Value $sentinel
+    $run = Run-Scenario @('--term', '--policytest', '--right-click', 'paste', '--delay', '2') 60000
+    Check 'policy' 'right_click=paste: right-click with no selection pastes the clipboard' ((Dump-Count $run 'after-right-click-no-selection' 'RCLICK-PASTE-OK') -ge 1) ("occurrences " + (Dump-Count $run 'after-right-click-no-selection' 'RCLICK-PASTE-OK'))
+    $took = @($run | Where-Object { $_ -match 'right-click paste: .*clipboard read took (\d+) ms' } | ForEach-Object { [int]$Matches[1] })
+    Check 'policy' 'right_click=paste: the host clipboard read was quick (no prompt or stall in the way)' ($took.Count -ge 1 -and $took[0] -lt 1500) ("took " + ($took -join ',') + " ms")
+    $now = (ClipNow).Trim()
+    Check 'policy' 'right_click=paste: right-click with a selection copies it instead' ($now.Length -gt 0 -and $now -ne $sentinel) ("clipboard " + $now.Length + " chars")
+  } finally {
+    if ($null -ne $had) { Set-Clipboard -Value $had } else { Set-Clipboard -Value ' ' }
+  }
 }
 
 function Tree-Memory([int]$rootPid) {
@@ -451,7 +596,7 @@ function Suite-Real {
   try { $run = Run-Scenario @('--term', '--autotest', '--real', '--no-grab', '--log-input', '--delay', '3') 600000 } finally { [GT]::RestoreCursor() }
   foreach ($l in $run | Where-Object { $_ -match 'ABORT|abort-unless-prompt' }) { Write-Host "  $(Strip $l)" }
   Check 'real' 'run finished and reached the end' (@($run | Where-Object { $_ -match 'AUTOTEST: finished' }).Count -ge 1)
-  Check 'real' 'never aborted because a prompt was missing' (@($run | Where-Object { $_ -match 'ABORT' }).Count -eq 0)
+  Check 'real' 'never aborted because a prompt was missing' (@($run | Where-Object { $_ -cmatch 'ABORT:' }).Count -eq 0)
   Write-Host '  (screen dumps for each step are in the log; review them for rendering)'
 }
 
@@ -465,6 +610,10 @@ foreach ($s in $want) {
     'clipboard' { Suite-Clipboard }
     'autotest' { Suite-Autotest }
     'ui' { Suite-Ui }
+    'scrollback' { Suite-Scrollback }
+    'ghost' { Suite-Ghost }
+    'attention' { Suite-Attention }
+    'policy' { Suite-Policy }
     'release' { Suite-Release }
     'config' { Suite-Config }
     'soak' { Suite-Soak }

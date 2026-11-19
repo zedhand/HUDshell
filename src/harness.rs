@@ -331,6 +331,109 @@ const CLIPBOARD: &[(u64, &str)] = &[
     (8500, "quit"),
 ];
 
+/// `--scrolltest`: keyboard scrollback. 200 numbered lines, then Shift+PageUp / Ctrl+Shift+Home / Down /
+/// Shift+PageDown / End / Up; each step dumps the viewport position `view=[top, bottom]`.
+const SCROLLBACK: &[(u64, &str)] = &[
+    (1500, "cdp-focus"),
+    (2000, "resize:900,520"),
+    (3000, "w:1..200 | ForEach-Object { 'sb-line-' + $_ }\r"),
+    (6000, "dump:sb-bottom"),
+    (6500, "key:Shift+PageUp"),
+    (7000, "dump:sb-pageup"),
+    (7500, "key:Ctrl+Shift+Home"),
+    (8000, "dump:sb-top"),
+    (8500, "key:Ctrl+Shift+Down"),
+    (9000, "dump:sb-line-down"),
+    (9500, "key:Shift+PageDown"),
+    (10000, "dump:sb-pagedown"),
+    (10500, "key:Ctrl+Shift+End"),
+    (11000, "dump:sb-end"),
+    (11500, "key:Ctrl+Shift+Up"),
+    (12000, "dump:sb-line-up"),
+    (12500, "key:PageUp"),
+    (13000, "dump:sb-plain-pageup-does-not-scroll"),
+    (13500, "quit"),
+];
+
+/// `--ghosttest`: the ghost preset through the host functions (no OS hotkeys). `state` logs the real
+/// window alpha, click-through, ghost and the saved opacity.
+const GHOST: &[(u64, &str)] = &[
+    (1500, "state:start"),
+    (2000, "ghost"),
+    (2300, "state:ghost-on"),
+    (3000, "ghost"),
+    (3300, "state:ghost-off"),
+    (4000, "opacity:70"),
+    (4300, "state:opacity-70"),
+    (4600, "ghost"),
+    (4900, "state:ghost-from-70"),
+    (5200, "ghost"),
+    (5500, "state:restored-70"),
+    (6000, "opacity:30"),
+    (6300, "ghost"),
+    (6600, "state:ghost-from-30-never-brightens"),
+    (6900, "ghost"),
+    (7200, "state:restored-30"),
+    (7500, "opacity:100"),
+    (7800, "ct:off"),
+    (8100, "state:interactive"),
+    (8400, "ghost"),
+    (8700, "state:ghost-forces-click-through"),
+    (9000, "ghost"),
+    (9300, "state:interactive-restored"),
+    (9600, "ghost"),
+    (9900, "toggle-ct"),
+    (10200, "state:ct-toggle-leaves-ghost"),
+    (10500, "ghost"),
+    (10800, "opacity:60"),
+    (11100, "state:opacity-change-leaves-ghost"),
+    (11500, "quit"),
+];
+
+/// `--attention`: bell / OSC 9 / OSC 777 while HUDshell is passive. No `cdp-focus`, so nothing in this
+/// scenario gives the page the keyboard. `focus-flag` only simulates the host's "terminal has the
+/// keyboard" flag (the real grab is covered by the focus suites).
+const ATTENTION: &[(u64, &str)] = &[
+    (2000, "w:[Console]::Write([char]7)\r"),
+    (2600, "dump:cue-after-bell"),
+    (2900, "w:[Console]::Write(\"$([char]27)]9;rate-limited$([char]27)\\\")\r"),
+    (6500, "dump:cue-faded"),
+    (6800, "w:[Console]::Write(\"$([char]27)]9;build finished$([char]27)\\\")\r"),
+    (7400, "dump:cue-after-osc9"),
+    (10500, "w:[Console]::Write(\"$([char]27)]9;4;3;50$([char]27)\\\")\r"),
+    (11200, "w:[Console]::Write(\"$([char]27)]9;9;C:\\temp$([char]27)\\\")\r"),
+    (12000, "dump:no-cue-for-progress-and-cwd"),
+    (12300, "w:[Console]::Write(\"$([char]27)]777;notify;Title;Body text$([char]27)\\\")\r"),
+    (12900, "dump:cue-after-osc777"),
+    (16000, "focus-flag:1"),
+    (16100, "w:[Console]::Write([char]7)\r"),
+    (16800, "dump:no-cue-while-focused"),
+    (17000, "focus-flag:0"),
+    (17100, "toggle-show"),
+    (17600, "w:[Console]::Write([char]7)\r"),
+    (18300, "toggle-show"),
+    (18800, "quit"),
+];
+
+/// `--policytest`: clipboard policies driven through DevTools mouse events (the page sees real mouse
+/// events; no OS input). The caller pre-fills the clipboard with a sentinel and reads it back afterwards.
+const POLICY: &[(u64, &str)] = &[
+    (1500, "cdp-focus"),
+    (2000, "resize:900,520"),
+    (3000, "w:Write-Host 'COPYSEL-LINE-OF-TEXT-FOR-SELECTION'\r"),
+    (4000, "w:[Console]::Write(\"$([char]27)]52;c;aGVsbG8=$([char]7)\")\r"),
+    (4600, "w:[Console]::Write(\"$([char]27)]52;c;?$([char]7)\")\r"),
+    (5200, "w:[Console]::Write(\"$([char]27)]8;;https://example.invalid/$([char]27)\\a link$([char]27)]8;;$([char]27)\\\")\r"),
+    (6000, "dump:policy-screen"),
+    (6500, "rclick"),
+    (7300, "dump:after-right-click-no-selection"),
+    (7800, "ldrag"),
+    (8500, "rclick"),
+    (9300, "dump:after-drag-and-right-click"),
+    (9600, "census"),
+    (10000, "quit"),
+];
+
 /// `--probe4`: how does PowerShell's prompt (PSReadLine) react to ESC CR (Alt+Enter)? Clean line first.
 const PROBE4: &[(u64, &str)] = &[
     (1500, "cdp-focus"),
@@ -429,7 +532,7 @@ fn build_real() -> &'static [(u64, &'static str)] {
             // Turn 2: a two-line prompt typed with Shift+Enter, then submitted.
             s.at(800, "type:Write two short lines about terminals.");
             s.at(400, "key:Shift+Enter");
-            s.at(400, "type:The second line must contain the word glint.");
+            s.at(400, "type:The second line must contain the word hudshell.");
             s.at(1500, &format!("dump:{agent}-multiline-input"));
             s.at(500, "key:Enter");
             s.watch(&format!("{agent}-turn2"), c2);
@@ -489,6 +592,10 @@ fn build_soak() -> &'static [(u64, &'static str)] {
 
 fn scen() -> &'static [(u64, &'static str)] {
     match SCEN_SEL.load(Ordering::SeqCst) {
+        12 => SCROLLBACK,
+        13 => GHOST,
+        14 => ATTENTION,
+        15 => POLICY,
         7 => build_real(),
         8 => CLICKFOCUS,
         9 => HIDESHOW,
@@ -713,6 +820,49 @@ unsafe fn run_action(hwnd: HWND, act: &str) {
             log(&format!("sending real hotkey Ctrl+Alt+{k}"));
             unsafe { send_hotkey(vk) };
         }
+    } else if let Some(label) = act.strip_prefix("state:") {
+        let mut a = 0u8;
+        let _ = unsafe { GetLayeredWindowAttributes(hwnd, None, Some(&mut a), None) };
+        let pct = (a as u32 * 100 + 127) / 255;
+        log(&format!(
+            "STATE label={label} alpha={a} pct={pct} click_through={} ghost={} focus={} visible={} cfg_opacity={}",
+            CLICK_THROUGH.load(Ordering::SeqCst),
+            GHOST_ON.load(Ordering::SeqCst),
+            TERMINAL_FOCUS.load(Ordering::SeqCst),
+            VISIBLE.load(Ordering::SeqCst),
+            cfg().opacity
+        ));
+    } else if act == "ghost" {
+        unsafe { toggle_ghost(hwnd) };
+    } else if let Some(v) = act.strip_prefix("opacity:") {
+        unsafe { set_opacity(hwnd, v.parse().unwrap_or(100), false) };
+    } else if let Some(v) = act.strip_prefix("ct:") {
+        CLICK_THROUGH.store(v == "on", Ordering::SeqCst);
+        unsafe { refresh_pointer_style(hwnd) };
+    } else if act == "toggle-ct" {
+        unsafe { toggle_click_through(hwnd) };
+    } else if act == "toggle-show" {
+        unsafe { toggle_show(hwnd) };
+    } else if let Some(v) = act.strip_prefix("focus-flag:") {
+        // Simulation of the host flag only (nothing is activated); see the ATTENTION scenario note.
+        TERMINAL_FOCUS.store(v == "1", Ordering::SeqCst);
+    } else if act == "rclick" || act == "ldrag" {
+        // Mouse events delivered to the page through the DevTools protocol (no OS mouse input).
+        let ev = |t: &str, x: i32, y: i32, button: &str, buttons: u32| {
+            wv::cdp(
+                "Input.dispatchMouseEvent",
+                &serde_json::json!({ "type": t, "x": x, "y": y, "button": button, "buttons": buttons, "clickCount": 1 }).to_string(),
+            );
+        };
+        if act == "rclick" {
+            ev("mousePressed", 200, 120, "right", 2);
+            ev("mouseReleased", 200, 120, "right", 0);
+        } else {
+            ev("mousePressed", 12, 34, "left", 1);
+            ev("mouseMoved", 150, 34, "left", 1);
+            ev("mouseMoved", 320, 34, "left", 1);
+            ev("mouseReleased", 320, 34, "left", 0);
+        }
     } else if act == "select-all" {
         wv::post("{\"t\":\"selectall\"}");
     } else if let Some(spec) = act.strip_prefix("realkey:") {
@@ -818,13 +968,17 @@ pub(crate) unsafe fn fg_watchdog(hwnd: HWND) {
 
 /// Any of these switches turns on test mode: built-in default settings, the real config is never
 /// read or written, and no tray icon is added.
+/// Every scripted-scenario switch. ONE list, used both to arm the scenario and to decide test mode, so a
+/// new scenario can never run against the user's real settings by forgetting to register itself.
+const SCENARIO_FLAGS: &[&str] = &[
+    "--autotest", "--keys", "--widthtest", "--probe", "--probe2", "--probe3", "--probe4", "--real",
+    "--clickfocus", "--hideshow", "--clipboard", "--soak", "--scrolltest", "--ghosttest", "--attention",
+    "--policytest",
+];
+
 pub(crate) fn is_test_mode() -> bool {
-    const FLAGS: &[&str] = &[
-        "--autotest", "--keys", "--widthtest", "--probe", "--probe2", "--probe3", "--probe4",
-        "--real", "--clickfocus", "--selftest", "--selftest2", "--hideshow", "--clipboard", "--soak",
-        "--idle",
-    ];
-    std::env::args().any(|a| FLAGS.contains(&a.as_str()))
+    const OTHER: &[&str] = &["--selftest", "--selftest2", "--idle"];
+    std::env::args().any(|a| SCENARIO_FLAGS.contains(&a.as_str()) || OTHER.contains(&a.as_str()))
 }
 
 /// Timers owned by the harness (selftest 10-12, scenario 20, autotest 21, foreground watchdog 30,
@@ -889,10 +1043,10 @@ pub(crate) fn apply_cli_options(loaded: &config::Config) {
 /// Called once the web view is ready: starts whichever scripted run was asked for on the command line.
 pub(crate) unsafe fn arm(hwnd: HWND) {
     let any_scen = |n: &str| std::env::args().any(|a| a == n);
-    if any_scen("--autotest") || any_scen("--keys") || any_scen("--widthtest") || any_scen("--probe") || any_scen("--probe2") || any_scen("--probe3") || any_scen("--probe4") || any_scen("--real") || any_scen("--clickfocus") || any_scen("--hideshow") || any_scen("--clipboard") || any_scen("--soak") {
+    if SCENARIO_FLAGS.iter().any(|f| any_scen(f)) {
         let args: Vec<String> = std::env::args().collect();
         SCEN_SEL.store(
-            if any_scen("--soak") { 11 } else if any_scen("--clipboard") { 10 } else if any_scen("--hideshow") { 9 } else if any_scen("--clickfocus") { 8 } else if any_scen("--real") { 7 } else if any_scen("--probe4") { 6 } else if any_scen("--probe3") { 5 } else if any_scen("--probe2") { 4 } else if any_scen("--probe") { 3 } else if any_scen("--widthtest") { 2 } else if any_scen("--keys") { 1 } else { 0 },
+            if any_scen("--policytest") { 15 } else if any_scen("--attention") { 14 } else if any_scen("--ghosttest") { 13 } else if any_scen("--scrolltest") { 12 } else if any_scen("--soak") { 11 } else if any_scen("--clipboard") { 10 } else if any_scen("--hideshow") { 9 } else if any_scen("--clickfocus") { 8 } else if any_scen("--real") { 7 } else if any_scen("--probe4") { 6 } else if any_scen("--probe3") { 5 } else if any_scen("--probe2") { 4 } else if any_scen("--probe") { 3 } else if any_scen("--widthtest") { 2 } else if any_scen("--keys") { 1 } else { 0 },
             Ordering::SeqCst,
         );
         let delay = args
@@ -916,4 +1070,29 @@ pub(crate) unsafe fn arm(hwnd: HWND) {
         let _ = unsafe { SetTimer(Some(hwnd), 11, 7000, None) };
         let _ = unsafe { SetTimer(Some(hwnd), 12, 9000, None) };
     }
+}
+/// Test-only overrides of the (default) test configuration: `--osc52 write`, `--right-click paste`,
+/// `--copy-on-select`, `--no-cue`, `--no-toast`, `--ghost-opacity N`.
+pub(crate) fn override_config(mut c: config::Config) -> config::Config {
+    let args: Vec<String> = std::env::args().collect();
+    let opt = |name: &str| args.iter().position(|a| a == name).and_then(|i| args.get(i + 1)).cloned();
+    if let Some(v) = opt("--osc52") {
+        c.osc52 = v;
+    }
+    if let Some(v) = opt("--right-click") {
+        c.right_click = v;
+    }
+    if args.iter().any(|a| a == "--copy-on-select") {
+        c.copy_on_select = true;
+    }
+    if args.iter().any(|a| a == "--no-cue") {
+        c.attention_cue = false;
+    }
+    if args.iter().any(|a| a == "--no-toast") {
+        c.attention_toast = false;
+    }
+    if let Some(v) = opt("--ghost-opacity").and_then(|v| v.parse().ok()) {
+        c.ghost_opacity = v;
+    }
+    c
 }

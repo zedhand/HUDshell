@@ -86,6 +86,9 @@ const PATTERNS: &[(&str, &[u8])] = &[
     ("kitty pop ESC[<1u", b"\x1b[<1u"),
     ("OSC52 clipboard", b"\x1b]52;"),
     ("OSC8 hyperlink", b"\x1b]8;"),
+    ("OSC9 notification (or ConEmu OSC 9;n)", b"\x1b]9;"),
+    ("OSC9;4 progress", b"\x1b]9;4;"),
+    ("OSC777 notification", b"\x1b]777;"),
     ("OSC0 title", b"\x1b]0;"),
     ("OSC2 title", b"\x1b]2;"),
 ];

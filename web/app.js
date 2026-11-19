@@ -26,7 +26,14 @@
     root.setProperty('--fg', t.foreground);
   }
   applyPageColours(startTheme);
+  // Terminal policies (config.json): all clipboard conveniences are opt-in.
+  const copyOnSelect = injected.copyOnSelect === true;
+  const rightClick = injected.rightClick === 'paste' ? 'paste' : 'off';
+  const osc52Mode = injected.osc52 === 'write' ? 'write' : 'off';
   const term = new Terminal({
+    // OSC 8 hyperlinks are drawn but never opened: xterm.js' default handler would show a confirm()
+    // dialog and open a window, which has no place over a game. Copy the link text instead.
+    linkHandler: { allowNonHttpProtocols: false, activate: () => noteOnce('link-click-ignored'), hover: () => {}, leave: () => {} },
     allowProposedApi: true,
     cursorBlink: false,
     scrollback: injected.scrollback || 2000,
@@ -94,13 +101,42 @@
     return true;
   });
 
+  // Tell the host something happened, at most once a minute per kind, never with terminal content.
+  const noted = {};
+  function noteOnce(what) {
+    const now = Date.now();
+    if (noted[what] && now - noted[what] < 60000) return;
+    noted[what] = now;
+    send({ t: 'note', what });
+  }
+  function copySelection() {
+    const text = term.getSelection();
+    return navigator.clipboard.writeText(text).then(
+      () => send({ t: 'copied', chars: text.length }),
+      (e) => send({ t: 'copied', error: String(e) }));
+  }
+
   term.attachCustomKeyEventHandler((ev) => {
+    // Keyboard scrollback (normal screen only; full-screen programs keep these keys):
+    // Shift+PageUp/PageDown = a page, Ctrl+Shift+Up/Down = a line, Ctrl+Shift+Home/End = top / bottom.
+    // Useful while click-through is on, because the mouse wheel then never reaches the terminal.
+    if (term.buffer.active.type === 'normal' && ev.shiftKey && !ev.altKey && !ev.metaKey) {
+      let scroll = null;
+      if (!ev.ctrlKey && ev.code === 'PageUp') scroll = () => term.scrollPages(-1);
+      else if (!ev.ctrlKey && ev.code === 'PageDown') scroll = () => term.scrollPages(1);
+      else if (ev.ctrlKey && ev.code === 'ArrowUp') scroll = () => term.scrollLines(-1);
+      else if (ev.ctrlKey && ev.code === 'ArrowDown') scroll = () => term.scrollLines(1);
+      else if (ev.ctrlKey && ev.code === 'Home') scroll = () => term.scrollToTop();
+      else if (ev.ctrlKey && ev.code === 'End') scroll = () => term.scrollToBottom();
+      if (scroll) {
+        if (ev.type === 'keydown') scroll();
+        return false;
+      }
+    }
     // Copy: Ctrl+Shift+C or Ctrl+Insert copies the selection (plain Ctrl+C stays the interrupt key).
     if (ev.type === 'keydown' && term.hasSelection() &&
         ((ev.ctrlKey && ev.shiftKey && ev.code === 'KeyC') || (ev.ctrlKey && ev.code === 'Insert'))) {
-      navigator.clipboard.writeText(term.getSelection()).then(
-        () => send({ t: 'copied', chars: term.getSelection().length }),
-        (e) => send({ t: 'copied', error: String(e) }));
+      copySelection();
       return false;
     }
     // 'kitty' mode: if the running program negotiated the kitty keyboard protocol, report
@@ -122,8 +158,56 @@
     return true;
   });
 
-  term.open(document.getElementById('term'));
+  const termEl = document.getElementById('term');
+  term.open(termEl);
   fit.fit();
+
+  // Mouse policies. Copy on select copies when the button is released; right-click (opt-in) copies a
+  // selection and clears it, or pastes when nothing is selected (the host reads the clipboard).
+  termEl.addEventListener('contextmenu', (e) => e.preventDefault());
+  termEl.addEventListener('mouseup', (e) => {
+    if (e.button === 0 && copyOnSelect && term.hasSelection()) copySelection();
+    else if (e.button === 2 && rightClick === 'paste') {
+      if (term.hasSelection()) { copySelection(); term.clearSelection(); }
+      else send({ t: 'rightpaste' });
+    }
+  });
+
+  // Programs ask for attention with the bell, OSC 9 (iTerm2 style) or OSC 777;notify (rxvt style).
+  // The host decides whether to pulse the window or show a tray notification; it never logs the text.
+  const attention = (kind, text) => send({ t: 'attention', kind, text: String(text || '').slice(0, 200) });
+  term.onBell(() => attention('bell', ''));
+  term.parser.registerOscHandler(9, (data) => {
+    // OSC 9;<n>;... with a number first is ConEmu's progress / working-directory protocol (PowerShell
+    // and winget use it), not a notification.
+    if (!/^\d+(;|$)/.test(data)) attention('osc9', data);
+    return true;
+  });
+  term.parser.registerOscHandler(777, (data) => {
+    const p = data.split(';');
+    if (p[0] === 'notify') attention('osc777', [p[1], p.slice(2).join(';')].filter(Boolean).join(': '));
+    return true;
+  });
+  // OSC 52 (a program sets the clipboard): refused unless config osc52 = "write". Reads ("?") are never
+  // answered, so a program can never learn what is on the clipboard.
+  term.parser.registerOscHandler(52, (data) => {
+    const i = data.indexOf(';');
+    const payload = i < 0 ? '' : data.slice(i + 1);
+    if (osc52Mode !== 'write') { noteOnce('osc52-refused'); return true; }
+    if (!payload || payload === '?' || payload.length > 150000) return true;
+    // The host sets the clipboard: the page-side Clipboard API needs keyboard focus, which a passive
+    // overlay does not have when a program asks.
+    send({ t: 'osc52', b64: payload });
+    return true;
+  });
+  let cueTimer;
+  function pulseCue() {
+    document.body.classList.remove('cue');
+    void document.body.offsetWidth; // restart the animation
+    document.body.classList.add('cue');
+    clearTimeout(cueTimer);
+    cueTimer = setTimeout(() => document.body.classList.remove('cue'), 3000);
+  }
 
   // Input: onData is text (UTF-8 encode once); onBinary is a binary-coded string (keep byte values).
   term.onData((d) => send({ t: 'in', d: b2a(enc.encode(d)) }));
@@ -157,6 +241,9 @@
       case 'focus':
         term.focus();
         break;
+      case 'cue':
+        pulseCue();
+        break;
       case 'paste':
         term.paste(m.text);
         break;
@@ -180,7 +267,8 @@
           lines.push(l ? l.translateToString(true) : '');
         }
         send({ t: 'dump', cols: term.cols, rows: term.rows, buf: b.type, modes: term.modes,
-               cursor: [b.cursorX, b.cursorY], unicode: uni, lines });
+               cursor: [b.cursorX, b.cursorY], unicode: uni, view: [b.viewportY, b.baseY],
+               cue: document.body.classList.contains('cue'), lines });
         break;
       }
     }
@@ -257,6 +345,7 @@
   // Report what was really applied (used by the tests to prove config values take effect).
   send({ t: 'applied', scrollback: term.options.scrollback, fontSize: term.options.fontSize,
          fontFamily: term.options.fontFamily, unicode: term.unicode.activeVersion,
+         copyOnSelect, rightClick, osc52: osc52Mode, linkHandler: !!term.options.linkHandler,
          background: term.options.theme && term.options.theme.background,
          foreground: term.options.theme && term.options.theme.foreground });
   send({ t: 'ready', cols: term.cols, rows: term.rows });

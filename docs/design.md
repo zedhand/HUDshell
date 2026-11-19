@@ -39,6 +39,23 @@ Key decisions and why:
 - Opacity is `SetLayeredWindowAttributes` on the whole window, so text and background fade together.
   Fading only the background would need a different (composition) way of hosting the web view.
 
+- **Ghost** (Ctrl+Alt+X) remembers the real opacity and pointer mode, applies `ghost_opacity` (never brighter than the current
+  level) with click-through forced on, and restores both on the second press. The dimmed value is applied to the window only; it is
+  never written to the config. Toggling click-through, changing opacity or grabbing the keyboard ends ghost mode first.
+- **Attention cue.** The page watches for BEL, OSC 9 and OSC 777;notify (OSC 9;n with a number is ConEmu progress / working directory and
+  is ignored) and tells the host. If HUDshell does not hold the keyboard the host asks the page to pulse the border, or (window hidden)
+  raises a tray notification. At most one per 3 s; the text is shown but never logged. Needs no hooks and no configuration of the programs.
+
+## Clipboard, links and permissions
+
+- Clipboard **reads** (right-click paste) and OSC 52 **writes** are done by the host with Win32, because the page-side clipboard API needs
+  keyboard focus (a passive overlay has none) and would need a browser permission. Every WebView2 permission request is denied silently.
+- All of it is opt-in: `copy_on_select`, `right_click = "paste"`, `osc52 = "write"`. An OSC 52 read query is never answered, so a program
+  cannot learn what is on the clipboard.
+- OSC 8 hyperlinks render but a click does nothing (xterm.js's default handler would show a confirm dialog and open a window over the game).
+- Scrollback keys (Shift+PageUp/Down, Ctrl+Shift+Up/Down/Home/End) are handled in the page on the normal screen only; full-screen programs
+  keep those keys.
+
 ## Terminal fidelity decisions
 
 - **Unicode width:** conhost and xterm.js disagree on some emoji (for example U+2728 is two cells to ConPTY, one

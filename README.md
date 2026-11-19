@@ -14,6 +14,8 @@ click-through by default, an explicit keyboard-focus toggle, and an adjustable o
 - **Click-through** by default (mouse input goes to the window underneath). Toggle with a hotkey.
 - **Grab / release keyboard focus** with a hotkey, or click the terminal while it is interactive.
 - **Opacity** from 20% to 100% (hotkeys, settings panel, or `config.json`).
+- **Ghost** preset: one key makes the window click-through and dims it (40% by default); press again to restore.
+- **Attention cue**: a program that rings the bell or sends an OSC 9 / OSC 777 notification while you are in the game makes the window border pulse (a tray notification when hidden).
 - Colour themes (midnight, graphite, matrix, amber, dracula, solarized-dark, paper, or your own).
 - Frameless, rounded, draggable and resizable; remembers its position and size (multi-monitor aware).
 - Tray icon with a menu; notices (for example a hotkey conflict) appear as a tray notification.
@@ -46,10 +48,13 @@ Or by hand: `npm install`, `npm run build`, `cargo build --release`.
 | Ctrl+Alt+C | next colour theme |
 | Ctrl+Alt+[ / Ctrl+Alt+] | opacity down / up (10% steps) |
 | Ctrl+Alt+S | settings panel (arrows change opacity and colours, Esc closes) |
+| Ctrl+Alt+X | ghost: click-through plus dim, press again to restore |
 | Ctrl+Alt+Q | quit |
 
 Inside the terminal: **Shift+Enter** inserts a newline in Claude Code and Codex; **Ctrl+Shift+C** or
 **Ctrl+Insert** copies the selection; **Ctrl+V** pastes. Plain Ctrl+C is the interrupt key.
+Scrollback from the keyboard (normal screen; useful while click-through blocks the mouse wheel): **Shift+PageUp / Shift+PageDown**
+scroll a page, **Ctrl+Shift+Up / Down** a line, **Ctrl+Shift+Home / End** jump to the top or bottom.
 
 ## Configuration
 
@@ -65,8 +70,15 @@ values are range-checked, and an unreadable file is kept as `config.json.bad-N` 
 | `font_family` / `font_size` | Cascadia Mono, Consolas / 14 | size 8-48 |
 | `scrollback` | `2000` | lines, 100-100000 |
 | `shell` | none | full path of a shell to use instead of PowerShell 7 |
-| `hotkeys` | see table above | `click_through`, `grab_focus`, `show_hide`, `cycle_colours`, `opacity_up`, `opacity_down`, `settings`, `quit`; every chord needs at least one modifier |
+| `hotkeys` | see table above | `click_through`, `grab_focus`, `show_hide`, `cycle_colours`, `opacity_up`, `opacity_down`, `settings`, `ghost`, `quit`; every chord needs at least one modifier |
+| `ghost_opacity` | `40` | percent used by the ghost preset (20-100); never brightens a window that is already dimmer; never saved over `opacity` |
+| `copy_on_select` | `false` | copy the selection when the mouse button is released |
+| `right_click` | `"off"` | `"paste"`: right-click copies a selection, or pastes when nothing is selected |
+| `osc52` | `"off"` | `"write"`: let programs set the clipboard (OSC 52). Reads are never answered |
+| `attention_cue` / `attention_toast` | `true` / `true` | pulse the border, and show a tray notification while hidden, when a program rings the bell or sends OSC 9 / OSC 777 |
 | `window` | remembered | position and size in physical pixels |
+
+OSC 8 hyperlinks are drawn but clicking them does nothing (copy the text instead); HUDshell denies every browser permission request.
 
 Logs: `%LOCALAPPDATA%\HUDshell\hudshell.log` (rotated at 1 MB). It contains no terminal content and no window titles.
 

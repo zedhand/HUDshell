@@ -4,7 +4,7 @@
 //! Global hotkeys (RegisterHotKey only - no hooks, no injection; all configurable in config.json):
 //!   Ctrl+Alt+T  toggle click-through      Ctrl+Alt+G  grab / release keyboard focus
 //!   Ctrl+Alt+V  show / hide               Ctrl+Alt+C  next colour theme
-//!   Ctrl+Alt+Q  quit
+//!   Ctrl+Alt+X  ghost (click-through + dim)   Ctrl+Alt+Q  quit
 //! Settings: %APPDATA%\HUDshell\config.json. Log: %LOCALAPPDATA%\HUDshell\hudshell.log (size-capped,
 //! no window titles and no terminal content). The test harness (`--features harness`) is not
 //! part of a normal build.
@@ -23,7 +23,7 @@ mod wv;
 
 use std::fs::OpenOptions;
 use std::io::Write;
-use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU32, AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -45,6 +45,7 @@ const HK_THEME: i32 = 5;
 const HK_OPACITY_UP: i32 = 6;
 const HK_OPACITY_DOWN: i32 = 7;
 const HK_SETTINGS: i32 = 8;
+const HK_GHOST: i32 = 9;
 const WM_TRAY: u32 = 0x8000 + 3;
 /// Height of the slim drag strip along the top edge, in 96-dpi pixels (scaled per monitor).
 const DRAG_STRIP_PX: i32 = 22;
@@ -188,7 +189,57 @@ unsafe fn refresh_pointer_style(hwnd: HWND) {
     ));
 }
 
+/// Ghost preset: click-through plus a dimmed window, restored on the second press. The dimmed value
+/// is never written to config.json: `cfg().opacity` keeps the user's real setting throughout.
+static GHOST_ON: AtomicBool = AtomicBool::new(false);
+static GHOST_PREV_OPACITY: AtomicU32 = AtomicU32::new(100);
+static GHOST_PREV_CT: AtomicBool = AtomicBool::new(true);
+
+unsafe fn ghost_on(hwnd: HWND) {
+    if GHOST_ON.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    let normal = cfg().opacity;
+    // Never brighten: if the window is already dimmer than the ghost level, keep it.
+    let level = cfg().ghost_opacity.min(normal);
+    GHOST_PREV_OPACITY.store(normal, Ordering::SeqCst);
+    GHOST_PREV_CT.store(CLICK_THROUGH.load(Ordering::SeqCst), Ordering::SeqCst);
+    if TERMINAL_FOCUS.load(Ordering::SeqCst) {
+        unsafe { release_focus(hwnd) };
+    }
+    CLICK_THROUGH.store(true, Ordering::SeqCst);
+    unsafe {
+        apply_opacity(hwnd, level);
+        refresh_pointer_style(hwnd);
+    }
+    log(&format!("ghost on: opacity {normal}% -> {level}%, click-through on"));
+}
+
+/// Leave ghost mode: restore the opacity and (optionally) the click-through setting from before.
+unsafe fn ghost_off(hwnd: HWND, restore_click_through: bool) {
+    if !GHOST_ON.swap(false, Ordering::SeqCst) {
+        return;
+    }
+    let normal = GHOST_PREV_OPACITY.load(Ordering::SeqCst);
+    unsafe { apply_opacity(hwnd, normal) };
+    if restore_click_through {
+        CLICK_THROUGH.store(GHOST_PREV_CT.load(Ordering::SeqCst), Ordering::SeqCst);
+    }
+    unsafe { refresh_pointer_style(hwnd) };
+    log(&format!("ghost off: opacity restored to {normal}%"));
+}
+
+unsafe fn toggle_ghost(hwnd: HWND) {
+    if GHOST_ON.load(Ordering::SeqCst) {
+        unsafe { ghost_off(hwnd, true) };
+    } else {
+        unsafe { ghost_on(hwnd) };
+    }
+}
+
 unsafe fn toggle_click_through(hwnd: HWND) {
+    // An explicit click-through change leaves ghost mode (the opacity comes back; the new setting stays).
+    unsafe { ghost_off(hwnd, false) };
     let on = !CLICK_THROUGH.load(Ordering::SeqCst);
     CLICK_THROUGH.store(on, Ordering::SeqCst);
     unsafe { refresh_pointer_style(hwnd) };
@@ -207,6 +258,8 @@ fn on_page_click(hwnd_i: isize) {
 }
 
 unsafe fn grab_focus(hwnd: HWND) {
+    // Typing wants a readable window: leave ghost mode first.
+    unsafe { ghost_off(hwnd, true) };
     // Remember who had the keyboard so release can give it back. If HUDshell is already the
     // foreground window (the tray menu briefly makes it so), keep the window recorded before that.
     let cur = unsafe { GetForegroundWindow() };
@@ -330,6 +383,151 @@ fn theme_json(c: &config::Config) -> serde_json::Value {
     })
 }
 
+/// Minimum time between attention cues, so a program ringing the bell in a loop cannot flash or spam.
+const ATTENTION_GAP_MS: u64 = 3000;
+static ATTENTION_LAST: AtomicU64 = AtomicU64::new(0);
+
+/// Keep only printable characters and cap the length: terminal output must never inject control
+/// characters or a wall of text into a system notification.
+fn sanitize_notice(s: &str) -> String {
+    s.chars().filter(|c| !c.is_control()).take(120).collect::<String>().trim().to_string()
+}
+
+/// A program rang the bell or sent an OSC 9 / OSC 777 notification. If HUDshell does not hold the keyboard
+/// the user is probably elsewhere: pulse the window border, or (window hidden) raise a tray notification.
+/// The notification text is shown to the user but never written to the log.
+fn on_attention(hwnd_i: isize, kind: &str, text: &str) {
+    let now = now_ms() as u64;
+    let last = ATTENTION_LAST.load(Ordering::SeqCst);
+    if last != 0 && now.saturating_sub(last) < ATTENTION_GAP_MS {
+        log(&format!("attention: {kind} ignored (rate limit)"));
+        return;
+    }
+    let focused = TERMINAL_FOCUS.load(Ordering::SeqCst);
+    let visible = VISIBLE.load(Ordering::SeqCst);
+    let c = cfg();
+    if focused {
+        log(&format!("attention: {kind} while HUDshell has the keyboard: no cue"));
+        return;
+    }
+    ATTENTION_LAST.store(now, Ordering::SeqCst);
+    if visible {
+        if c.attention_cue {
+            log(&format!("attention: {kind} -> border cue"));
+            wv::post("{\"t\":\"cue\"}");
+        } else {
+            log(&format!("attention: {kind} (cue disabled in config)"));
+        }
+    } else if c.attention_toast {
+        let msg = sanitize_notice(text);
+        let msg = if msg.is_empty() { "A program asked for your attention".to_string() } else { msg };
+        log(&format!("attention: {kind} while hidden -> tray notification"));
+        if !is_test_mode() {
+            unsafe { tray_notify_icon(HWND(hwnd_i as *mut std::ffi::c_void), "HUDshell", &msg, false) };
+        }
+    } else {
+        log(&format!("attention: {kind} while hidden (toast disabled in config)"));
+    }
+}
+
+/// Unicode text on the clipboard, or None. Read by the host so the page never needs the
+/// clipboard-read permission (which would pop a permission prompt over the game).
+fn clipboard_text() -> Option<String> {
+    use windows::Win32::Foundation::HGLOBAL;
+    use windows::Win32::System::DataExchange::{CloseClipboard, GetClipboardData, OpenClipboard};
+    use windows::Win32::System::Memory::{GlobalLock, GlobalUnlock};
+    const CF_UNICODETEXT: u32 = 13;
+    const MAX_CHARS: usize = 1_000_000;
+    unsafe {
+        OpenClipboard(None).ok()?;
+        let out = (|| {
+            let h = GetClipboardData(CF_UNICODETEXT).ok()?;
+            let g = HGLOBAL(h.0);
+            let p = GlobalLock(g) as *const u16;
+            if p.is_null() {
+                return None;
+            }
+            let mut n = 0;
+            while n < MAX_CHARS && *p.add(n) != 0 {
+                n += 1;
+            }
+            let s = String::from_utf16_lossy(std::slice::from_raw_parts(p, n));
+            let _ = GlobalUnlock(g);
+            Some(s)
+        })();
+        let _ = CloseClipboard();
+        out
+    }
+}
+
+/// Replace the clipboard text. Used for OSC 52 writes, which the host performs so they work while the
+/// window is passive. Never logs the text.
+fn set_clipboard_text(text: &str) -> bool {
+    use windows::Win32::Foundation::{GlobalFree, HANDLE, HGLOBAL};
+    use windows::Win32::System::DataExchange::{CloseClipboard, EmptyClipboard, OpenClipboard, SetClipboardData};
+    use windows::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE};
+    const CF_UNICODETEXT: u32 = 13;
+    let wide: Vec<u16> = text.encode_utf16().chain(std::iter::once(0)).collect();
+    unsafe {
+        let Ok(mem) = GlobalAlloc(GMEM_MOVEABLE, wide.len() * 2) else { return false };
+        let p = GlobalLock(mem) as *mut u16;
+        if p.is_null() {
+            let _ = GlobalFree(Some(mem));
+            return false;
+        }
+        std::ptr::copy_nonoverlapping(wide.as_ptr(), p, wide.len());
+        let _ = GlobalUnlock(mem);
+        if OpenClipboard(None).is_err() {
+            let _ = GlobalFree(Some(mem));
+            return false;
+        }
+        let _ = EmptyClipboard();
+        let ok = SetClipboardData(CF_UNICODETEXT, Some(HANDLE(mem.0))).is_ok();
+        let _ = CloseClipboard();
+        if !ok {
+            let _ = GlobalFree(Some(HGLOBAL(mem.0)));
+        }
+        ok
+    }
+}
+
+/// OSC 52 write from a program (only when `osc52` is "write"). Decodes the base64 text and sets the clipboard.
+pub fn on_osc52(b64: &str) {
+    use base64::Engine;
+    if cfg().osc52 != "write" {
+        return;
+    }
+    let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(b64.trim()) else {
+        log("OSC 52 write refused: not valid base64");
+        return;
+    };
+    if bytes.len() > 100_000 {
+        log("OSC 52 write refused: more than 100 KB");
+        return;
+    }
+    let text = String::from_utf8_lossy(&bytes).to_string();
+    let ok = set_clipboard_text(&text);
+    log(&format!("OSC 52 clipboard write from a program: {} characters, ok={ok}", text.chars().count()));
+}
+
+/// Right-click paste requested by the page (only when `right_click` is "paste").
+pub fn on_right_paste() {
+    if cfg().right_click != "paste" {
+        return;
+    }
+    let started = std::time::Instant::now();
+    let text = clipboard_text();
+    // A read that blocks (for example behind a system consent prompt) would show up here.
+    let took = started.elapsed().as_millis();
+    match text {
+        Some(t) if !t.is_empty() => {
+            log(&format!("right-click paste: {} characters (clipboard read took {took} ms)", t.chars().count()));
+            wv::post(&serde_json::json!({ "t": "paste", "text": t }).to_string());
+        }
+        _ => log("right-click paste: clipboard has no text"),
+    }
+}
+
 /// Tell the page the current colours (live change, no restart).
 fn push_theme() {
     let c = cfg();
@@ -355,6 +553,7 @@ unsafe fn apply_opacity(hwnd: HWND, pct: u32) {
 
 /// Change opacity and optionally save it (sliders save only when released).
 unsafe fn set_opacity(hwnd: HWND, pct: u32, save: bool) {
+    unsafe { ghost_off(hwnd, true) };
     let pct = pct.clamp(config::MIN_OPACITY, 100);
     unsafe { apply_opacity(hwnd, pct) };
     if save {
@@ -455,13 +654,17 @@ unsafe fn save_geometry(hwnd: HWND) {
 
 /// Show a balloon/toast from the tray icon (hotkey conflicts, bad config).
 unsafe fn tray_notify(hwnd: HWND, title: &str, text: &str) {
-    use windows::Win32::UI::Shell::{Shell_NotifyIconW, NIF_INFO, NIIF_WARNING, NIM_MODIFY, NOTIFYICONDATAW};
+    unsafe { tray_notify_icon(hwnd, title, text, true) };
+}
+
+unsafe fn tray_notify_icon(hwnd: HWND, title: &str, text: &str, warning: bool) {
+    use windows::Win32::UI::Shell::{Shell_NotifyIconW, NIF_INFO, NIIF_INFO, NIIF_WARNING, NIM_MODIFY, NOTIFYICONDATAW};
     let mut nid = NOTIFYICONDATAW::default();
     nid.cbSize = std::mem::size_of::<NOTIFYICONDATAW>() as u32;
     nid.hWnd = hwnd;
     nid.uID = 1;
     nid.uFlags = NIF_INFO;
-    nid.dwInfoFlags = NIIF_WARNING;
+    nid.dwInfoFlags = if warning { NIIF_WARNING } else { NIIF_INFO };
     let t: Vec<u16> = title.encode_utf16().take(63).collect();
     nid.szInfoTitle[..t.len()].copy_from_slice(&t);
     let b: Vec<u16> = text.encode_utf16().take(255).collect();
@@ -506,6 +709,8 @@ unsafe fn tray_menu(hwnd: HWND) {
         let _ = AppendMenuW(menu, MF_STRING | checked, 2, w!("Click-through"));
         let _ = AppendMenuW(menu, MF_STRING, 3, w!("Next colour theme"));
         let _ = AppendMenuW(menu, MF_STRING, 4, w!("Grab / release keyboard focus"));
+        let ghost_chk = if GHOST_ON.load(Ordering::SeqCst) { MF_CHECKED } else { MF_UNCHECKED };
+        let _ = AppendMenuW(menu, MF_STRING | ghost_chk, 7, w!("Ghost (click-through + dim)"));
         let _ = AppendMenuW(menu, MF_STRING, 6, w!("Settings (opacity, colours)..."));
         let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
         let _ = AppendMenuW(menu, MF_STRING, 5, w!("Quit HUDshell"));
@@ -542,6 +747,7 @@ unsafe fn tray_menu(hwnd: HWND) {
                 let _ = DestroyWindow(hwnd);
             }
             6 => open_settings(hwnd),
+            7 => toggle_ghost(hwnd),
             _ => {}
         }
         // Give the keyboard back to whatever had it, unless the user asked to grab it.
@@ -571,6 +777,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                     HK_OPACITY_UP => step_opacity(hwnd, 10),
                     HK_OPACITY_DOWN => step_opacity(hwnd, -10),
                     HK_SETTINGS => open_settings(hwnd),
+                    HK_GHOST => toggle_ghost(hwnd),
                     HK_QUIT => {
                         log("quit requested");
                         let _ = DestroyWindow(hwnd);
@@ -761,6 +968,8 @@ fn main() -> windows::core::Result<()> {
         let test_mode = is_test_mode();
         PERSIST.store(!test_mode, Ordering::SeqCst);
         let loaded = if test_mode { config::Config::default() } else { config::load() };
+        #[cfg(feature = "harness")]
+        let loaded = harness::override_config(loaded);
         if let Ok(mut g) = CFG.lock() {
             *g = Some(loaded.clone());
         }
@@ -831,6 +1040,7 @@ fn main() -> windows::core::Result<()> {
             (HK_OPACITY_DOWN, &hk.opacity_down, "opacity down"),
             (HK_SETTINGS, &hk.settings, "settings panel"),
             (HK_QUIT, &hk.quit, "quit"),
+            (HK_GHOST, &hk.ghost, "ghost (click-through + dim)"),
         ] {
             match config::parse_hotkey(spec) {
                 Some((mods, vk)) => match RegisterHotKey(Some(hwnd), id, HOT_KEY_MODIFIERS(mods), vk) {
@@ -871,6 +1081,9 @@ fn main() -> windows::core::Result<()> {
                 "fontSize": loaded.font_size,
                 "scrollback": loaded.scrollback,
                 "theme": theme_json(&loaded),
+                "copyOnSelect": loaded.copy_on_select,
+                "rightClick": loaded.right_click,
+                "osc52": loaded.osc52,
             })
             .to_string(),
         );

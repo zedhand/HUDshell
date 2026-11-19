@@ -4,18 +4,83 @@ Machine: Windows 11 build 26300, WebView2 Runtime 157.x, Rust 1.99 (MSVC), Power
 Codex CLI 0.170.0, three displays (all at 100% scaling). Latest full regression: 2026-11-19 with `scripts/test-all.ps1`.
 "Tested" means observed in a log, a cell-text dump or a screenshot; anything not listed is in [known-gaps.md](known-gaps.md).
 
-## Latest full run (scripts/test-all.ps1): 105 pass, 0 fail, 2 intentional skips
+## Latest full run (scripts/test-all.ps1 -Sandbox ..., 2026-11-19, after the fixes below): 159 pass, 0 fail, 2 intentional skips
 
-| Suite | Result |
+Run on freshly built release and harness executables, including the real-prompt suite through both CLIs. Per suite: static 16,
+keys 6, width 3, hideshow 3, clickfocus 3, clipboard 3, autotest 18 (+2 intentional skips), ui 20, scrollback 8, ghost 14,
+attention 10, policy 12, release 19, config 18, soak 4, real 2, all passing. The settings file was byte-identical afterwards and no
+`ABORT:` line was logged. The host clipboard read for right-click paste took 0 ms (no stall). No browser permission request was
+logged. Whether a prompt appeared on screen during this run was **not** recorded by any test.
+
+The table and notes below describe the **first** full run of the day (154 pass, 4 fail), kept because they show what was found and fixed.
+
+### First full run: 154 pass, 4 fail (all four explained and fixed), 2 intentional skips
+
+Run after adding keyboard scrollback, the ghost preset, the attention cue and the clipboard / link policies. It includes the
+real-prompt suite through both CLIs (Codex had usage again).
+
+| Suite | Result in that run |
 |---|---|
-| static | 15 / 15 pass (11 unit tests; release exe 0.99 MB; no test code or build-machine paths; UI embedded byte-for-byte) |
-| keys, width, hideshow, clickfocus, clipboard | all pass (width: 19 of 19 glyph lines aligned; click-focus: 6 of 6 hit tests) |
-| ui | 18 / 18 pass (opacity hotkeys, 20% floor, panel keys, real mouse click and drag, arrows, close, Esc) |
-| release | 19 / 19 pass (runs from any folder, ignores test switches, single instance, opacity persists across restart) |
-| config | 13 / 13 pass (invalid JSON, clamping, bad hotkey, hotkey conflict, unknown keys, UTF-8 BOM) |
-| autotest | 18 / 18 pass, 2 intentional skips (Shift+Enter is only sent once a program has negotiated the kitty protocol) |
-| soak (5 min continuous output) | 4 / 4 pass: host 4.2 -> 5.1 MB private; whole process tree 224 -> 213 MB |
-| real (real prompts through both CLIs) | passed in an earlier run (below); not re-run after the latest changes |
+| static | 16 / 16 pass (12 unit tests; release exe under 3 MB; no test code, build-machine paths or former project name; UI embedded byte-for-byte) |
+| keys, width, hideshow, clickfocus, clipboard | all pass (keys 6, width 3 incl. 19 of 19 glyph lines aligned, hideshow 3, clickfocus 3 incl. 6 of 6 hit tests, clipboard 3) |
+| autotest | 18 pass, 2 intentional skips (a step is skipped by design unless a program has negotiated the kitty protocol) |
+| ui | 20 / 20 pass (now includes the real Ctrl+Alt+X ghost hotkey: dims to 40%, second press restores, never took focus) |
+| scrollback (new) | 8 / 8 pass |
+| ghost (new) | 14 / 14 pass |
+| attention (new) | 10 / 10 pass |
+| policy (new) | 11 / 11 pass |
+| release | 19 / 19 pass |
+| config | 15 pass, **3 fail** in that run; 18 / 18 pass after the fix below |
+| soak (5 min continuous output) | 4 / 4 pass: whole process tree 212 -> 214 MB after the first minute |
+| real (Claude Code 2.1.328 and Codex CLI 0.170.0) | run reached the end; its "never aborted" check **failed falsely** (see below); passes in the second run |
+
+**The four failures, and what was done**
+
+- **config (3 checks).** The runner removed leftover `config.json.bad-N` files only when no `config.json` had existed before the
+  tests. My own earlier test-mode mistake (below) had created a `config.json`, so the other branch ran and left the file from the
+  invalid-JSON case behind, which made three later "no .bad file" checks fail. The runner now removes only files that appeared during
+  the tests and never one that was already there. The config suite was rerun alone afterwards: 18 / 18 pass and the settings file was
+  byte-identical afterwards.
+- **real "never aborted" (1 check).** The check searched the log with a case-insensitive `-match 'ABORT'`, which also matched the
+  scenario's own echo of its step name `abort-unless-prompt|end`. The harness writes `ABORT:` only when it really aborts, and the log
+  has no such line (verified with a case-sensitive search). The check now looks for `ABORT:` case-sensitively. The real suite was rerun after that fix and
+  the check passed (second full run).
+
+**Real prompts, read from the screen dumps of that run (sandbox folder):** both CLIs completed a tool task (the file existed already
+and was run), accepted a two-line prompt typed with Shift+Enter (both lines visible in the composer before submit), streamed a long
+reply that was interrupted with Esc ("Interrupted" in Claude Code, "Conversation interrupted" in Codex), and `/exit` returned to the
+PowerShell prompt. Codex printed "Disconnected from this task. Any running work continues." on exit. The run happened inside a Claude
+Code session, so Claude Code showed a warning about an inherited child-session marker; the CLIs' own behaviour was otherwise normal.
+Codex reported 16% of its weekly limit left at that point.
+
+**A test-mode mistake found while adding scenarios.** New scenario switches were not registered in the harness's test-mode list, so a
+few early runs used the real settings file and saved to it (opacity, window geometry, a conflicting default hotkey). It was repaired by
+hand, and the runner and harness now share a single list of scenario switches (`SCENARIO_FLAGS`), so a new scenario cannot forget to
+be registered. The ghost and policy runs were checked afterwards to leave the settings file untouched.
+
+## New in this round (what each test showed)
+
+- **Keyboard scrollback** (normal screen only): Shift+PageUp/PageDown scroll a page, Ctrl+Shift+Up/Down a line, Ctrl+Shift+Home/End go to
+  the top / bottom. Verified from the viewport position after 200 lines of output (view 0..172). Full-screen programs keep these keys.
+  Not tested: with a real mouse wheel, or inside Claude Code / Codex.
+- **Ghost preset** (default Ctrl+Alt+X; Ctrl+Alt+H, L and M were already taken on this machine): 40% opacity plus click-through, restored on
+  the second press; never brightens a window already dimmer than the ghost level; forces click-through and then restores the previous
+  pointer mode; leaves ghost when click-through is toggled, opacity is changed, or the keyboard is grabbed; the dimmed value is never
+  written to `config.json` (checked with the real hotkey in a normal build). The tray menu item was added but not exercised by a test.
+- **Attention cue**: bell, OSC 9 and OSC 777 `notify` pulse the window border when HUDshell does not hold the keyboard; OSC 9;4
+  (progress) and 9;9 (working directory) are ignored; at most one cue per 3 s; a tray notification is requested instead when the
+  window is hidden (the notification itself was **not** observed on screen: test mode does not show one); notification text never
+  reaches the log. **Measured: in the real-prompt run (both CLIs, stock settings) the control-sequence census shows
+no OSC 9 or OSC 777 notifications at all** (and no OSC 52), so with default settings this cue is **not triggered by Claude Code or
+Codex**; it serves other programs, scripts and `Write-Host "`a"`-style bells. The census does not count BEL, so whether either CLI rings
+the bell is unmeasured. The same census did show 8 OSC 8 hyperlinks, which is what the link policy below covers.
+- **Clipboard and link policies** (all opt-in, driven by DevTools mouse events and the real clipboard): OSC 52 writes are refused by
+  default and applied by the host when `osc52` is `write`; an OSC 52 read query is never answered; copy-on-select and right-click paste /
+  copy work when enabled and do nothing by default; OSC 8 links are drawn but a click is a no-op (xterm.js's default would open a
+  confirm dialog). **Not tested: a real click on a link.**
+- **Browser permissions:** HUDshell now denies every WebView2 permission request and logs only its kind. No request was logged in
+  the runs above. During one run a prompt about pasting clipboard text appeared on screen and could not be answered in time; its source
+  was not identified (no WebView2 request was logged, and no Windows system prompt of that kind turned up in a search). See known gaps.
 
 ## CI preparation (2026-11-19)
 
@@ -23,7 +88,7 @@ The three CI steps (`scripts/build-release.ps1`, `cargo build --features harness
 were run locally: `static` passed 16 / 16 under both PowerShell 7 and Windows PowerShell 5.1. Running it under PowerShell 7
 exposed a compile error in the `Add-Type` helper at the top of `test-all.ps1` (`Point` lives in `System.Drawing.Primitives`
 there); it now picks the reference by edition and compiles in both shells. The suites that use that helper (ui, clickfocus,
-and so on) were **not** re-run after this change. The workflow then ran on GitHub (`windows-latest`) after the push and passed all steps (first with checkout@v4 and setup-node@v4, then again after bumping them to v7). The other suites were not run.
+and so on) passed in the full run above. The workflow then ran on GitHub (`windows-latest`) after the push and passed all steps (first with checkout@v4 and setup-node@v4, then again after bumping them to v7).
 
 ## Behaviour verified earlier
 
@@ -72,3 +137,7 @@ clearly readable, at 30% it is dim but legible. The whole window fades, so text 
 Passive window became activatable after external focus loss; tray grab recorded HUDshell as the window to return to;
 Ctrl+Shift+C opened DevTools; Shift+Enter submitted a prompt (it arrived as plain Enter); emoji width corrupted TUI redraws;
 a `config.json` with a UTF-8 byte-order mark was rejected as invalid.
+Found in this round: the first default for the ghost hotkey (Ctrl+Alt+H) was already taken by another program on the test machine, so it
+was changed to Ctrl+Alt+X; an OSC 52 write done through the page's clipboard API stalled when the window was passive (now done by the
+host); new test scenarios were missing from the harness's test-mode list and touched the real settings file; the runner left a `.bad-N`
+file behind when a settings file had existed; and a log check matched a step name instead of a real abort (all fixed above).
