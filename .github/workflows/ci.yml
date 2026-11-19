@@ -1,0 +1,43 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-test:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      # rust-toolchain.toml selects the MSVC stable toolchain; rustup installs it on first use.
+      - uses: Swatinem/rust-cache@v2
+
+      # Release exe: installs the pinned web assets, embeds them, strips build-machine paths.
+      - name: Build release
+        shell: pwsh
+        run: scripts/build-release.ps1
+
+      # Harness build: test code exists only with this feature.
+      - name: Build harness
+        run: cargo build --features harness
+
+      # Unit tests and release-binary checks. The desktop suites need a real interactive
+      # session (hotkeys, mouse, clipboard, WebView2 window) and are run locally.
+      - name: Static suite
+        shell: pwsh
+        run: scripts/test-all.ps1 -Suite static

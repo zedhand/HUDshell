@@ -17,6 +17,14 @@ Codex CLI 0.170.0, three displays (all at 100% scaling). Latest full regression:
 | soak (5 min continuous output) | 4 / 4 pass: host 4.2 -> 5.1 MB private; whole process tree 224 -> 213 MB |
 | real (real prompts through both CLIs) | passed in an earlier run (below); not re-run after the latest changes |
 
+## CI preparation (2026-11-19)
+
+The three CI steps (`scripts/build-release.ps1`, `cargo build --features harness`, `scripts/test-all.ps1 -Suite static`)
+were run locally: `static` passed 16 / 16 under both PowerShell 7 and Windows PowerShell 5.1. Running it under PowerShell 7
+exposed a compile error in the `Add-Type` helper at the top of `test-all.ps1` (`Point` lives in `System.Drawing.Primitives`
+there); it now picks the reference by edition and compiles in both shells. The suites that use that helper (ui, clickfocus,
+and so on) were **not** re-run after this change. The workflow file itself has not run on GitHub, and the other suites were not run.
+
 ## Behaviour verified earlier
 
 **Overlay and focus** (with a full-screen game focused): showing, resizing, dragging and passive clicks never

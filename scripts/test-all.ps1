@@ -46,7 +46,8 @@ function Warn([string]$suite, [string]$name, [string]$detail = '') {
   Write-Host ("[WARN] {0}: {1} {2}" -f $suite, $name, $detail)
 }
 
-Add-Type -ReferencedAssemblies System.Drawing -TypeDefinition @'
+$drawingRef = if ($PSVersionTable.PSEdition -eq 'Core') { 'System.Drawing.Primitives' } else { 'System.Drawing' }
+Add-Type -ReferencedAssemblies $drawingRef -TypeDefinition @'
 using System; using System.Runtime.InteropServices; using System.Text; using System.Drawing;
 public static class GT {
   [DllImport("user32.dll")] static extern void keybd_event(byte vk, byte sc, uint fl, UIntPtr ex);

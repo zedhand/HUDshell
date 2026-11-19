@@ -76,6 +76,10 @@ Logs: `%LOCALAPPDATA%\HUDshell\hudshell.log` (rotated at 1 MB). It contains no t
 See [docs/testing.md](docs/testing.md). Design notes are in [docs/design.md](docs/design.md) and measured
 results in [docs/test-results.md](docs/test-results.md).
 
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md).
+
 ## Third-party components
 
 [xterm.js](https://github.com/xtermjs/xterm.js) 6.0.0 and its fit / Unicode addons (MIT), the Rust crates in

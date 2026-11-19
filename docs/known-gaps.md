@@ -42,4 +42,9 @@ Everything here is either untested or not implemented. Verified behaviour is in 
 
 ## Housekeeping
 
-- No continuous integration.
+- Continuous integration (`.github/workflows/ci.yml`: release build, harness build, `static` suite on `windows-latest`) is
+  written but has **not yet run on GitHub**; its steps were only run locally. The desktop suites cannot run in CI (they
+  need an interactive session) and stay manual. No `cargo fmt` or `clippy` gate yet.
+- Workflow actions are pinned to major versions (`@v4`, `@v2`), not commit hashes.
+- GitHub private vulnerability reporting (linked from the issue template and CONTRIBUTING) must be enabled in the
+  repository settings by the owner.

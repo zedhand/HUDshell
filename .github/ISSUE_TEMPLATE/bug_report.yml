@@ -1,0 +1,56 @@
+name: Bug report
+description: Something does not work as documented
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting. Please do not paste terminal content, API keys or personal paths.
+        The HUDshell log (`%LOCALAPPDATA%\HUDshell\hudshell.log`) contains no terminal content and no window titles.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened, and what did you expect?
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: "1. ...\n2. ..."
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: HUDshell version
+      placeholder: "0.1.0"
+    validations:
+      required: true
+  - type: input
+    id: windows
+    attributes:
+      label: Windows version and build
+      placeholder: "Windows 11, build 26300"
+    validations:
+      required: true
+  - type: input
+    id: pwsh
+    attributes:
+      label: PowerShell 7 version
+      placeholder: "output of $PSVersionTable.PSVersion"
+  - type: input
+    id: program
+    attributes:
+      label: Program running inside HUDshell, if any
+      placeholder: "for example Claude Code or Codex CLI, with its version"
+  - type: textarea
+    id: setup
+    attributes:
+      label: Display setup and overlay context
+      description: Number of monitors, scaling per monitor, and whether a game or full-screen app was underneath (borderless or exclusive full screen).
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant log lines
+      render: text
