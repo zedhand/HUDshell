@@ -355,6 +355,184 @@ const SCROLLBACK: &[(u64, &str)] = &[
     (13500, "quit"),
 ];
 
+/// Next session id the harness hands out (session 1 always exists).
+static NEXT_TEST_SESSION: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(2);
+
+/// `--sessiontest`: several shells in one window. Isolation between sessions, which one the host writes to,
+/// restart after a shell exits, and closing a session.
+const SESSIONS: &[(u64, &str)] = &[
+    (1500, "cdp-focus"),
+    (2500, "w:echo SESSION-ONE-ALIVE\r"),
+    (3500, "session:new"),
+    (6500, "wto:2:echo SESSION-TWO-ALIVE\r"),
+    (7500, "dumps:1:s1"),
+    (8000, "dumps:2:s2"),
+    (8500, "session:show:2"),
+    (9000, "w:echo ACTIVE-WRITE-WENT-TO-TWO\r"),
+    (10000, "dumps:1:s1b"),
+    (10500, "dumps:2:s2b"),
+    (11000, "wto:2:exit\r"),
+    (13000, "dumps:2:s2-exited"),
+    (13500, "key:Enter"),
+    (16500, "wto:2:echo AFTER-RESTART\r"),
+    (17500, "dumps:2:s2-restarted"),
+    (18000, "session:close:2"),
+    (19000, "w:echo BACK-ON-ONE\r"),
+    (20000, "dumps:1:s1-final"),
+    (20500, "quit"),
+];
+
+/// `--shellstest` (run with `--test-profiles`): tabs, profiles, switching, marks, titles, closing.
+const SHELLS: &[(u64, &str)] = &[
+    (1500, "cdp-focus"),
+    (2500, "w:echo ONE-ONE\r"),
+    (3500, "dumps:1:single"),
+    (4000, "shell:new"),
+    (7500, "dumps:2:two"),
+    (8000, "shell:new:work"),
+    (11500, "w:(Get-Location).Path\r"),
+    (12500, "dumps:3:work"),
+    (13000, "wto:3:$Host.UI.RawUI.WindowTitle='TITLE-TEST'\r"),
+    (14000, "shell:new:cmd"),
+    (18500, "dumps:4:cmd"),
+    (19000, "shell:jump:1"),
+    (19500, "dumps:1:jump1"),
+    (20000, "wto:2:echo BG-OUTPUT\r"),
+    (20800, "dumps:1:marks"),
+    (21200, "shell:attention"),
+    (22000, "dumps:2:attn"),
+    (22500, "shell:prev"),
+    (23000, "shell:prev"),
+    (23500, "dumps:4:wrapback"),
+    (24000, "shell:next"),
+    (24500, "dumps:1:wrapfwd"),
+    (25000, "js:document.querySelectorAll('.tab')[2].dispatchEvent(new MouseEvent('mousedown',{bubbles:true}))"),
+    (26000, "dumps:3:clicked"),
+    (26500, "shell:list"),
+    (26900, "dumps:3:listed"),
+    (28000, "shell:close"),
+    (28400, "dumps:3:confirm"),
+    (28800, "shell:close"),
+    (29800, "dumps:4:closed"),
+    (30200, "shell:picker"),
+    (30700, "dumps:4:picker"),
+    (31000, "key:2"),
+    (34500, "dumps:5:picked"),
+    (35000, "shell:close"),
+    (35400, "shell:close"),
+    (36500, "shell:close"),
+    (36900, "shell:close"),
+    (38000, "shell:close"),
+    (38400, "shell:close"),
+    (39500, "dumps:1:one-left"),
+    (40000, "shell:close"),
+    (40400, "shell:close"),
+    (44000, "w:echo AFTER-LAST-CLOSE\r"),
+    (45000, "dumps:1:lastclose"),
+    (45500, "quit"),
+];
+
+/// `--tabmodes` (run once each with `--tabs auto|always|overlay`): when the shell list shows.
+const TABMODES: &[(u64, &str)] = &[
+    (1500, "cdp-focus"),
+    (2000, "dumps:1:mode-one"),
+    (2500, "shell:new"),
+    (6000, "dumps:2:mode-two"),
+    (6500, "shell:next"),
+    (7000, "dumps:1:mode-next"),
+    (10000, "dumps:1:mode-later"),
+    (10500, "quit"),
+];
+
+/// `--shellsfull`: the window holds nine shells and refuses the tenth.
+const SHELLSFULL: &[(u64, &str)] = &[
+    (2000, "shell:new"),
+    (2800, "shell:new"),
+    (3600, "shell:new"),
+    (4400, "shell:new"),
+    (5200, "shell:new"),
+    (6000, "shell:new"),
+    (6800, "shell:new"),
+    (7600, "shell:new"),
+    (12000, "dumps:9:nine"),
+    (12500, "shell:new"),
+    (13200, "dumps:9:tenth-refused"),
+    (13700, "quit"),
+];
+
+/// `--placetest`: corner docking, size presets, font size and magnetic snapping through the host functions.
+const PLACE: &[(u64, &str)] = &[
+    (1500, "resize:900,520"),
+    (2000, "state:start"),
+    (2300, "corner:next"),
+    (2800, "state:c1"),
+    (3100, "corner:next"),
+    (3600, "state:c2"),
+    (3900, "corner:next"),
+    (4400, "state:c3"),
+    (4700, "corner:next"),
+    (5200, "state:c4"),
+    (5500, "corner:prev"),
+    (6000, "state:back"),
+    (6300, "size"),
+    (6800, "state:size1"),
+    (7100, "size"),
+    (7600, "state:size2"),
+    (7900, "size"),
+    (8400, "state:size3"),
+    (8600, "dump:font-base"),
+    (8700, "font:+"),
+    (9000, "font:+"),
+    (9300, "state:font-up"),
+    (9900, "dump:font-up"),
+    (10200, "font:-"),
+    (10500, "state:font-down"),
+    (11000, "dump:font-down"),
+    (11300, "moving:5,7"),
+    (11600, "moving:400,300"),
+    (12000, "quit"),
+];
+
+/// `--idletest` (run with `--opacity 80 --active-opacity 100 --idle-dim 3 --idle-opacity 40`): the window dims
+/// after 3 s of shell silence, brightens on output, and the active opacity wins while the keyboard is held.
+const IDLE: &[(u64, &str)] = &[
+    (7000, "state:idle"),
+    (7500, "focus-flag:1"),
+    (7900, "state:active"),
+    (8200, "focus-flag:0"),
+    (9300, "state:passive-again"),
+    (9600, "w:echo wake\r"),
+    (10600, "state:woke"),
+    (15500, "state:idle-again"),
+    (16000, "ghost"),
+    (16300, "state:ghost-over-idle"),
+    (16600, "ghost"),
+    (16900, "state:idle-after-ghost"),
+    (17300, "quit"),
+];
+
+/// `--starttest` (run with `--start-hidden --start-ghost`): the window starts hidden and in ghost mode.
+const START: &[(u64, &str)] = &[
+    (2000, "state:started"),
+    (2500, "toggle-show"),
+    (3000, "state:shown"),
+    (3500, "ghost"),
+    (4000, "state:ghost-off"),
+    (4300, "quit"),
+];
+
+/// `--autostarttest`: the Start with Windows entry is written and removed (under a test-only value name). It is left
+/// switched on at the end so the caller can read the stored value; the caller removes it.
+const AUTOSTART: &[(u64, &str)] = &[
+    (1500, "autostart:off"),
+    (2000, "autostart:on"),
+    (2500, "autostart:on"),
+    (3000, "autostart:off"),
+    (3500, "autostart:off"),
+    (4000, "autostart:on"),
+    (4500, "quit"),
+];
+
 /// `--ghosttest`: the ghost preset through the host functions (no OS hotkeys). `state` logs the real
 /// window alpha, click-through, ghost and the saved opacity.
 const GHOST: &[(u64, &str)] = &[
@@ -426,12 +604,12 @@ const POLICY: &[(u64, &str)] = &[
     (5200, "w:[Console]::Write(\"$([char]27)]8;;https://example.invalid/$([char]27)\\a link$([char]27)]8;;$([char]27)\\\")\r"),
     (6000, "dump:policy-screen"),
     (6500, "rclick"),
-    (7300, "dump:after-right-click-no-selection"),
-    (7800, "ldrag"),
-    (8500, "rclick"),
-    (9300, "dump:after-drag-and-right-click"),
-    (9600, "census"),
-    (10000, "quit"),
+    (8000, "dump:after-right-click-no-selection"),
+    (8500, "ldrag"),
+    (9200, "rclick"),
+    (10200, "dump:after-drag-and-right-click"),
+    (10500, "census"),
+    (10900, "quit"),
 ];
 
 /// `--probe4`: how does PowerShell's prompt (PSReadLine) react to ESC CR (Alt+Enter)? Clean line first.
@@ -592,6 +770,14 @@ fn build_soak() -> &'static [(u64, &'static str)] {
 
 fn scen() -> &'static [(u64, &'static str)] {
     match SCEN_SEL.load(Ordering::SeqCst) {
+        23 => SHELLSFULL,
+        22 => TABMODES,
+        21 => SHELLS,
+        20 => SESSIONS,
+        17 => IDLE,
+        18 => START,
+        19 => AUTOSTART,
+        16 => PLACE,
         12 => SCROLLBACK,
         13 => GHOST,
         14 => ATTENTION,
@@ -824,14 +1010,86 @@ unsafe fn run_action(hwnd: HWND, act: &str) {
         let mut a = 0u8;
         let _ = unsafe { GetLayeredWindowAttributes(hwnd, None, Some(&mut a), None) };
         let pct = (a as u32 * 100 + 127) / 255;
+        let mut wr = RECT::default();
+        let _ = unsafe { GetWindowRect(hwnd, &mut wr) };
+        let wk = unsafe { work_area(hwnd) };
         log(&format!(
-            "STATE label={label} alpha={a} pct={pct} click_through={} ghost={} focus={} visible={} cfg_opacity={}",
+            "STATE label={label} rect={},{},{},{} work={},{},{},{} font={} dpi={} alpha={a} pct={pct} click_through={} ghost={} focus={} visible={} cfg_opacity={}",
+            wr.left, wr.top, wr.right, wr.bottom, wk.l, wk.t, wk.r, wk.b, cfg().font_size, unsafe { GetDpiForWindow(hwnd) },
             CLICK_THROUGH.load(Ordering::SeqCst),
             GHOST_ON.load(Ordering::SeqCst),
             TERMINAL_FOCUS.load(Ordering::SeqCst),
             VISIBLE.load(Ordering::SeqCst),
             cfg().opacity
         ));
+    } else if act == "shell:new" {
+        new_shell(None);
+    } else if let Some(name) = act.strip_prefix("shell:new:") {
+        new_shell(Some(name));
+    } else if act == "shell:next" {
+        shell_step(1);
+    } else if act == "shell:prev" {
+        shell_step(-1);
+    } else if let Some(n) = act.strip_prefix("shell:jump:") {
+        shell_jump(n.parse().unwrap_or(1));
+    } else if act == "shell:close" {
+        close_active_shell();
+    } else if act == "shell:list" {
+        wv::post("{\"t\":\"overlay\"}");
+    } else if act == "shell:picker" {
+        // Opens the picker in the page only; the real hotkey also grabs the keyboard, which tests avoid.
+        push_tabs();
+        wv::post("{\"t\":\"picker\"}");
+    } else if act == "shell:attention" {
+        wv::post("{\"t\":\"attentionnext\"}");
+    } else if let Some(expr) = act.strip_prefix("js:") {
+        wv::cdp("Runtime.evaluate", &serde_json::json!({ "expression": expr }).to_string());
+    } else if act == "session:new" {
+        // The host creates a session; the page builds its view and answers "ready", which starts the shell.
+        let id = NEXT_TEST_SESSION.fetch_add(1, Ordering::SeqCst);
+        log(&format!("SESSION open {id}"));
+        wv::post(&serde_json::json!({ "t": "open", "s": id }).to_string());
+        pty::set_active(id);
+    } else if let Some(v) = act.strip_prefix("session:show:") {
+        let id: u32 = v.parse().unwrap_or(1);
+        log(&format!("SESSION show {id}"));
+        wv::post(&serde_json::json!({ "t": "show", "s": id }).to_string());
+        pty::set_active(id);
+    } else if let Some(v) = act.strip_prefix("session:close:") {
+        let id: u32 = v.parse().unwrap_or(1);
+        log(&format!("SESSION close {id}"));
+        pty::close(id);
+        wv::post(&serde_json::json!({ "t": "close", "s": id }).to_string());
+        if pty::active() == id {
+            pty::set_active(pty::session_ids().first().copied().unwrap_or(1));
+        }
+    } else if let Some(rest) = act.strip_prefix("wto:") {
+        // wto:<session>:<text> writes to one named session regardless of which is on screen.
+        if let Some((id, text)) = rest.split_once(':') {
+            pty::write_to(id.parse().unwrap_or(1), text.as_bytes().to_vec());
+        }
+    } else if let Some(rest) = act.strip_prefix("dumps:") {
+        // dumps:<session>:<label> dumps one session's screen.
+        if let Some((id, label)) = rest.split_once(':') {
+            log(&format!("DUMP label={label}"));
+            wv::post(&serde_json::json!({ "t": "dump", "s": id.parse::<u32>().unwrap_or(1) }).to_string());
+        }
+    } else if let Some(v) = act.strip_prefix("corner:") {
+        unsafe { move_to_corner(hwnd, if v == "prev" { -1 } else { 1 }) };
+    } else if act == "size" {
+        unsafe { cycle_size(hwnd) };
+    } else if let Some(v) = act.strip_prefix("font:") {
+        change_font(if v == "-" { -1 } else { 1 });
+    } else if let Some(v) = act.strip_prefix("moving:") {
+        // Simulate a drag: a rectangle with the window's size at x,y goes through the real WM_MOVING handler.
+        let mut p = v.split(',');
+        let x: i32 = p.next().and_then(|s| s.parse().ok()).unwrap_or(0);
+        let y: i32 = p.next().and_then(|s| s.parse().ok()).unwrap_or(0);
+        let mut cur = RECT::default();
+        let _ = unsafe { GetWindowRect(hwnd, &mut cur) };
+        let mut r = RECT { left: x, top: y, right: x + (cur.right - cur.left), bottom: y + (cur.bottom - cur.top) };
+        let res = unsafe { SendMessageW(hwnd, WM_MOVING, Some(WPARAM(0)), Some(LPARAM(&mut r as *mut RECT as isize))) };
+        log(&format!("MOVING in={x},{y} out={},{},{},{} handled={}", r.left, r.top, r.right, r.bottom, res.0));
     } else if act == "ghost" {
         unsafe { toggle_ghost(hwnd) };
     } else if let Some(v) = act.strip_prefix("opacity:") {
@@ -846,6 +1104,18 @@ unsafe fn run_action(hwnd: HWND, act: &str) {
     } else if let Some(v) = act.strip_prefix("focus-flag:") {
         // Simulation of the host flag only (nothing is activated); see the ATTENTION scenario note.
         TERMINAL_FOCUS.store(v == "1", Ordering::SeqCst);
+        unsafe { refresh_opacity(hwnd) };
+    } else if let Some(v) = act.strip_prefix("autostart:") {
+        match v {
+            "on" => {
+                set_autostart(true);
+            }
+            "off" => {
+                set_autostart(false);
+            }
+            _ => {}
+        }
+        log(&format!("AUTOSTART name={} enabled={}", autostart_name(), autostart_enabled()));
     } else if act == "rclick" || act == "ldrag" {
         // Mouse events delivered to the page through the DevTools protocol (no OS mouse input).
         let ev = |t: &str, x: i32, y: i32, button: &str, buttons: u32| {
@@ -973,7 +1243,8 @@ pub(crate) unsafe fn fg_watchdog(hwnd: HWND) {
 const SCENARIO_FLAGS: &[&str] = &[
     "--autotest", "--keys", "--widthtest", "--probe", "--probe2", "--probe3", "--probe4", "--real",
     "--clickfocus", "--hideshow", "--clipboard", "--soak", "--scrolltest", "--ghosttest", "--attention",
-    "--policytest",
+    "--policytest", "--placetest", "--idletest", "--starttest", "--autostarttest", "--sessiontest", "--shellstest",
+    "--tabmodes", "--shellsfull",
 ];
 
 pub(crate) fn is_test_mode() -> bool {
@@ -1046,7 +1317,7 @@ pub(crate) unsafe fn arm(hwnd: HWND) {
     if SCENARIO_FLAGS.iter().any(|f| any_scen(f)) {
         let args: Vec<String> = std::env::args().collect();
         SCEN_SEL.store(
-            if any_scen("--policytest") { 15 } else if any_scen("--attention") { 14 } else if any_scen("--ghosttest") { 13 } else if any_scen("--scrolltest") { 12 } else if any_scen("--soak") { 11 } else if any_scen("--clipboard") { 10 } else if any_scen("--hideshow") { 9 } else if any_scen("--clickfocus") { 8 } else if any_scen("--real") { 7 } else if any_scen("--probe4") { 6 } else if any_scen("--probe3") { 5 } else if any_scen("--probe2") { 4 } else if any_scen("--probe") { 3 } else if any_scen("--widthtest") { 2 } else if any_scen("--keys") { 1 } else { 0 },
+            if any_scen("--shellsfull") { 23 } else if any_scen("--tabmodes") { 22 } else if any_scen("--shellstest") { 21 } else if any_scen("--sessiontest") { 20 } else if any_scen("--autostarttest") { 19 } else if any_scen("--starttest") { 18 } else if any_scen("--idletest") { 17 } else if any_scen("--placetest") { 16 } else if any_scen("--policytest") { 15 } else if any_scen("--attention") { 14 } else if any_scen("--ghosttest") { 13 } else if any_scen("--scrolltest") { 12 } else if any_scen("--soak") { 11 } else if any_scen("--clipboard") { 10 } else if any_scen("--hideshow") { 9 } else if any_scen("--clickfocus") { 8 } else if any_scen("--real") { 7 } else if any_scen("--probe4") { 6 } else if any_scen("--probe3") { 5 } else if any_scen("--probe2") { 4 } else if any_scen("--probe") { 3 } else if any_scen("--widthtest") { 2 } else if any_scen("--keys") { 1 } else { 0 },
             Ordering::SeqCst,
         );
         let delay = args
@@ -1093,6 +1364,34 @@ pub(crate) fn override_config(mut c: config::Config) -> config::Config {
     }
     if let Some(v) = opt("--ghost-opacity").and_then(|v| v.parse().ok()) {
         c.ghost_opacity = v;
+    }
+    if let Some(v) = opt("--opacity").and_then(|v| v.parse().ok()) {
+        c.opacity = v;
+    }
+    if let Some(v) = opt("--active-opacity").and_then(|v| v.parse().ok()) {
+        c.active_opacity = Some(v);
+    }
+    if let Some(v) = opt("--idle-dim").and_then(|v| v.parse().ok()) {
+        c.idle_dim_seconds = v;
+    }
+    if let Some(v) = opt("--idle-opacity").and_then(|v| v.parse().ok()) {
+        c.idle_opacity = v;
+    }
+    if args.iter().any(|a| a == "--start-hidden") {
+        c.start_hidden = true;
+    }
+    if args.iter().any(|a| a == "--start-ghost") {
+        c.start_ghost = true;
+    }
+    if let Some(v) = opt("--tabs") {
+        c.tabs = v;
+    }
+    if args.iter().any(|a| a == "--test-profiles") {
+        c.profiles = vec![
+            config::Profile::default(),
+            config::Profile { name: "work".into(), dir: Some("%TEMP%".into()), color: Some("#12ab34".into()), ..config::Profile::default() },
+            config::Profile { name: "cmd".into(), command: Some("echo PROFILE-COMMAND-RAN".into()), ..config::Profile::default() },
+        ];
     }
     c
 }

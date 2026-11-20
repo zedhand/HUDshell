@@ -18,7 +18,9 @@ mod assets;
 mod config;
 #[cfg(feature = "harness")]
 mod harness;
+mod place;
 mod pty;
+mod shells;
 mod wv;
 
 use std::fs::OpenOptions;
@@ -46,6 +48,20 @@ const HK_OPACITY_UP: i32 = 6;
 const HK_OPACITY_DOWN: i32 = 7;
 const HK_SETTINGS: i32 = 8;
 const HK_GHOST: i32 = 9;
+const HK_CORNER_NEXT: i32 = 10;
+const HK_CORNER_PREV: i32 = 11;
+const HK_SIZE: i32 = 12;
+const HK_FONT_UP: i32 = 13;
+const HK_FONT_DOWN: i32 = 14;
+const HK_SHELL_NEXT: i32 = 20;
+const HK_SHELL_PREV: i32 = 21;
+const HK_SHELL_NEW: i32 = 22;
+const HK_SHELL_CLOSE: i32 = 23;
+const HK_SHELL_LIST: i32 = 24;
+const HK_SHELL_PICKER: i32 = 25;
+const HK_SHELL_ATTN: i32 = 26;
+/// Jump hotkeys use ids 30..=38 for shells 1..=9.
+const HK_SHELL_JUMP: i32 = 30;
 const WM_TRAY: u32 = 0x8000 + 3;
 /// Height of the slim drag strip along the top edge, in 96-dpi pixels (scaled per monitor).
 const DRAG_STRIP_PX: i32 = 22;
@@ -192,27 +208,50 @@ unsafe fn refresh_pointer_style(hwnd: HWND) {
 /// Ghost preset: click-through plus a dimmed window, restored on the second press. The dimmed value
 /// is never written to config.json: `cfg().opacity` keeps the user's real setting throughout.
 static GHOST_ON: AtomicBool = AtomicBool::new(false);
-static GHOST_PREV_OPACITY: AtomicU32 = AtomicU32::new(100);
 static GHOST_PREV_CT: AtomicBool = AtomicBool::new(true);
+/// True while the window is dimmed because the shell has been silent for `idle_dim_seconds`.
+static IDLE_DIM: AtomicBool = AtomicBool::new(false);
+static LAST_OUTPUT_MS: AtomicU64 = AtomicU64::new(0);
+
+/// The opacity the user chose for the current state: the active value while HUDshell holds the keyboard
+/// (when one is set), the normal value otherwise. Ghost and idle dimming are applied on top of this.
+fn base_opacity() -> u32 {
+    let c = cfg();
+    if TERMINAL_FOCUS.load(Ordering::SeqCst) { c.active_opacity.unwrap_or(c.opacity) } else { c.opacity }
+}
+
+/// Opacity the window should show right now: the chosen value, dimmed by ghost mode or by idleness (never
+/// brighter than the chosen value). The single place that turns state into window alpha.
+fn effective_opacity() -> u32 {
+    let base = base_opacity();
+    if GHOST_ON.load(Ordering::SeqCst) {
+        base.min(cfg().ghost_opacity)
+    } else if IDLE_DIM.load(Ordering::SeqCst) && !TERMINAL_FOCUS.load(Ordering::SeqCst) {
+        base.min(cfg().idle_opacity)
+    } else {
+        base
+    }
+}
+
+unsafe fn refresh_opacity(hwnd: HWND) {
+    unsafe { apply_opacity(hwnd, effective_opacity()) };
+}
 
 unsafe fn ghost_on(hwnd: HWND) {
     if GHOST_ON.swap(true, Ordering::SeqCst) {
         return;
     }
-    let normal = cfg().opacity;
-    // Never brighten: if the window is already dimmer than the ghost level, keep it.
-    let level = cfg().ghost_opacity.min(normal);
-    GHOST_PREV_OPACITY.store(normal, Ordering::SeqCst);
     GHOST_PREV_CT.store(CLICK_THROUGH.load(Ordering::SeqCst), Ordering::SeqCst);
     if TERMINAL_FOCUS.load(Ordering::SeqCst) {
         unsafe { release_focus(hwnd) };
     }
     CLICK_THROUGH.store(true, Ordering::SeqCst);
     unsafe {
-        apply_opacity(hwnd, level);
+        refresh_opacity(hwnd);
         refresh_pointer_style(hwnd);
     }
-    log(&format!("ghost on: opacity {normal}% -> {level}%, click-through on"));
+    // "Never brighten" falls out of effective_opacity: ghost only ever lowers the chosen value.
+    log(&format!("ghost on: opacity {}% -> {}%, click-through on", base_opacity(), effective_opacity()));
 }
 
 /// Leave ghost mode: restore the opacity and (optionally) the click-through setting from before.
@@ -220,13 +259,37 @@ unsafe fn ghost_off(hwnd: HWND, restore_click_through: bool) {
     if !GHOST_ON.swap(false, Ordering::SeqCst) {
         return;
     }
-    let normal = GHOST_PREV_OPACITY.load(Ordering::SeqCst);
-    unsafe { apply_opacity(hwnd, normal) };
     if restore_click_through {
         CLICK_THROUGH.store(GHOST_PREV_CT.load(Ordering::SeqCst), Ordering::SeqCst);
     }
-    unsafe { refresh_pointer_style(hwnd) };
-    log(&format!("ghost off: opacity restored to {normal}%"));
+    unsafe {
+        refresh_opacity(hwnd);
+        refresh_pointer_style(hwnd);
+    }
+    log(&format!("ghost off: opacity restored to {}%", effective_opacity()));
+}
+
+/// Once a second: dim after `idle_dim_seconds` of shell silence while HUDshell is passive.
+unsafe fn idle_tick(hwnd: HWND) {
+    let secs = cfg().idle_dim_seconds as u64;
+    if secs == 0 {
+        return;
+    }
+    let quiet = (now_ms() as u64).saturating_sub(LAST_OUTPUT_MS.load(Ordering::SeqCst)) >= secs * 1000;
+    if quiet != IDLE_DIM.load(Ordering::SeqCst) {
+        IDLE_DIM.store(quiet, Ordering::SeqCst);
+        unsafe { refresh_opacity(hwnd) };
+        log(&format!("idle dim {} -> opacity {}%", if quiet { "on" } else { "off" }, effective_opacity()));
+    }
+}
+
+/// The shell produced output: remember when, and undo idle dimming at once.
+unsafe fn note_output(hwnd: HWND) {
+    LAST_OUTPUT_MS.store(now_ms() as u64, Ordering::SeqCst);
+    if IDLE_DIM.swap(false, Ordering::SeqCst) {
+        unsafe { refresh_opacity(hwnd) };
+        log(&format!("idle dim off (output) -> opacity {}%", effective_opacity()));
+    }
 }
 
 unsafe fn toggle_ghost(hwnd: HWND) {
@@ -279,6 +342,7 @@ unsafe fn grab_focus(hwnd: HWND) {
             describe(fg)
         ));
         TERMINAL_FOCUS.store(success, Ordering::SeqCst);
+        refresh_opacity(hwnd);
         refresh_pointer_style(hwnd);
         if success {
             wv::focus();
@@ -295,6 +359,7 @@ unsafe fn release_focus(hwnd: HWND) {
     unsafe {
         set_ex_flag(hwnd, WS_EX_NOACTIVATE, true);
         TERMINAL_FOCUS.store(false, Ordering::SeqCst);
+        refresh_opacity(hwnd);
         refresh_pointer_style(hwnd);
         let prev = HWND(PREV_FOREGROUND.load(Ordering::SeqCst) as *mut _);
         if !prev.0.is_null() && IsWindow(Some(prev)).as_bool() {
@@ -430,16 +495,35 @@ fn on_attention(hwnd_i: isize, kind: &str, text: &str) {
     }
 }
 
+/// Open the clipboard, retrying briefly: clipboard history, sync and other programs hold it open for a few
+/// milliseconds at a time, and a single failed attempt must not look like "nothing to paste".
+fn open_clipboard_retry() -> bool {
+    use windows::Win32::System::DataExchange::OpenClipboard;
+    for attempt in 0..20 {
+        if unsafe { OpenClipboard(None) }.is_ok() {
+            if attempt > 0 {
+                log(&format!("clipboard opened after {attempt} retr{}", if attempt == 1 { "y" } else { "ies" }));
+            }
+            return true;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(15));
+    }
+    log("clipboard could not be opened (held by another program)");
+    false
+}
+
 /// Unicode text on the clipboard, or None. Read by the host so the page never needs the
 /// clipboard-read permission (which would pop a permission prompt over the game).
 fn clipboard_text() -> Option<String> {
     use windows::Win32::Foundation::HGLOBAL;
-    use windows::Win32::System::DataExchange::{CloseClipboard, GetClipboardData, OpenClipboard};
+    use windows::Win32::System::DataExchange::{CloseClipboard, GetClipboardData};
     use windows::Win32::System::Memory::{GlobalLock, GlobalUnlock};
     const CF_UNICODETEXT: u32 = 13;
     const MAX_CHARS: usize = 1_000_000;
     unsafe {
-        OpenClipboard(None).ok()?;
+        if !open_clipboard_retry() {
+            return None;
+        }
         let out = (|| {
             let h = GetClipboardData(CF_UNICODETEXT).ok()?;
             let g = HGLOBAL(h.0);
@@ -464,7 +548,7 @@ fn clipboard_text() -> Option<String> {
 /// window is passive. Never logs the text.
 fn set_clipboard_text(text: &str) -> bool {
     use windows::Win32::Foundation::{GlobalFree, HANDLE, HGLOBAL};
-    use windows::Win32::System::DataExchange::{CloseClipboard, EmptyClipboard, OpenClipboard, SetClipboardData};
+    use windows::Win32::System::DataExchange::{CloseClipboard, EmptyClipboard, SetClipboardData};
     use windows::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE};
     const CF_UNICODETEXT: u32 = 13;
     let wide: Vec<u16> = text.encode_utf16().chain(std::iter::once(0)).collect();
@@ -477,7 +561,7 @@ fn set_clipboard_text(text: &str) -> bool {
         }
         std::ptr::copy_nonoverlapping(wide.as_ptr(), p, wide.len());
         let _ = GlobalUnlock(mem);
-        if OpenClipboard(None).is_err() {
+        if !open_clipboard_retry() {
             let _ = GlobalFree(Some(mem));
             return false;
         }
@@ -555,19 +639,24 @@ unsafe fn apply_opacity(hwnd: HWND, pct: u32) {
 unsafe fn set_opacity(hwnd: HWND, pct: u32, save: bool) {
     unsafe { ghost_off(hwnd, true) };
     let pct = pct.clamp(config::MIN_OPACITY, 100);
-    unsafe { apply_opacity(hwnd, pct) };
+    // While the keyboard is held and an active opacity is configured, that is the value being edited.
+    let focused = TERMINAL_FOCUS.load(Ordering::SeqCst);
+    let write = move |c: &mut config::Config| {
+        if focused && c.active_opacity.is_some() { c.active_opacity = Some(pct) } else { c.opacity = pct }
+    };
     if save {
-        cfg_update(|c| c.opacity = pct);
+        cfg_update(write);
         log(&format!("opacity -> {pct}%"));
     } else if let Ok(mut g) = CFG.lock() {
         if let Some(c) = g.as_mut() {
-            c.opacity = pct; // keep memory current while dragging; written on release
+            write(c); // keep memory current while dragging; written on release
         }
     }
+    unsafe { refresh_opacity(hwnd) };
 }
 
 unsafe fn step_opacity(hwnd: HWND, delta: i32) {
-    let cur = cfg().opacity as i32;
+    let cur = base_opacity() as i32;
     unsafe { set_opacity(hwnd, (cur + delta).clamp(config::MIN_OPACITY as i32, 100) as u32, true) };
     push_settings(false);
 }
@@ -580,7 +669,7 @@ fn push_settings(open: bool) {
     let themes: Vec<String> = config::presets().iter().map(|(n, _)| n.to_string()).collect();
     wv::post(
         &serde_json::json!({
-            "t": "settings", "open": open, "opacity": c.opacity, "minOpacity": config::MIN_OPACITY,
+            "t": "settings", "open": open, "opacity": base_opacity(), "minOpacity": config::MIN_OPACITY,
             "theme": c.theme, "themes": themes,
         })
         .to_string(),
@@ -625,6 +714,96 @@ pub fn on_settings_message(hwnd_i: isize, v: &serde_json::Value) {
     }
 }
 
+// ---- placement: corners, size presets, magnetic snapping ------------------------------------------
+
+fn to_rect(r: &RECT) -> place::Rect {
+    place::Rect::new(r.left, r.top, r.right, r.bottom)
+}
+
+/// Work area (screen minus taskbar) of the monitor the window is mostly on.
+unsafe fn work_area(hwnd: HWND) -> place::Rect {
+    use windows::Win32::Graphics::Gdi::{GetMonitorInfoW, MonitorFromWindow, MONITORINFO, MONITOR_DEFAULTTONEAREST};
+    let mon = unsafe { MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST) };
+    let mut mi = MONITORINFO { cbSize: std::mem::size_of::<MONITORINFO>() as u32, ..Default::default() };
+    if unsafe { GetMonitorInfoW(mon, &mut mi) }.as_bool() {
+        to_rect(&mi.rcWork)
+    } else {
+        place::Rect::new(0, 0, 1920, 1080)
+    }
+}
+
+/// Scale a 96-dpi pixel value to this window's monitor.
+unsafe fn scaled(hwnd: HWND, px: u32) -> i32 {
+    let dpi = unsafe { GetDpiForWindow(hwnd) }.max(96);
+    (px as i64 * dpi as i64 / 96) as i32
+}
+
+/// Dock the window in the next (+1) or previous (-1) screen corner of its monitor, keeping its size.
+/// A window that is not in a corner yet first goes to the nearest one.
+unsafe fn move_to_corner(hwnd: HWND, step: i32) {
+    let mut r = RECT::default();
+    if unsafe { GetWindowRect(hwnd, &mut r) }.is_err() {
+        return;
+    }
+    let win = to_rect(&r);
+    let work = unsafe { work_area(hwnd) };
+    let margin = unsafe { scaled(hwnd, cfg().snap_margin) };
+    let here = place::corner_of(win, work);
+    let (hx, hy) = place::corner_pos(here, win.w(), win.h(), work, margin);
+    let target = if (win.l - hx).abs() > 4 || (win.t - hy).abs() > 4 { here } else { place::step_corner(here, step) };
+    let (x, y) = place::corner_pos(target, win.w(), win.h(), work, margin);
+    let _ = unsafe { SetWindowPos(hwnd, None, x, y, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE) };
+    log(&format!("corner {} -> {target} at ({x}, {y})", place::corner_of(win, work)));
+    unsafe { save_geometry(hwnd) };
+}
+
+/// Switch to the next size preset, keeping the corner the window is nearest to where it is.
+unsafe fn cycle_size(hwnd: HWND) {
+    let mut r = RECT::default();
+    if unsafe { GetWindowRect(hwnd, &mut r) }.is_err() {
+        return;
+    }
+    let win = to_rect(&r);
+    let work = unsafe { work_area(hwnd) };
+    let sizes: Vec<(i32, i32)> =
+        cfg().sizes.iter().map(|s| unsafe { (scaled(hwnd, s[0]), scaled(hwnd, s[1])) }).collect();
+    let i = place::next_size(&sizes, win.w(), win.h());
+    let (w, h) = sizes[i];
+    let (w, h) = (w.min(work.w()), h.min(work.h()));
+    let corner = place::corner_of(win, work);
+    let x = if corner == 1 || corner == 2 { win.r - w } else { win.l };
+    let y = if corner == 2 || corner == 3 { win.b - h } else { win.t };
+    let x = x.clamp(work.l, (work.r - w).max(work.l));
+    let y = y.clamp(work.t, (work.b - h).max(work.t));
+    let _ = unsafe { SetWindowPos(hwnd, None, x, y, w, h, SWP_NOZORDER | SWP_NOACTIVATE) };
+    log(&format!("size preset {i}: {w}x{h} (corner {corner})"));
+    unsafe { save_geometry(hwnd) };
+}
+
+/// Magnetic edge snapping while the window is dragged (WM_MOVING). Returns true when the rectangle changed.
+unsafe fn snap_moving(hwnd: HWND, r: &mut RECT) -> bool {
+    let c = cfg();
+    let work = unsafe { work_area(hwnd) };
+    let before = to_rect(r);
+    let after = place::snap_rect(before, work, unsafe { scaled(hwnd, c.snap_distance) }, unsafe { scaled(hwnd, c.snap_margin) });
+    if after == before {
+        return false;
+    }
+    *r = RECT { left: after.l, top: after.t, right: after.r, bottom: after.b };
+    true
+}
+
+/// Make the terminal font bigger or smaller by `delta` points (8-48), remember it and tell the page.
+fn change_font(delta: i32) {
+    let mut size = 0;
+    cfg_update(|c| {
+        c.font_size = (c.font_size as i32 + delta).clamp(8, 48) as u32;
+        size = c.font_size;
+    });
+    log(&format!("font size -> {size}"));
+    wv::post(&serde_json::json!({ "t": "font", "size": size }).to_string());
+}
+
 fn on_screen(g: &config::Geometry) -> bool {
     let (vx, vy, vw, vh) = unsafe {
         (
@@ -651,6 +830,252 @@ unsafe fn save_geometry(hwnd: HWND) {
 }
 
 // ---- tray icon -----------------------------------------------------------------------------
+
+// ---- shells (tabs) ---------------------------------------------------------------------------
+
+static SHELLS: Mutex<shells::Shells> = Mutex::new(shells::Shells::new());
+/// The profile each live shell was started from (used again when a finished shell is restarted).
+static SPAWN_PROFILES: Mutex<Vec<(u32, config::Profile)>> = Mutex::new(Vec::new());
+/// True while the profile picker is open because we took the keyboard for it.
+static PICKER_GRABBED: AtomicBool = AtomicBool::new(false);
+
+fn shells_lock() -> std::sync::MutexGuard<'static, shells::Shells> {
+    SHELLS.lock().unwrap_or_else(|p| p.into_inner())
+}
+
+/// Expand `%NAME%` environment variables in a configured path.
+fn expand_env(s: &str) -> String {
+    let mut out = String::new();
+    let mut rest = s;
+    while let Some(i) = rest.find('%') {
+        out.push_str(&rest[..i]);
+        let after = &rest[i + 1..];
+        match after.find('%') {
+            Some(j) if j > 0 => match std::env::var(&after[..j]) {
+                Ok(v) => {
+                    out.push_str(&v);
+                    rest = &after[j + 1..];
+                }
+                Err(_) => {
+                    out.push('%');
+                    rest = after;
+                }
+            },
+            _ => {
+                out.push('%');
+                rest = after;
+            }
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+fn profile_named(name: &str) -> config::Profile {
+    let c = cfg();
+    c.profiles.iter().find(|p| p.name.eq_ignore_ascii_case(name)).cloned().unwrap_or_else(|| config::default_profile(&c).clone())
+}
+
+/// How to start the shell of session `id` (its profile; a plain PowerShell when unknown).
+pub fn spawn_opts_for(id: u32) -> pty::SpawnOpts {
+    let p = SPAWN_PROFILES
+        .lock()
+        .ok()
+        .and_then(|l| l.iter().find(|(i, _)| *i == id).map(|(_, p)| p.clone()))
+        .unwrap_or_default();
+    pty::SpawnOpts { dir: p.dir.map(|d| expand_env(&d)), shell: p.shell, command: p.command }
+}
+
+/// Tell the page the shell list: order, which one is active, tab style and the profile names.
+pub fn push_tabs() {
+    let c = cfg();
+    let sh = shells_lock();
+    let list: Vec<serde_json::Value> = sh
+        .entries()
+        .iter()
+        .map(|e| serde_json::json!({ "id": e.id, "profile": e.profile, "color": profile_named(&e.profile).color }))
+        .collect();
+    let names: Vec<String> = c.profiles.iter().map(|p| p.name.clone()).collect();
+    wv::post(
+        &serde_json::json!({ "t": "tabs", "list": list, "active": sh.active(), "mode": c.tabs, "profiles": names }).to_string(),
+    );
+}
+
+/// Show shell `id` (the page swaps its view) and make it the one keystrokes and harness writes go to.
+pub fn switch_to(id: u32) {
+    let ok = shells_lock().activate(id);
+    if ok {
+        pty::set_active(id);
+        wv::post(&serde_json::json!({ "t": "show", "s": id }).to_string());
+        push_tabs();
+        log(&format!("shell {id} is now active"));
+    }
+}
+
+fn shell_step(delta: i32) {
+    let id = shells_lock().step(delta);
+    if let Some(id) = id {
+        pty::set_active(id);
+        wv::post(&serde_json::json!({ "t": "show", "s": id }).to_string());
+        push_tabs();
+        log(&format!("shell {id} is now active (step {delta})"));
+    }
+}
+
+fn shell_jump(n: usize) {
+    let id = shells_lock().jump(n);
+    match id {
+        Some(id) => {
+            pty::set_active(id);
+            wv::post(&serde_json::json!({ "t": "show", "s": id }).to_string());
+            push_tabs();
+            log(&format!("jumped to shell {n} (id {id})"));
+        }
+        None => log(&format!("no shell {n} to jump to")),
+    }
+}
+
+/// Start a new shell from a profile (the default one when `profile` is None) and show it.
+pub fn new_shell(profile: Option<&str>) {
+    let p = match profile {
+        Some(n) => profile_named(n),
+        None => config::default_profile(&cfg()).clone(),
+    };
+    let id = shells_lock().add(&p.name);
+    let Some(id) = id else {
+        log("new shell refused: the window already holds the most shells");
+        wv::post("{\"t\":\"full\"}");
+        return;
+    };
+    if let Ok(mut l) = SPAWN_PROFILES.lock() {
+        l.push((id, p.clone()));
+    }
+    log(&format!("new shell {id} from profile '{}'", p.name));
+    shells_lock().activate(id);
+    pty::set_active(id);
+    wv::post(&serde_json::json!({ "t": "open", "s": id }).to_string());
+    push_tabs();
+}
+
+/// The close hotkey: a finished shell closes at once, a running one needs a second press within 3 seconds.
+fn close_active_shell() {
+    let id = shells_lock().active();
+    if id == 0 {
+        return;
+    }
+    let step = if pty::has_session(id) {
+        shells_lock().request_close(id, now_ms() as u64)
+    } else {
+        shells::CloseStep::Close
+    };
+    match step {
+        shells::CloseStep::Confirm => {
+            let pos = shells_lock().position(id).map(|p| p + 1).unwrap_or(0);
+            log(&format!("close shell {id}: press again to confirm"));
+            wv::post(&serde_json::json!({ "t": "confirm", "s": id, "n": pos }).to_string());
+        }
+        shells::CloseStep::Close => close_shell(id),
+    }
+}
+
+fn close_shell(id: u32) {
+    if shells_lock().len() <= 1 {
+        // The last shell is never removed: it starts over (fresh shell, same tab).
+        pty::close(id);
+        log(&format!("shell {id} was the last one: starting it again"));
+        wv::post(&serde_json::json!({ "t": "reset", "s": id }).to_string());
+        return;
+    }
+    pty::close(id);
+    let next = shells_lock().remove(id);
+    if let Ok(mut l) = SPAWN_PROFILES.lock() {
+        l.retain(|(i, _)| *i != id);
+    }
+    log(&format!("shell {id} closed"));
+    wv::post(&serde_json::json!({ "t": "close", "s": id }).to_string());
+    if let Some(n) = next {
+        pty::set_active(n);
+        wv::post(&serde_json::json!({ "t": "show", "s": n }).to_string());
+    }
+    push_tabs();
+}
+
+/// The picker hotkey: take the keyboard (like the settings panel) so a number key can choose a profile.
+unsafe fn open_picker(hwnd: HWND) {
+    if !TERMINAL_FOCUS.load(Ordering::SeqCst) {
+        unsafe { grab_focus(hwnd) };
+        PICKER_GRABBED.store(true, Ordering::SeqCst);
+    }
+    push_tabs();
+    wv::post("{\"t\":\"picker\"}");
+}
+
+pub fn picker_closed(hwnd_i: isize) {
+    if PICKER_GRABBED.swap(false, Ordering::SeqCst) {
+        unsafe { release_focus(HWND(hwnd_i as *mut std::ffi::c_void)) };
+    }
+}
+
+// ---- start with Windows ----------------------------------------------------------------------
+
+const RUN_KEY: &str = "Software\\Microsoft\\Windows\\CurrentVersion\\Run";
+
+/// Registry value name. Test modes use a different name so a test can never touch the user's real entry.
+fn autostart_name() -> &'static str {
+    if is_test_mode() { "HUDshell-test" } else { "HUDshell" }
+}
+
+fn wide_z(s: &str) -> Vec<u16> {
+    s.encode_utf16().chain(std::iter::once(0)).collect()
+}
+
+/// Whether this program is registered to start when the user signs in.
+fn autostart_enabled() -> bool {
+    use windows::Win32::System::Registry::{RegCloseKey, RegOpenKeyExW, RegQueryValueExW, HKEY, HKEY_CURRENT_USER, KEY_READ};
+    let key = wide_z(RUN_KEY);
+    let name = wide_z(autostart_name());
+    unsafe {
+        let mut h = HKEY::default();
+        if RegOpenKeyExW(HKEY_CURRENT_USER, PCWSTR(key.as_ptr()), None, KEY_READ, &mut h).is_err() {
+            return false;
+        }
+        let found = RegQueryValueExW(h, PCWSTR(name.as_ptr()), None, None, None, None).is_ok();
+        let _ = RegCloseKey(h);
+        found
+    }
+}
+
+/// Add or remove the per-user startup entry (HKCU Run). Only HUDshell's own value is ever touched.
+fn set_autostart(on: bool) -> bool {
+    use windows::Win32::System::Registry::{
+        RegCloseKey, RegCreateKeyExW, RegDeleteValueW, RegSetValueExW, HKEY, HKEY_CURRENT_USER, KEY_WRITE,
+        REG_OPTION_NON_VOLATILE, REG_SZ,
+    };
+    let key = wide_z(RUN_KEY);
+    let name = wide_z(autostart_name());
+    unsafe {
+        let mut h = HKEY::default();
+        if RegCreateKeyExW(HKEY_CURRENT_USER, PCWSTR(key.as_ptr()), None, PCWSTR::null(), REG_OPTION_NON_VOLATILE, KEY_WRITE, None, &mut h, None).is_err() {
+            return false;
+        }
+        let ok = if on {
+            let Ok(exe) = std::env::current_exe() else {
+                let _ = RegCloseKey(h);
+                return false;
+            };
+            let value = wide_z(&format!("\"{}\"", exe.display()));
+            let bytes = std::slice::from_raw_parts(value.as_ptr() as *const u8, value.len() * 2);
+            RegSetValueExW(h, PCWSTR(name.as_ptr()), None, REG_SZ, Some(bytes)).is_ok()
+        } else {
+            // A value that is already absent counts as success.
+            let r = RegDeleteValueW(h, PCWSTR(name.as_ptr()));
+            r.is_ok() || !autostart_enabled()
+        };
+        let _ = RegCloseKey(h);
+        log(&format!("autostart {} -> {ok}", if on { "on" } else { "off" }));
+        ok
+    }
+}
 
 /// Show a balloon/toast from the tray icon (hotkey conflicts, bad config).
 unsafe fn tray_notify(hwnd: HWND, title: &str, text: &str) {
@@ -710,8 +1135,12 @@ unsafe fn tray_menu(hwnd: HWND) {
         let _ = AppendMenuW(menu, MF_STRING, 3, w!("Next colour theme"));
         let _ = AppendMenuW(menu, MF_STRING, 4, w!("Grab / release keyboard focus"));
         let ghost_chk = if GHOST_ON.load(Ordering::SeqCst) { MF_CHECKED } else { MF_UNCHECKED };
+        let auto_chk = if autostart_enabled() { MF_CHECKED } else { MF_UNCHECKED };
         let _ = AppendMenuW(menu, MF_STRING | ghost_chk, 7, w!("Ghost (click-through + dim)"));
+        let _ = AppendMenuW(menu, MF_STRING, 9, w!("New shell"));
+        let _ = AppendMenuW(menu, MF_STRING, 10, w!("Next shell"));
         let _ = AppendMenuW(menu, MF_STRING, 6, w!("Settings (opacity, colours)..."));
+        let _ = AppendMenuW(menu, MF_STRING | auto_chk, 8, w!("Start with Windows"));
         let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
         let _ = AppendMenuW(menu, MF_STRING, 5, w!("Quit HUDshell"));
     }
@@ -748,6 +1177,14 @@ unsafe fn tray_menu(hwnd: HWND) {
             }
             6 => open_settings(hwnd),
             7 => toggle_ghost(hwnd),
+            9 => new_shell(None),
+            10 => shell_step(1),
+            8 => {
+                let on = !autostart_enabled();
+                if !set_autostart(on) {
+                    tray_notify(hwnd, "HUDshell", "Could not change the Start with Windows setting");
+                }
+            }
             _ => {}
         }
         // Give the keyboard back to whatever had it, unless the user asked to grab it.
@@ -762,6 +1199,10 @@ unsafe fn tray_menu(hwnd: HWND) {
 unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     unsafe {
         match msg {
+            m if m != 0 && m == ACTIVATE_MSG.load(Ordering::SeqCst) => {
+                bring_forward(hwnd);
+                LRESULT(0)
+            }
             WM_HOTKEY => {
                 match wparam.0 as i32 {
                     HK_CLICKTHROUGH => toggle_click_through(hwnd),
@@ -778,6 +1219,19 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                     HK_OPACITY_DOWN => step_opacity(hwnd, -10),
                     HK_SETTINGS => open_settings(hwnd),
                     HK_GHOST => toggle_ghost(hwnd),
+                    HK_CORNER_NEXT => move_to_corner(hwnd, 1),
+                    HK_CORNER_PREV => move_to_corner(hwnd, -1),
+                    HK_SIZE => cycle_size(hwnd),
+                    HK_FONT_UP => change_font(1),
+                    HK_FONT_DOWN => change_font(-1),
+                    HK_SHELL_NEXT => shell_step(1),
+                    HK_SHELL_PREV => shell_step(-1),
+                    HK_SHELL_NEW => new_shell(None),
+                    HK_SHELL_CLOSE => close_active_shell(),
+                    HK_SHELL_LIST => wv::post("{\"t\":\"overlay\"}"),
+                    HK_SHELL_PICKER => open_picker(hwnd),
+                    HK_SHELL_ATTN => wv::post("{\"t\":\"attentionnext\"}"),
+                    n if (HK_SHELL_JUMP..HK_SHELL_JUMP + 9).contains(&n) => shell_jump((n - HK_SHELL_JUMP + 1) as usize),
                     HK_QUIT => {
                         log("quit requested");
                         let _ = DestroyWindow(hwnd);
@@ -803,6 +1257,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                     // Focus was taken away by something else (user clicked the game,
                     // or the game re-asserted itself). Never stay activatable.
                     TERMINAL_FOCUS.store(false, Ordering::SeqCst);
+                    refresh_opacity(hwnd);
                     set_ex_flag(hwnd, WS_EX_NOACTIVATE, true);
                     refresh_pointer_style(hwnd);
                     log("focus lost externally: back to passive HUD (NOACTIVATE restored)");
@@ -873,12 +1328,13 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             }
             pty::WM_APP_PTY => {
                 pty::clear_wake();
+                note_output(hwnd);
                 wv::pump_output();
                 LRESULT(0)
             }
             pty::WM_APP_PTY_EXIT => {
                 wv::pump_output();
-                wv::notify_exit();
+                wv::notify_exit(wparam.0 as pty::SessionId);
                 LRESULT(0)
             }
             #[cfg(feature = "harness")]
@@ -887,7 +1343,9 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 LRESULT(0)
             }
             WM_TIMER => {
-                if wparam.0 == 3 {
+                if wparam.0 == 4 {
+                    idle_tick(hwnd);
+                } else if wparam.0 == 3 {
                     let _ = KillTimer(Some(hwnd), 3);
                     wv::log_children(hwnd);
                 } else if wparam.0 == 1 {
@@ -920,6 +1378,11 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 let _ = SetTimer(Some(hwnd), 2, 100, None);
                 DefWindowProcW(hwnd, msg, wparam, lparam)
             }
+            WM_MOVING => {
+                // lparam points at the rectangle the window is about to occupy; snapping edits it in place.
+                let r = unsafe { &mut *(lparam.0 as *mut RECT) };
+                if snap_moving(hwnd, r) { LRESULT(1) } else { DefWindowProcW(hwnd, msg, wparam, lparam) }
+            }
             WM_EXITSIZEMOVE => {
                 let _ = KillTimer(Some(hwnd), 2);
                 log("WM_EXITSIZEMOVE");
@@ -948,8 +1411,23 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
     }
 }
 
+/// Registered message a second launch posts to the running window.
+static ACTIVATE_MSG: AtomicU32 = AtomicU32::new(0);
+
+/// A second launch asked the running window to show itself: unhide, leave ghost mode, stay on top.
+unsafe fn bring_forward(hwnd: HWND) {
+    unsafe { ghost_off(hwnd, true) };
+    let was_hidden = !VISIBLE.load(Ordering::SeqCst);
+    if was_hidden {
+        unsafe { toggle_show(hwnd) };
+    }
+    unsafe { reassert_topmost(hwnd) };
+    log(&format!("second launch: brought the running window forward (was hidden: {was_hidden})"));
+}
+
 fn main() -> windows::core::Result<()> {
     unsafe {
+        ACTIVATE_MSG.store(RegisterWindowMessageW(w!("HUDshell.Activate")), Ordering::SeqCst);
         // Single instance: a stale copy would silently hold the hotkeys.
         let _guard = windows::Win32::System::Threading::CreateMutexW(
             None,
@@ -959,7 +1437,10 @@ fn main() -> windows::core::Result<()> {
         if windows::Win32::Foundation::GetLastError()
             == windows::Win32::Foundation::ERROR_ALREADY_EXISTS
         {
-            log("ANOTHER INSTANCE IS ALREADY RUNNING - exiting (quit it from its tray icon or its quit hotkey first).");
+            log("ANOTHER INSTANCE IS ALREADY RUNNING - asking it to show itself, then exiting.");
+            if let Ok(other) = FindWindowW(w!("HUDshell"), PCWSTR::null()) {
+                let _ = PostMessageW(Some(other), ACTIVATE_MSG.load(Ordering::SeqCst), WPARAM(0), LPARAM(0));
+            }
             return Ok(());
         }
         let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
@@ -1041,6 +1522,18 @@ fn main() -> windows::core::Result<()> {
             (HK_SETTINGS, &hk.settings, "settings panel"),
             (HK_QUIT, &hk.quit, "quit"),
             (HK_GHOST, &hk.ghost, "ghost (click-through + dim)"),
+            (HK_CORNER_NEXT, &hk.corner_next, "next corner"),
+            (HK_CORNER_PREV, &hk.corner_prev, "previous corner"),
+            (HK_SIZE, &hk.size_cycle, "size presets"),
+            (HK_FONT_UP, &hk.font_bigger, "bigger font"),
+            (HK_FONT_DOWN, &hk.font_smaller, "smaller font"),
+            (HK_SHELL_NEXT, &hk.shell_next, "next shell"),
+            (HK_SHELL_PREV, &hk.shell_prev, "previous shell"),
+            (HK_SHELL_NEW, &hk.shell_new, "new shell"),
+            (HK_SHELL_CLOSE, &hk.shell_close, "close shell"),
+            (HK_SHELL_LIST, &hk.shell_list, "shell list"),
+            (HK_SHELL_PICKER, &hk.shell_picker, "shell picker"),
+            (HK_SHELL_ATTN, &hk.shell_attention, "next shell needing attention"),
         ] {
             match config::parse_hotkey(spec) {
                 Some((mods, vk)) => match RegisterHotKey(Some(hwnd), id, HOT_KEY_MODIFIERS(mods), vk) {
@@ -1056,6 +1549,27 @@ fn main() -> windows::core::Result<()> {
                 None => notice(&format!("Hotkey '{spec}' ({what}) is not valid")),
             }
         }
+        for n in 1..=9 {
+            let spec = format!("{}+{n}", hk.shell_jump);
+            match config::parse_hotkey(&spec) {
+                Some((mods, vk)) => {
+                    if RegisterHotKey(Some(hwnd), HK_SHELL_JUMP + n - 1, HOT_KEY_MODIFIERS(mods), vk).is_err() {
+                        log(&format!("hotkey {spec} (shell {n}) FAILED"));
+                    }
+                }
+                None => {
+                    notice(&format!("shell_jump '{}' is not valid", hk.shell_jump));
+                    break;
+                }
+            }
+        }
+        {
+            let c0 = cfg();
+            shells_lock().adopt(1, &config::default_profile(&c0).name);
+            if let Ok(mut l) = SPAWN_PROFILES.lock() {
+                l.push((1, config::default_profile(&c0).clone()));
+            }
+        }
         TASKBAR_MSG.store(RegisterWindowMessageW(w!("TaskbarCreated")), Ordering::SeqCst);
         if !test_mode {
             add_tray(hwnd);
@@ -1065,14 +1579,26 @@ fn main() -> windows::core::Result<()> {
             }
         }
 
-        log("start: showing window without activation");
-        let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+        if loaded.start_hidden {
+            VISIBLE.store(false, Ordering::SeqCst);
+            log("start: window stays hidden (start_hidden); use the show/hide hotkey or the tray menu");
+        } else {
+            log("start: showing window without activation");
+            let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+        }
         reassert_topmost(hwnd);
         foreground_note("after initial show");
         if std::env::args().any(|a| a == "--interactive") {
             CLICK_THROUGH.store(false, Ordering::SeqCst);
         }
         refresh_pointer_style(hwnd);
+        LAST_OUTPUT_MS.store(now_ms() as u64, Ordering::SeqCst);
+        if loaded.start_ghost {
+            ghost_on(hwnd);
+        }
+        if loaded.idle_dim_seconds > 0 {
+            let _ = SetTimer(Some(hwnd), 4, 1000, None);
+        }
 
         wv::set_options(&loaded.unicode, &loaded.shift_enter);
         wv::set_config_json(

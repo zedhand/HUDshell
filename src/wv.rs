@@ -330,22 +330,32 @@ pub unsafe fn init(hwnd: HWND) -> Result<(), String> {
 fn handle_term_message(hwnd: isize, m: &str) {
     let Ok(v) = serde_json::from_str::<serde_json::Value>(m) else { return };
     match v["t"].as_str() {
-        Some("ready") => {
+        // "ready": a view was created and sized (start its shell). "restart": the user asked for a new
+        // shell in a tab whose shell had exited.
+        Some(kind @ ("ready" | "restart")) => {
+            let id = session_of(&v);
             let cols = v["cols"].as_i64().unwrap_or(100);
             let rows = v["rows"].as_i64().unwrap_or(30);
-            if !pty::has_session() {
-                log(&format!("bridge: page ready at {cols}x{rows}, starting shell"));
-                match pty::spawn(hwnd, cols, rows) {
-                    Ok(path) => log(&format!("pty: started {path} at {cols}x{rows}")),
-                    Err(e) => log(&format!("pty: FAILED to start: {e}")),
+            if !pty::has_session(id) {
+                log(&format!("bridge: session {id} {kind} at {cols}x{rows}, starting shell"));
+                match pty::spawn(hwnd, id, cols, rows, &crate::spawn_opts_for(id)) {
+                    Ok(path) => log(&format!("pty: started {path} for session {id} at {cols}x{rows}")),
+                    Err(e) => log(&format!("pty: FAILED to start session {id}: {e}")),
                 }
             }
         }
+        Some("switch") => crate::switch_to(session_of(&v)),
+        Some("newshell") => {
+            crate::new_shell(v["profile"].as_str());
+            crate::picker_closed(hwnd);
+        }
+        Some("pickerclose") => crate::picker_closed(hwnd),
+        Some("tabsneeded") => crate::push_tabs(),
         Some("in") => {
             if let Some(d) = v["d"].as_str() {
                 if d.len() <= 2_000_000 {
                     if let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(d) {
-                        pty::write(bytes);
+                        pty::write_to(session_of(&v), bytes);
                     }
                 }
             }
@@ -362,7 +372,7 @@ fn handle_term_message(hwnd: isize, m: &str) {
             let cols = v["cols"].as_i64().unwrap_or(0);
             let rows = v["rows"].as_i64().unwrap_or(0);
             if (1..=500).contains(&cols) && (1..=300).contains(&rows) {
-                pty::resize(cols, rows);
+                pty::resize(session_of(&v), cols, rows);
             }
         }
         Some("ack") => {
@@ -373,8 +383,8 @@ fn handle_term_message(hwnd: isize, m: &str) {
         #[cfg(feature = "harness")]
         Some("dump") => {
             log(&format!(
-                "terminal dump: {}x{} buffer={} cursor={} unicode={} view={} cue={} modes={}",
-                v["cols"], v["rows"], v["buf"], v["cursor"], v["unicode"], v["view"], v["cue"], v["modes"]
+                "terminal dump: {}x{} buffer={} cursor={} unicode={} view={} cue={} fs={} modes={} s={} ui={}",
+                v["cols"], v["rows"], v["buf"], v["cursor"], v["unicode"], v["view"], v["cue"], v["fs"], v["modes"], v["s"], v["ui"]
             ));
             if let Some(lines) = v["lines"].as_array() {
                 if let Ok(mut d) = LAST_DUMP.lock() {
@@ -413,10 +423,10 @@ pub fn pump_output() {
         if INFLIGHT.with(|i| i.get()) >= MAX_INFLIGHT {
             break;
         }
-        let Some(chunk) = pty::take_chunk() else { break };
+        let Some((id, chunk)) = pty::take_chunk() else { break };
         INFLIGHT.with(|i| i.set(i.get() + chunk.len()));
         let b64 = base64::engine::general_purpose::STANDARD.encode(&chunk);
-        post(&format!("{{\"t\":\"out\",\"d\":\"{b64}\"}}"));
+        post(&format!("{{\"t\":\"out\",\"s\":{id},\"d\":\"{b64}\"}}"));
     }
 }
 
@@ -477,6 +487,9 @@ pub fn send_key(spec: &str) {
         "down" => ("ArrowDown".into(), "ArrowDown".into(), 40, ""),
         "left" => ("ArrowLeft".into(), "ArrowLeft".into(), 37, ""),
         "right" => ("ArrowRight".into(), "ArrowRight".into(), 39, ""),
+        n if n.len() == 1 && n.as_bytes()[0].is_ascii_digit() => {
+            (n.to_string(), format!("Digit{n}"), n.as_bytes()[0] as u32, "")
+        }
         n if n.len() == 1 && n.as_bytes()[0].is_ascii_alphabetic() => {
             let u = n.to_ascii_uppercase();
             (n.to_string(), format!("Key{u}"), u.as_bytes()[0] as u32, "")
@@ -514,8 +527,13 @@ pub fn paste_text(s: &str) {
     post(&serde_json::json!({ "t": "paste", "text": s }).to_string());
 }
 
-pub fn notify_exit() {
-    post("{\"t\":\"exit\"}");
+pub fn notify_exit(id: pty::SessionId) {
+    post(&format!("{{\"t\":\"exit\",\"s\":{id}}}"));
+}
+
+/// Session a page message belongs to (the page puts it in `s`; messages without one mean session 1).
+fn session_of(v: &serde_json::Value) -> pty::SessionId {
+    v["s"].as_u64().unwrap_or(1) as pty::SessionId
 }
 
 pub unsafe fn resize(hwnd: HWND) {

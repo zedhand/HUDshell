@@ -5,8 +5,8 @@
 
 use std::collections::VecDeque;
 use std::ffi::c_void;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{mpsc, Condvar, Mutex};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
+use std::sync::{mpsc, Arc, Condvar, Mutex};
 use std::time::Duration;
 
 use windows::core::{PCWSTR, PWSTR};
@@ -44,23 +44,50 @@ pub const WM_APP_PTY_EXIT: u32 = 0x8000 + 2;
 /// Hard cap on bytes buffered between the reader thread and the UI thread.
 const MAX_QUEUED_BYTES: usize = 1 << 20;
 
+/// Id of a shell session (the page names its views with the same number).
+pub type SessionId = u32;
+
 struct Queue {
     chunks: VecDeque<Vec<u8>>,
     bytes: usize,
 }
-static QUEUE: Mutex<Queue> = Mutex::new(Queue { chunks: VecDeque::new(), bytes: 0 });
-static QUEUE_CV: Condvar = Condvar::new();
-static WAKE_PENDING: AtomicBool = AtomicBool::new(false);
-static CLOSED: AtomicBool = AtomicBool::new(false);
+
+/// State shared between a session's threads and the UI thread.
+struct Shared {
+    queue: Mutex<Queue>,
+    cv: Condvar,
+    /// The pseudoconsole has been (or is being) closed; closing twice would be a bug.
+    closed: AtomicBool,
+    /// The shell process has exited (set by the exit watcher; the session record stays until replaced).
+    exited: AtomicBool,
+}
 
 struct Session {
+    id: SessionId,
     hpc: isize,
     job: isize,
     tx: mpsc::Sender<Vec<u8>>,
     cols: i16,
     rows: i16,
+    shared: Arc<Shared>,
 }
-static SESSION: Mutex<Option<Session>> = Mutex::new(None);
+
+static SESSIONS: Mutex<Vec<Session>> = Mutex::new(Vec::new());
+/// One wake message at a time is enough: the UI thread drains every session each time.
+static WAKE_PENDING: AtomicBool = AtomicBool::new(false);
+/// The session harness scripts and `write` talk to (the one on screen).
+static ACTIVE: AtomicU32 = AtomicU32::new(1);
+/// Round-robin start so one busy session cannot starve the others.
+static NEXT_FROM: AtomicUsize = AtomicUsize::new(0);
+
+pub fn set_active(id: SessionId) {
+    ACTIVE.store(id, Ordering::SeqCst);
+}
+
+#[cfg(feature = "harness")]
+pub fn active() -> SessionId {
+    ACTIVE.load(Ordering::SeqCst)
+}
 
 /// Census of control sequences the child programs emit (what Claude/Codex/pwsh really use).
 #[cfg(feature = "harness")]
@@ -172,17 +199,38 @@ pub fn clear_wake() {
     WAKE_PENDING.store(false, Ordering::SeqCst);
 }
 
-/// Pop one buffered output chunk (UI thread).
-pub fn take_chunk() -> Option<Vec<u8>> {
-    let mut q = QUEUE.lock().ok()?;
-    let c = q.chunks.pop_front()?;
-    q.bytes -= c.len();
-    QUEUE_CV.notify_all();
-    Some(c)
+/// Pop one buffered output chunk from any session (UI thread), rotating between sessions.
+pub fn take_chunk() -> Option<(SessionId, Vec<u8>)> {
+    let list: Vec<(SessionId, Arc<Shared>)> =
+        SESSIONS.lock().ok()?.iter().map(|s| (s.id, s.shared.clone())).collect();
+    if list.is_empty() {
+        return None;
+    }
+    let start = NEXT_FROM.fetch_add(1, Ordering::Relaxed);
+    for k in 0..list.len() {
+        let (id, sh) = &list[(start + k) % list.len()];
+        let Ok(mut q) = sh.queue.lock() else { continue };
+        if let Some(c) = q.chunks.pop_front() {
+            q.bytes -= c.len();
+            sh.cv.notify_all();
+            return Some((*id, c));
+        }
+    }
+    None
 }
 
-pub fn has_session() -> bool {
-    SESSION.lock().map(|s| s.is_some()).unwrap_or(false)
+/// A shell is running (started and not yet exited) for this session.
+pub fn has_session(id: SessionId) -> bool {
+    SESSIONS
+        .lock()
+        .map(|s| s.iter().any(|x| x.id == id && !x.shared.exited.load(Ordering::SeqCst)))
+        .unwrap_or(false)
+}
+
+/// Ids of all sessions that exist (running or finished), in creation order.
+#[cfg(feature = "harness")]
+pub fn session_ids() -> Vec<SessionId> {
+    SESSIONS.lock().map(|s| s.iter().map(|x| x.id).collect()).unwrap_or_default()
 }
 
 static SHELL_OVERRIDE: Mutex<Option<String>> = Mutex::new(None);
@@ -195,8 +243,11 @@ pub fn set_shell(s: Option<String>) {
 }
 
 /// Candidate shell executables in preference order: configured shell, PowerShell 7, Windows PowerShell last.
-fn shell_candidates() -> Vec<String> {
+fn shell_candidates(first: Option<&str>) -> Vec<String> {
     let mut v: Vec<String> = Vec::new();
+    if let Some(p) = first.filter(|p| !p.trim().is_empty()) {
+        v.push(p.to_string());
+    }
     if let Some(Some(p)) = SHELL_OVERRIDE.lock().ok().map(|o| o.clone()) {
         v.push(p);
     }
@@ -226,13 +277,24 @@ fn shell_candidates() -> Vec<String> {
     v
 }
 
-pub fn spawn(hwnd: isize, cols: i64, rows: i64) -> Result<String, String> {
-    let cols = cols.clamp(1, 500) as i16;
-    let rows = rows.clamp(1, 300) as i16;
-    unsafe { spawn_inner(hwnd, cols, rows) }
+/// How to start one shell: where, which executable, and a line to type once it is up.
+#[derive(Clone, Default, Debug)]
+pub struct SpawnOpts {
+    pub dir: Option<String>,
+    pub shell: Option<String>,
+    pub command: Option<String>,
 }
 
-unsafe fn spawn_inner(hwnd: isize, cols: i16, rows: i16) -> Result<String, String> {
+/// Start a shell for session `id` (replacing a finished one with the same id).
+pub fn spawn(hwnd: isize, id: SessionId, cols: i64, rows: i64, opts: &SpawnOpts) -> Result<String, String> {
+    let cols = cols.clamp(1, 500) as i16;
+    let rows = rows.clamp(1, 300) as i16;
+    // A finished session with this id is replaced; its handles are released first.
+    close(id);
+    unsafe { spawn_inner(hwnd, id, cols, rows, opts) }
+}
+
+unsafe fn spawn_inner(hwnd: isize, id: SessionId, cols: i16, rows: i16, opts: &SpawnOpts) -> Result<String, String> {
     let e = |what: &str, err: windows::core::Error| format!("{what}: {err}");
     let (mut in_r, mut in_w, mut out_r, mut out_w) =
         (HANDLE::default(), HANDLE::default(), HANDLE::default(), HANDLE::default());
@@ -276,10 +338,19 @@ unsafe fn spawn_inner(hwnd: isize, cols: i16, rows: i16) -> Result<String, Strin
         std::env::set_var("COLORTERM", "truecolor");
         std::env::set_var("TERM_PROGRAM", "HUDshell");
 
-        let cwd = wide(&std::env::var("USERPROFILE").unwrap_or_else(|_| "C:\\".into()));
+        let home = std::env::var("USERPROFILE").unwrap_or_else(|_| "C:\\".into());
+        let start_dir = match opts.dir.as_deref() {
+            Some(d) if std::path::Path::new(d).is_dir() => d.to_string(),
+            Some(d) => {
+                log(&format!("pty: start directory of session {id} does not exist; using the home folder (dir length {})", d.len()));
+                home
+            }
+            None => home,
+        };
+        let cwd = wide(&start_dir);
         let mut launched: Option<(String, PROCESS_INFORMATION)> = None;
         let mut last_err = String::new();
-        for path in shell_candidates() {
+        for path in shell_candidates(opts.shell.as_deref()) {
             let mut cmd = wide(&format!("\"{path}\" -NoLogo"));
             let mut pi = PROCESS_INFORMATION::default();
             match CreateProcessW(
@@ -331,8 +402,16 @@ unsafe fn spawn_inner(hwnd: isize, cols: i16, rows: i16) -> Result<String, Strin
             r2.is_ok()
         ));
 
+        let shared = Arc::new(Shared {
+            queue: Mutex::new(Queue { chunks: VecDeque::new(), bytes: 0 }),
+            cv: Condvar::new(),
+            closed: AtomicBool::new(false),
+            exited: AtomicBool::new(false),
+        });
+
         // Reader: blocking ReadFile, bounded queue, wake the UI thread.
         let out_i = out_r.0 as isize;
+        let rd_shared = shared.clone();
         std::thread::spawn(move || {
             let h = HANDLE(out_i as *mut c_void);
             let mut buf = vec![0u8; 32 * 1024];
@@ -348,16 +427,16 @@ unsafe fn spawn_inner(hwnd: isize, cols: i16, rows: i16) -> Result<String, Strin
                 #[cfg(feature = "harness")]
                 census_scan(&mut carry, &buf[..n as usize]);
                 let chunk = buf[..n as usize].to_vec();
-                if let Ok(mut q) = QUEUE.lock() {
+                if let Ok(mut q) = rd_shared.queue.lock() {
                     while q.bytes > MAX_QUEUED_BYTES {
-                        q = QUEUE_CV.wait(q).unwrap_or_else(|p| p.into_inner());
+                        q = rd_shared.cv.wait(q).unwrap_or_else(|p| p.into_inner());
                     }
                     q.bytes += chunk.len();
                     q.chunks.push_back(chunk);
                 }
                 wake(hwnd);
             }
-            log(&format!("pty reader: EOF after {total} bytes"));
+            log(&format!("pty reader {id}: EOF after {total} bytes"));
         });
 
         // Writer: serializes input so ordering (including query replies) is preserved.
@@ -381,73 +460,116 @@ unsafe fn spawn_inner(hwnd: isize, cols: i16, rows: i16) -> Result<String, Strin
         // Exit watcher: tell the UI, let final output drain, then close the pseudoconsole.
         let proc_i = pi.hProcess.0 as isize;
         let hpc_i = hpc.0;
+        let ex_shared = shared.clone();
         std::thread::spawn(move || {
             unsafe { WaitForSingleObject(HANDLE(proc_i as *mut c_void), INFINITE) };
-            log("pty: shell process exited");
+            log(&format!("pty: shell process of session {id} exited"));
+            ex_shared.exited.store(true, Ordering::SeqCst);
             unsafe {
                 let _ = PostMessageW(
                     Some(HWND(hwnd as *mut c_void)),
                     WM_APP_PTY_EXIT,
-                    WPARAM(0),
+                    WPARAM(id as usize),
                     LPARAM(0),
                 );
             }
             std::thread::sleep(Duration::from_millis(300));
-            if !CLOSED.swap(true, Ordering::SeqCst) {
+            if !ex_shared.closed.swap(true, Ordering::SeqCst) {
                 unsafe { ClosePseudoConsole(HPCON(hpc_i)) };
             }
         });
 
-        if let Ok(mut s) = SESSION.lock() {
-            *s = Some(Session { hpc: hpc.0, job: job.0 as isize, tx, cols, rows });
+        // A profile's command is typed into the new shell once PowerShell has had a moment to start.
+        if let Some(cmd) = opts.command.clone().filter(|c| !c.trim().is_empty()) {
+            let tx2 = tx.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(900));
+                let _ = tx2.send(format!("{cmd}\r").into_bytes());
+            });
+        }
+        if let Ok(mut s) = SESSIONS.lock() {
+            s.push(Session { id, hpc: hpc.0, job: job.0 as isize, tx, cols, rows, shared });
         }
         Ok(path)
     }
 }
 
+/// Write to the session on screen (harness scripts and callers that do not name a session).
+#[cfg(feature = "harness")]
 pub fn write(bytes: Vec<u8>) {
+    write_to(active(), bytes);
+}
+
+pub fn write_to(id: SessionId, bytes: Vec<u8>) {
     #[cfg(feature = "harness")]
     if LOG_INPUT.load(Ordering::Relaxed) {
         let hex: Vec<String> = bytes.iter().take(64).map(|b| format!("{b:02x}")).collect();
         log(&format!("PTY-IN {} byte(s): {}", bytes.len(), hex.join(" ")));
     }
-    if let Ok(s) = SESSION.lock() {
-        if let Some(s) = s.as_ref() {
+    if let Ok(s) = SESSIONS.lock() {
+        if let Some(s) = s.iter().find(|s| s.id == id) {
             let _ = s.tx.send(bytes);
         }
     }
 }
 
-pub fn resize(cols: i64, rows: i64) {
+pub fn resize(id: SessionId, cols: i64, rows: i64) {
     let cols = cols.clamp(1, 500) as i16;
     let rows = rows.clamp(1, 300) as i16;
-    if let Ok(mut s) = SESSION.lock() {
-        if let Some(s) = s.as_mut() {
+    if let Ok(mut list) = SESSIONS.lock() {
+        if let Some(s) = list.iter_mut().find(|s| s.id == id) {
             if s.cols == cols && s.rows == rows {
                 return; // drop no-op resizes
             }
+            // A finished shell's pseudoconsole may already be closed: only resize live ones.
+            if s.shared.closed.load(Ordering::SeqCst) {
+                s.cols = cols;
+                s.rows = rows;
+                return;
+            }
             let r = unsafe { ResizePseudoConsole(HPCON(s.hpc), COORD { X: cols, Y: rows }) };
-            log(&format!("pty: resize {}x{} -> {}x{} ok={}", s.cols, s.rows, cols, rows, r.is_ok()));
+            log(&format!("pty: resize session {id} {}x{} -> {}x{} ok={}", s.cols, s.rows, cols, rows, r.is_ok()));
             s.cols = cols;
             s.rows = rows;
         }
     }
 }
 
-/// Kill the process tree (job close) first, then close the pseudoconsole on a worker thread.
-pub fn shutdown() {
-    let taken = SESSION.lock().ok().and_then(|mut s| s.take());
+/// Release one session: kill its process tree (job close), close its pseudoconsole on a worker thread
+/// and forget it. Safe for a session that already exited or does not exist.
+pub fn close(id: SessionId) {
+    let taken = SESSIONS.lock().ok().and_then(|mut l| {
+        let i = l.iter().position(|s| s.id == id)?;
+        Some(l.remove(i))
+    });
     if let Some(s) = taken {
-        unsafe {
-            let _ = CloseHandle(HANDLE(s.job as *mut c_void));
-        }
-        let hpc = s.hpc;
-        std::thread::spawn(move || {
-            if !CLOSED.swap(true, Ordering::SeqCst) {
-                unsafe { ClosePseudoConsole(HPCON(hpc)) };
-            }
-        });
-        std::thread::sleep(Duration::from_millis(150));
-        log("pty: shutdown done (job closed, pseudoconsole closing)");
+        release(s);
+        log(&format!("pty: session {id} closed"));
     }
+}
+
+fn release(s: Session) {
+    unsafe {
+        let _ = CloseHandle(HANDLE(s.job as *mut c_void));
+    }
+    let hpc = s.hpc;
+    let shared = s.shared.clone();
+    std::thread::spawn(move || {
+        if !shared.closed.swap(true, Ordering::SeqCst) {
+            unsafe { ClosePseudoConsole(HPCON(hpc)) };
+        }
+    });
+}
+
+/// Kill every process tree (job close) first, then close the pseudoconsoles on worker threads.
+pub fn shutdown() {
+    let all: Vec<Session> = SESSIONS.lock().map(|mut l| std::mem::take(&mut *l)).unwrap_or_default();
+    if all.is_empty() {
+        return;
+    }
+    for s in all {
+        release(s);
+    }
+    std::thread::sleep(Duration::from_millis(150));
+    log("pty: shutdown done (jobs closed, pseudoconsoles closing)");
 }

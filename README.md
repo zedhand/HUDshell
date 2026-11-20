@@ -14,6 +14,10 @@ click-through by default, an explicit keyboard-focus toggle, and an adjustable o
 - **Click-through** by default (mouse input goes to the window underneath). Toggle with a hotkey.
 - **Grab / release keyboard focus** with a hotkey, or click the terminal while it is interactive.
 - **Opacity** from 20% to 100% (hotkeys, settings panel, or `config.json`).
+- **Several shells in one window** (up to 9): visible tabs, a compact overlay-only list, switch hotkeys that work while the game has the keyboard, tab names taken from each program's own window title, a mark on tabs with unseen output, and profiles (start folder, start command, accent colour).
+- **Corners and sizes**: a hotkey docks the window in the next screen corner, another cycles size presets, and dragging near a screen edge snaps to it.
+- **Opacity that follows you**: a separate opacity while you are typing, and an optional dim after the shell has been quiet for a while.
+- **Start options**: start hidden or ghosted; a second launch brings the running window forward; "Start with Windows" in the tray menu.
 - **Ghost** preset: one key makes the window click-through and dims it (40% by default); press again to restore.
 - **Attention cue**: a program that rings the bell or sends an OSC 9 / OSC 777 notification while you are in the game makes the window border pulse (a tray notification when hidden).
 - Colour themes (midnight, graphite, matrix, amber, dracula, solarized-dark, paper, or your own).
@@ -49,6 +53,16 @@ Or by hand: `npm install`, `npm run build`, `cargo build --release`.
 | Ctrl+Alt+[ / Ctrl+Alt+] | opacity down / up (10% steps) |
 | Ctrl+Alt+S | settings panel (arrows change opacity and colours, Esc closes) |
 | Ctrl+Alt+X | ghost: click-through plus dim, press again to restore |
+| Ctrl+Alt+. / Ctrl+Alt+, | dock in the next / previous screen corner |
+| Ctrl+Alt+/ | cycle size presets |
+| Ctrl+Alt+= / Ctrl+Alt+- | bigger / smaller font |
+| Ctrl+Alt+N | new shell (default profile) |
+| Ctrl+Alt+Shift+N | profile picker (takes the keyboard; press a number, Esc cancels) |
+| Ctrl+Alt+PageDown / PageUp | next / previous shell |
+| Ctrl+Alt+1 ... 9 | jump to shell 1-9 |
+| Ctrl+Alt+` | show the shell list for a moment |
+| Ctrl+Alt+; | jump to the next shell with unseen output |
+| Ctrl+Alt+W | close the active shell (press twice within 3 s; closing the last shell starts a fresh one) |
 | Ctrl+Alt+Q | quit |
 
 Inside the terminal: **Shift+Enter** inserts a newline in Claude Code and Codex; **Ctrl+Shift+C** or
@@ -70,11 +84,18 @@ values are range-checked, and an unreadable file is kept as `config.json.bad-N` 
 | `font_family` / `font_size` | Cascadia Mono, Consolas / 14 | size 8-48 |
 | `scrollback` | `2000` | lines, 100-100000 |
 | `shell` | none | full path of a shell to use instead of PowerShell 7 |
-| `hotkeys` | see table above | `click_through`, `grab_focus`, `show_hide`, `cycle_colours`, `opacity_up`, `opacity_down`, `settings`, `ghost`, `quit`; every chord needs at least one modifier |
+| `hotkeys` | see table above | `click_through`, `grab_focus`, `show_hide`, `cycle_colours`, `opacity_up`, `opacity_down`, `settings`, `ghost`, `quit`, `corner_next`, `corner_prev`, `size_cycle`, `font_bigger`, `font_smaller`, `shell_next`, `shell_prev`, `shell_new`, `shell_close`, `shell_list`, `shell_picker`, `shell_attention`, `shell_jump` (modifiers only; `Ctrl+Alt` means Ctrl+Alt+1..9); every chord needs at least one modifier |
 | `ghost_opacity` | `40` | percent used by the ghost preset (20-100); never brightens a window that is already dimmer; never saved over `opacity` |
 | `copy_on_select` | `false` | copy the selection when the mouse button is released |
 | `right_click` | `"off"` | `"paste"`: right-click copies a selection, or pastes when nothing is selected |
 | `osc52` | `"off"` | `"write"`: let programs set the clipboard (OSC 52). Reads are never answered |
+| `snap_distance` / `snap_margin` | `16` / `8` | pixels (96-dpi): dragging this close to a screen edge snaps to it (0 = off); gap kept from the edge |
+| `sizes` | `[[640,360],[900,520],[1280,720]]` | size presets (96-dpi pixels) for the size hotkey |
+| `active_opacity` | `null` | opacity while HUDshell holds the keyboard (`null` = same as `opacity`) |
+| `idle_dim_seconds` / `idle_opacity` | `0` / `50` | dim to `idle_opacity` after this many seconds without shell output (0 = off); output brightens it at once |
+| `start_hidden` / `start_ghost` | `false` / `false` | start hidden / in ghost mode |
+| `tabs` | `"auto"` | `"auto"`: tab strip once there are 2+ shells; `"always"`: strip even for one; `"overlay"`: no strip, only a short overlay on switch and on the list hotkey |
+| `profiles` / `default_profile` | one `pwsh` profile / `""` | kinds of shell: `{name, dir, command, shell, color}`. `dir` expands `%VARS%`; `command` is typed into the new shell; `color` is a tab accent `#rrggbb` |
 | `attention_cue` / `attention_toast` | `true` / `true` | pulse the border, and show a tray notification while hidden, when a program rings the bell or sends OSC 9 / OSC 777 |
 | `window` | remembered | position and size in physical pixels |
 

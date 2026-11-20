@@ -46,6 +46,28 @@ Key decisions and why:
   is ignored) and tells the host. If HUDshell does not hold the keyboard the host asks the page to pulse the border, or (window hidden)
   raises a tray notification. At most one per 3 s; the text is shown but never logged. Needs no hooks and no configuration of the programs.
 
+## Placement, opacity and start
+
+- **Placement** (`src/place.rs`, pure functions with unit tests): the corner hotkeys dock the window in the next or previous corner of the
+  monitor it is on, keeping its size; from a position that is not a corner the first press goes to the nearest one. Size presets are in
+  96-dpi pixels and scaled for the monitor, keeping the nearest corner anchored. Magnetic snapping edits the rectangle in `WM_MOVING`.
+- **One opacity function.** The window alpha comes from one place: the chosen value (the active one while the keyboard is held, if set),
+  lowered by ghost mode or by idle dimming, never raised. Nothing but the user's own choice is ever written to `config.json`.
+- **Second launch** posts a registered message to the running window, which unhides itself, leaves ghost mode and stays on top; the second
+  process then exits. **Start with Windows** writes one value under `HKCU\...\Run` (tests use a different value name).
+
+## Shells (tabs)
+
+- The host keeps a table of sessions (`pty.rs`): each has an id, its own output queue and close flag, and its own ConPTY and job object.
+  Every bridge message that belongs to a shell carries `s`, the session id. The page keeps one xterm.js view per id and shows one.
+- The list of shells and which is active lives in the host (`shells.rs`, pure logic with unit tests), so the global hotkeys work while
+  the page has no keyboard. The page draws what the host says: a tab strip (`tabs = auto | always`) or a short overlay list (`overlay`).
+- Tab names come from each program's own window title (OSC 0 / 2); an executable path (PowerShell's default) is replaced by the profile
+  name. A tab is marked when it receives output while not shown, and marked more strongly when its program rings the bell.
+- Closing asks twice (a second press within 3 s), because a shell may be running an agent. Closing the last shell starts a fresh one.
+  A shell that exits stays in its tab until Enter starts a new one.
+- A profile is `{name, dir, command, shell, color}`. The command is typed into the new shell about 0.9 s after it starts.
+
 ## Clipboard, links and permissions
 
 - Clipboard **reads** (right-click paste) and OSC 52 **writes** are done by the host with Win32, because the page-side clipboard API needs

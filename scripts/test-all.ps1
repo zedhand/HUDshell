@@ -1,7 +1,7 @@
 <#
 HUDshell full test runner (Windows PowerShell 5.1 or PowerShell 7).
 
-  scripts\test-all.ps1 [-Suite static,keys,width,hideshow,clickfocus,clipboard,autotest,ui,scrollback,ghost,attention,policy,release,config,soak,real | all]
+  scripts\test-all.ps1 [-Suite static,keys,width,hideshow,clickfocus,clipboard,autotest,ui,scrollback,ghost,attention,policy,place,qol,sessions,shells,release,config,soak,real | all]
                        [-Sandbox <folder both Claude Code and Codex already trust>] [-SoakSeconds 300]
 
 What it touches (read before running):
@@ -33,7 +33,7 @@ New-Item -ItemType Directory -Force $scratch | Out-Null
 $env:HUDSHELL_TEST_DIR = $scratch
 if ($Sandbox) { $env:HUDSHELL_SANDBOX = $Sandbox } else { $env:HUDSHELL_SANDBOX = $scratch }
 $Suite = @($Suite | ForEach-Object { $_ -split ',' } | Where-Object { $_ })
-$want = if ($Suite -contains 'all') { @('static', 'keys', 'width', 'hideshow', 'clickfocus', 'clipboard', 'autotest', 'ui', 'scrollback', 'ghost', 'attention', 'policy', 'release', 'config', 'soak') + $(if ($Sandbox) { 'real' } else { @() }) } else { $Suite }
+$want = if ($Suite -contains 'all') { @('static', 'keys', 'width', 'hideshow', 'clickfocus', 'clipboard', 'autotest', 'ui', 'scrollback', 'ghost', 'attention', 'policy', 'place', 'qol', 'sessions', 'shells', 'release', 'config', 'soak') + $(if ($Sandbox) { 'real' } else { @() }) } else { $Suite }
 
 $script:R = New-Object System.Collections.Generic.List[object]
 function Check([string]$suite, [string]$name, [bool]$ok, [string]$detail = '') {
@@ -264,6 +264,25 @@ function Suite-Ui {
     Check 'ui' 'Ctrl+Alt+X (ghost) dims to 40%' ([GT]::Alpha($h) -eq 102) ([GT]::Alpha($h))
     [GT]::Hotkey(0x58); Start-Sleep -Milliseconds 500
     Check 'ui' 'a second Ctrl+Alt+X restores 100% and never took focus' (([GT]::Alpha($h) -eq 255) -and -not [GT]::IsFg($h)) ([GT]::Alpha($h))
+    $o0 = [GT]::Origin($h)
+    [GT]::Hotkey(0xBE); Start-Sleep -Milliseconds 600; $o1 = [GT]::Origin($h)
+    [GT]::Hotkey(0xBE); Start-Sleep -Milliseconds 600; $o2 = [GT]::Origin($h)
+    [GT]::Hotkey(0xBC); Start-Sleep -Milliseconds 600; $o3 = [GT]::Origin($h)
+    Check 'ui' 'Ctrl+Alt+. moves the window to a corner, again to the next one' (($o1.X -ne $o0.X -or $o1.Y -ne $o0.Y) -and ($o2.X -ne $o1.X -or $o2.Y -ne $o1.Y)) ("{0},{1} -> {2},{3} -> {4},{5}" -f $o0.X, $o0.Y, $o1.X, $o1.Y, $o2.X, $o2.Y)
+    Check 'ui' 'Ctrl+Alt+, goes back to the previous corner, and the window never took focus' (($o3.X -eq $o1.X -and $o3.Y -eq $o1.Y) -and -not [GT]::IsFg($h)) ("{0},{1}" -f $o3.X, $o3.Y)
+    [GT]::Hotkey(0xBB); Start-Sleep -Milliseconds 500; [GT]::Hotkey(0xBD); Start-Sleep -Milliseconds 500
+    Check 'ui' 'Ctrl+Alt+= and Ctrl+Alt+- change the font size' (@(Cut $log $n | Where-Object { $_ -match 'font size -> (15|14)' }).Count -ge 2)
+    $nn = LineCount $log
+    [GT]::Hotkey(0x4E); Start-Sleep -Milliseconds 2500
+    [GT]::Hotkey(0x21); Start-Sleep -Milliseconds 700
+    [GT]::Hotkey(0x22); Start-Sleep -Milliseconds 700
+    [GT]::Hotkey(0x31); Start-Sleep -Milliseconds 700
+    [GT]::Hotkey(0x57); Start-Sleep -Milliseconds 500
+    [GT]::Hotkey(0x57); Start-Sleep -Milliseconds 1500
+    $sl = @(Cut $log $nn)
+    Check 'ui' 'Ctrl+Alt+N opens a second shell' (@($sl | Where-Object { $_ -match 'new shell 2 from profile' }).Count -eq 1)
+    Check 'ui' 'Ctrl+Alt+PageUp / PageDown / 1 switch between shells' ((@($sl | Where-Object { $_ -match 'shell 1 is now active \(step -1\)' }).Count -eq 1) -and (@($sl | Where-Object { $_ -match 'shell 2 is now active \(step 1\)' }).Count -eq 1) -and (@($sl | Where-Object { $_ -match 'jumped to shell 1' }).Count -eq 1))
+    Check 'ui' 'Ctrl+Alt+W needs a second press: the first asks, the second closes' ((@($sl | Where-Object { $_ -match 'close shell 1: press again to confirm' }).Count -eq 1) -and (@($sl | Where-Object { $_ -match 'shell 1 closed' }).Count -eq 1) -and -not [GT]::IsFg($h))
     [GT]::Hotkey(0x53); Start-Sleep -Milliseconds 1500
     Check 'ui' 'Ctrl+Alt+S opens the panel and takes keyboard focus' ([GT]::IsFg($h))
     [GT]::Key(0x25); [GT]::Key(0x25); Start-Sleep -Milliseconds 700
@@ -334,11 +353,14 @@ function Suite-Release {
     Check 'release' 'tray icon added (normal mode)' (@($l | Where-Object { $_ -match 'tray icon added: true' }).Count -ge 1)
     Check 'release' 'window titles are not logged' (@($l | Where-Object { $_ -match "title='[^(]" }).Count -eq 0)
     Check 'release' 'DevTools/shortcuts/context menu disabled' (@($l | Where-Object { $_ -match 'DevTools, browser shortcuts, context menu, zoom and swipe disabled' }).Count -ge 1)
-    # Second launch exits quickly (single instance).
+    # Second launch exits quickly (single instance) and brings a hidden first window forward.
+    [GT]::Hotkey(0x56); Start-Sleep -Milliseconds 600
     $p2 = Start-Process (Join-Path $copy 'hudshell.exe') -PassThru
     $null = $p2.WaitForExit(6000)
     Check 'release' 'a second launch exits (single instance)' $p2.HasExited
     if (-not $p2.HasExited) { Stop-Process -Id $p2.Id -Force }
+    Start-Sleep -Milliseconds 800
+    Check 'release' 'the second launch brought the hidden first window forward' (@(Read-Lines $prodLog | Where-Object { $_ -match 'second launch: brought the running window forward \(was hidden: true\)' }).Count -ge 1)
     $h = [GT]::Find([uint32]$p.Id)
     Check 'release' 'window is click-through and passive by default' (-not [GT]::IsFg($h))
     Quit-Rel $p
@@ -557,6 +579,137 @@ function Suite-Policy {
   }
 }
 
+function Suite-Place {
+  Write-Host "=== place: corner docking, size presets, font size, magnetic snap (host functions, no OS input) ==="
+  $run = Run-Scenario @('--term', '--placetest', '--delay', '2') 60000
+  $s = Get-States $run
+  function Rc($k) { $v = (($s[$k].rect) -split ','); $w = (($s[$k].work) -split ','); @{ l = [int]$v[0]; t = [int]$v[1]; r = [int]$v[2]; b = [int]$v[3]; wl = [int]$w[0]; wt = [int]$w[1]; wr = [int]$w[2]; wb = [int]$w[3]; dpi = [int]$s[$k].dpi } }
+  foreach ($k in 'c1', 'c2', 'c3', 'c4', 'back', 'size1', 'size2', 'size3') { if (-not $s.ContainsKey($k)) { Check 'place' "state $k logged" $false; return } }
+  $m = [int][math]::Round(8 * (Rc 'c1').dpi / 96.0)
+  $a = Rc 'c1'; Check 'place' 'first press docks into the top-left corner with the margin' (($a.l - $a.wl) -eq $m -and ($a.t - $a.wt) -eq $m) "margin $m"
+  $a = Rc 'c2'; Check 'place' 'next: top-right' (($a.wr - $a.r) -eq $m -and ($a.t - $a.wt) -eq $m)
+  $a = Rc 'c3'; Check 'place' 'next: bottom-right' (($a.wr - $a.r) -eq $m -and ($a.wb - $a.b) -eq $m)
+  $a = Rc 'c4'; Check 'place' 'next: bottom-left' (($a.l - $a.wl) -eq $m -and ($a.wb - $a.b) -eq $m)
+  $a = Rc 'back'; Check 'place' 'previous goes counter-clockwise (bottom-right)' (($a.wr - $a.r) -eq $m -and ($a.wb - $a.b) -eq $m)
+  $c1 = Rc 'c1'; $c3 = Rc 'c3'
+  Check 'place' 'docking keeps the window size' ((($c1.r - $c1.l) -eq ($c3.r - $c3.l)) -and (($c1.b - $c1.t) -eq ($c3.b - $c3.t)))
+  $d = [double](Rc 'size1').dpi / 96
+  $a = Rc 'size1'; Check 'place' 'size hotkey: 900x520 -> 1280x720 (scaled), bottom-right anchored' ((($a.r - $a.l) -eq [int](1280 * $d)) -and (($a.b - $a.t) -eq [int](720 * $d)) -and ($a.wr - $a.r) -eq $m -and ($a.wb - $a.b) -eq $m) ("{0}x{1}" -f ($a.r - $a.l), ($a.b - $a.t))
+  $a = Rc 'size2'; Check 'place' 'size hotkey wraps to the smallest preset (640x360)' ((($a.r - $a.l) -eq [int](640 * $d)) -and (($a.b - $a.t) -eq [int](360 * $d)) -and ($a.wr - $a.r) -eq $m) ("{0}x{1}" -f ($a.r - $a.l), ($a.b - $a.t))
+  $a = Rc 'size3'; Check 'place' 'and on to 900x520 again' ((($a.r - $a.l) -eq [int](900 * $d)) -and (($a.b - $a.t) -eq [int](520 * $d)))
+  Check 'place' 'font hotkeys: 14 -> 16 -> 15' (($s['font-up'].font -eq '16') -and ($s['font-down'].font -eq '15')) ("up=" + $s['font-up'].font + " down=" + $s['font-down'].font)
+  $fsB = Get-DumpField $run 'font-base' 'fs'; $fsU = Get-DumpField $run 'font-up' 'fs'; $fsD = Get-DumpField $run 'font-down' 'fs'
+  Check 'place' 'the page applied the font size (14 -> 16 -> 15)' (($fsB -eq '14') -and ($fsU -eq '16') -and ($fsD -eq '15')) "$fsB,$fsU,$fsD"
+  $colsOf = { param($label) $h = Get-DumpField $run $label 'buffer'; $null; $i = -1; for ($k = 0; $k -lt $run.Count; $k++) { if ($run[$k] -match ("DUMP label=" + $label + '(\s|$)')) { $i = $k; break } }; for ($k = $i + 1; $k -lt $run.Count; $k++) { if ($run[$k] -match 'terminal dump: (\d+)x(\d+)') { return [int]$Matches[1] } } }
+  $cb = & $colsOf 'font-base'; $cu = & $colsOf 'font-up'
+  Check 'place' 'a bigger font gives fewer columns (the shell is told the new size)' ($cb -gt 0 -and $cu -gt 0 -and $cu -lt $cb) "$cb -> $cu columns"
+  $mv = @($run | Where-Object { $_ -match 'MOVING in=' } | ForEach-Object { Strip $_ })
+  Check 'place' 'dragging near the top-left corner snaps flush to the margin' ($mv.Count -ge 1 -and $mv[0] -match ("in=5,7 out=$m,$m,\d+,\d+ handled=1")) ($mv[0])
+  Check 'place' 'dragging far from every edge is left alone' ($mv.Count -ge 2 -and $mv[1] -match 'in=400,300 out=400,300,\d+,\d+ handled=0') ($mv[1])
+}
+
+function Suite-Qol {
+  Write-Host "=== qol: idle dim, active opacity, start options, Start with Windows (no OS input) ==="
+  # 1. idle dim + active opacity + ghost on top
+  $run = Run-Scenario @('--term', '--idletest', '--opacity', '80', '--active-opacity', '100', '--idle-dim', '3', '--idle-opacity', '60', '--delay', '2') 60000
+  $s = Get-States $run
+  function Pct($k) { if ($s.ContainsKey($k)) { $s[$k].pct } else { '?' } }
+  Check 'qol' 'after 3 s of shell silence the window dims to the idle opacity (60%, from 80%)' ((Pct 'idle') -eq '60') ("pct=" + (Pct 'idle'))
+  Check 'qol' 'holding the keyboard uses the active opacity (100%) and ignores idle dimming' ((Pct 'active') -eq '100') ("pct=" + (Pct 'active'))
+  Check 'qol' 'releasing it returns to the dimmed state while the shell is still silent' ((Pct 'passive-again') -eq '60') ("pct=" + (Pct 'passive-again'))
+  Check 'qol' 'new shell output brightens it back to 80% at once' ((Pct 'woke') -eq '80') ("pct=" + (Pct 'woke'))
+  Check 'qol' 'it dims again after another quiet spell' ((Pct 'idle-again') -eq '60') ("pct=" + (Pct 'idle-again'))
+  Check 'qol' 'ghost goes below idle (40%) and, when left, idle dimming resumes (60%)' (((Pct 'ghost-over-idle') -eq '40') -and ((Pct 'idle-after-ghost') -eq '60')) ("ghost=" + (Pct 'ghost-over-idle') + " after=" + (Pct 'idle-after-ghost'))
+  Check 'qol' 'the dimmed values never overwrite the saved opacity (80)' ($s['idle'].cfg_opacity -eq '80' -and $s['ghost-over-idle'].cfg_opacity -eq '80')
+  # 2. start options
+  $run = Run-Scenario @('--term', '--starttest', '--start-hidden', '--start-ghost', '--delay', '2') 60000
+  $s = Get-States $run
+  Check 'qol' 'start_hidden: the window starts hidden' (($s['started'].visible -eq 'false') -and @($run | Where-Object { $_ -match 'start_hidden' }).Count -ge 1)
+  Check 'qol' 'start_ghost: it starts in ghost mode, dimmed and click-through' (($s['started'].ghost -eq 'true') -and ($s['started'].pct -eq '40') -and ($s['started'].click_through -eq 'true'))
+  Check 'qol' 'the show/hide toggle reveals it' ($s['shown'].visible -eq 'true')
+  Check 'qol' 'leaving ghost restores full opacity' (($s['ghost-off'].ghost -eq 'false') -and ($s['ghost-off'].pct -eq '100'))
+  # 3. Start with Windows (HKCU Run), under the test-only value name
+  $runKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
+  $realBefore = (Get-ItemProperty -Path $runKey -Name 'HUDshell' -ErrorAction SilentlyContinue).HUDshell
+  try {
+    $run = Run-Scenario @('--term', '--autostarttest', '--delay', '2') 60000
+    $en = @($run | Where-Object { $_ -match 'AUTOSTART name=' } | ForEach-Object { if ($_ -match 'enabled=(\w+)') { $Matches[1] } })
+    Check 'qol' 'autostart off / on / on / off / off / on gives false,true,true,false,false,true' (($en -join ',') -eq 'false,true,true,false,false,true') ($en -join ',')
+    Check 'qol' 'it uses a test-only registry value name, never the real one' (@($run | Where-Object { $_ -match 'AUTOSTART name=HUDshell-test ' }).Count -ge 6)
+    $val = (Get-ItemProperty -Path $runKey -Name 'HUDshell-test' -ErrorAction SilentlyContinue).'HUDshell-test'
+    Check 'qol' 'the stored value is the quoted path of the running executable' ($val -eq ('"' + $dbg + '"')) $(if ($val) { 'value present' } else { 'missing' })
+  } finally {
+    Remove-ItemProperty -Path $runKey -Name 'HUDshell-test' -ErrorAction SilentlyContinue
+  }
+  Check 'qol' 'the test value was removed afterwards' ($null -eq (Get-ItemProperty -Path $runKey -Name 'HUDshell-test' -ErrorAction SilentlyContinue))
+  $realAfter = (Get-ItemProperty -Path $runKey -Name 'HUDshell' -ErrorAction SilentlyContinue).HUDshell
+  Check 'qol' 'your real Start with Windows entry (if any) was not touched' ($realBefore -eq $realAfter)
+}
+
+function Suite-Sessions {
+  Write-Host "=== sessions: several shells in one window (no OS input) ==="
+  $run = Run-Scenario @('--term', '--sessiontest', '--delay', '2') 90000
+  Check 'sessions' 'a second session is created and its own shell starts' (@($run | Where-Object { $_ -match 'pty: started .* for session 2 ' }).Count -ge 1)
+  Check 'sessions' 'session 1 shows its own output, not session 2''s' ((Dump-Has $run 's1' 'SESSION-ONE-ALIVE') -and -not (Dump-Has $run 's1' 'SESSION-TWO-ALIVE'))
+  Check 'sessions' 'session 2 shows its own output, not session 1''s' ((Dump-Has $run 's2' 'SESSION-TWO-ALIVE') -and -not (Dump-Has $run 's2' 'SESSION-ONE-ALIVE'))
+  Check 'sessions' 'the host writes to the session that is on screen (2), not to 1' ((Dump-Has $run 's2b' 'ACTIVE-WRITE-WENT-TO-TWO') -and -not (Dump-Has $run 's1b' 'ACTIVE-WRITE-WENT-TO-TWO'))
+  Check 'sessions' 'a shell that exits is reported in its own tab only' ((Dump-Has $run 's2-exited' 'session ended') -and -not (Dump-Has $run 's1b' 'session ended'))
+  Check 'sessions' 'Enter in the finished tab starts a fresh shell in it (restart), and the old end-of-session text is gone' ((Dump-Has $run 's2-restarted' 'AFTER-RESTART') -and -not (Dump-Has $run 's2-restarted' 'session ended') -and (@($run | Where-Object { $_ -match 'pty: started .* for session 2 ' }).Count -ge 2))
+  Check 'sessions' 'closing a session releases its shell' (@($run | Where-Object { $_ -match 'pty: session 2 closed' }).Count -ge 1)
+  Check 'sessions' 'session 1 is untouched by all of it and still works' ((Dump-Has $run 's1-final' 'BACK-ON-ONE') -and (Dump-Has $run 's1-final' 'SESSION-ONE-ALIVE'))
+  Check 'sessions' 'no start failures logged' (@($run | Where-Object { $_ -match 'FAILED to start' }).Count -eq 0)
+  Check 'sessions' 'all shells are gone after the app quits (no orphan pwsh from this run)' ((Get-Process hudshell -ErrorAction SilentlyContinue | Measure-Object).Count -eq 0)
+}
+
+# The page's `ui` object from the dump header that follows "DUMP label=<label>".
+function Get-Ui($run, [string]$label) {
+  $i = -1
+  for ($k = 0; $k -lt $run.Count; $k++) { if ($run[$k] -match ("DUMP label=" + [regex]::Escape($label) + '(\s|$)')) { $i = $k; break } }
+  if ($i -lt 0) { return $null }
+  for ($k = $i + 1; $k -lt $run.Count; $k++) { if ($run[$k] -match 'terminal dump:.* ui=(\{.*\})\s*$') { try { return ($Matches[1] | ConvertFrom-Json) } catch { return $null } } }
+  return $null
+}
+
+function Suite-Shells {
+  Write-Host "=== shells: tabs, profiles, switching, marks, titles, closing (no OS input) ==="
+  $run = Run-Scenario @('--term', '--shellstest', '--test-profiles', '--delay', '2') 120000
+  $u = Get-Ui $run 'single';   Check 'shells' 'one shell: no tab strip in auto mode' ($u -and -not $u.strip -and @($u.labels).Count -eq 1)
+  $u = Get-Ui $run 'two';      Check 'shells' 'a second shell brings the tab strip up' ($u -and $u.strip -and @($u.labels).Count -eq 2 -and $u.active -eq 2)
+  Check 'shells' 'PowerShell''s default title (an exe path) is shown as the profile name instead' ($u -and $u.labels[0] -eq '1 pwsh' -and $u.labels[1] -eq '2 pwsh') (($u.labels) -join ' | ')
+  Check 'shells' 'profile with a start directory: the shell starts there (%TEMP% expanded)' (Dump-Has $run 'work' '\Temp')
+  $u = Get-Ui $run 'cmd';      Check 'shells' 'profile command is typed into its shell and runs' ((Dump-Count $run 'cmd' 'PROFILE-COMMAND-RAN') -ge 2) ("occurrences " + (Dump-Count $run 'cmd' 'PROFILE-COMMAND-RAN'))
+  Check 'shells' 'the tab label follows the program''s own window title (OSC 0 / 2)' ($u -and (@($u.labels | Where-Object { $_ -match '3 TITLE-TEST' }).Count -eq 1)) (($u.labels) -join ' | ')
+  $u = Get-Ui $run 'jump1';    Check 'shells' 'jump to shell 1' ($u -and $u.active -eq 1)
+  $u = Get-Ui $run 'marks';    Check 'shells' 'output in a background shell marks its tab' ($u -and (@($u.labels | Where-Object { $_ -match '^2 .*\u2022' }).Count -eq 1)) (($u.labels) -join ' | ')
+  $u = Get-Ui $run 'attn';     Check 'shells' 'the attention hotkey jumps to the shell with unseen output and clears its mark' ($u -and $u.active -eq 2 -and (@($u.labels | Where-Object { $_ -match '^2 .*\u2022' }).Count -eq 0))
+  $u = Get-Ui $run 'wrapback'; Check 'shells' 'previous shell wraps around from the first to the last' ($u -and $u.active -eq 4)
+  $u = Get-Ui $run 'wrapfwd';  Check 'shells' 'next shell wraps around from the last to the first' ($u -and $u.active -eq 1)
+  $u = Get-Ui $run 'clicked';  Check 'shells' 'clicking a tab switches to it' ($u -and $u.active -eq 3)
+  $u = Get-Ui $run 'listed';   Check 'shells' 'the list hotkey shows the overlay with the active shell marked' ($u -and $u.overlay -match '\u25b6 3 ')
+  $u = Get-Ui $run 'confirm';  Check 'shells' 'the first close press only asks for confirmation (shell still there)' ($u -and $u.overlay -match 'press the close key again' -and @($u.labels).Count -eq 4)
+  $u = Get-Ui $run 'closed';   Check 'shells' 'the second press closes it and the right-hand neighbour takes over' ($u -and @($u.labels).Count -eq 3 -and $u.active -eq 4)
+  Check 'shells' 'closing releases the shell process' (@($run | Where-Object { $_ -match 'pty: session 3 closed' }).Count -ge 1)
+  $u = Get-Ui $run 'picker';   Check 'shells' 'the picker lists the profiles' ($u -and $u.picker)
+  $u = Get-Ui $run 'picked';   Check 'shells' 'choosing profile 2 in the picker starts it as a new shell' ($u -and @($u.labels).Count -eq 4 -and $u.active -eq 5 -and (Dump-Has $run 'picked' '\Temp'))
+  $u = Get-Ui $run 'one-left'; Check 'shells' 'closing down to one shell hides the strip again (auto mode)' ($u -and @($u.labels).Count -eq 1 -and -not $u.strip)
+  Check 'shells' 'closing the last shell starts a fresh one in its place' ((Dump-Has $run 'lastclose' 'AFTER-LAST-CLOSE') -and -not (Dump-Has $run 'lastclose' 'ONE-ONE') -and @($run | Where-Object { $_ -match 'was the last one: starting it again' }).Count -eq 1)
+  Check 'shells' 'no start failures logged' (@($run | Where-Object { $_ -match 'FAILED to start' }).Count -eq 0)
+  # tab modes
+  foreach ($mode in 'auto', 'always', 'overlay') {
+    $r = Run-Scenario @('--term', '--tabmodes', '--tabs', $mode, '--delay', '2') 60000
+    $one = Get-Ui $r 'mode-one'; $two = Get-Ui $r 'mode-two'; $nx = Get-Ui $r 'mode-next'; $later = Get-Ui $r 'mode-later'
+    switch ($mode) {
+      'auto'    { Check 'shells' 'tabs=auto: strip only with 2+ shells, no overlay popups' ($one -and -not $one.strip -and $two.strip -and -not $nx.overlay) }
+      'always'  { Check 'shells' 'tabs=always: the strip shows even for one shell' ($one -and $one.strip -and $two.strip) }
+      'overlay' { Check 'shells' 'tabs=overlay: never a strip; a quick overlay appears on switch and fades' ($one -and -not $one.strip -and -not $two.strip -and $nx.overlay -match '\u25b6' -and -not $later.overlay) }
+    }
+  }
+  # the window holds nine shells
+  $r = Run-Scenario @('--term', '--shellsfull', '--delay', '2') 90000
+  $n9 = Get-Ui $r 'nine'; $n10 = Get-Ui $r 'tenth-refused'
+  Check 'shells' 'nine shells fit; the tenth is refused with a message' ($n9 -and @($n9.labels).Count -eq 9 -and $n10 -and @($n10.labels).Count -eq 9 -and $n10.overlay -match 'at most 9' -and @($r | Where-Object { $_ -match 'new shell refused' }).Count -eq 1)
+}
+
 function Tree-Memory([int]$rootPid) {
   $all = Get-CimInstance Win32_Process -Property ProcessId, ParentProcessId, Name
   $ids = New-Object System.Collections.Generic.HashSet[int]; [void]$ids.Add($rootPid)
@@ -611,6 +764,10 @@ foreach ($s in $want) {
     'autotest' { Suite-Autotest }
     'ui' { Suite-Ui }
     'scrollback' { Suite-Scrollback }
+    'place' { Suite-Place }
+    'qol' { Suite-Qol }
+    'sessions' { Suite-Sessions }
+    'shells' { Suite-Shells }
     'ghost' { Suite-Ghost }
     'attention' { Suite-Attention }
     'policy' { Suite-Policy }

@@ -1,10 +1,30 @@
 # Test results
 
-Machine: Windows 11 build 26300, WebView2 Runtime 157.x, Rust 1.99 (MSVC), PowerShell 7.7, Claude Code 2.1.328,
-Codex CLI 0.170.0, three displays (all at 100% scaling). Latest full regression: 2026-11-19 with `scripts/test-all.ps1`.
+Machine: Windows 11 build 26300, WebView2 Runtime 157.x, Rust 1.99 (MSVC), PowerShell 7.7, Claude Code 2.1.328 (2.1.329 on 2026-11-20),
+Codex CLI 0.170.0, three displays (all at 100% scaling). Latest full regression: 2026-11-20 with `scripts/test-all.ps1`.
 "Tested" means observed in a log, a cell-text dump or a screenshot; anything not listed is in [known-gaps.md](known-gaps.md).
 
-## Latest full run (scripts/test-all.ps1 -Sandbox ..., 2026-11-19, after the fixes below): 159 pass, 0 fail, 2 intentional skips
+## Latest full run (scripts/test-all.ps1, no sandbox, 2026-11-20): 228 pass, 0 fail, 2 intentional skips
+
+First full run after adding corners and size presets, edge snapping, font hotkeys, active and idle opacity, start options, second
+launch, Start with Windows, several shells per window and tabs. Run on freshly built release and harness executables, Claude Code
+2.1.329 and Codex CLI 0.170.0. **The real-prompt suite was not run** (no sandbox given), so this run sent no prompts to either CLI; the
+last real-prompt run is the 2026-11-19 one below.
+
+Per suite: static 16, keys 6, width 3, hideshow 3, clickfocus 3, clipboard 3, autotest 18 (+2 intentional skips, the same
+kitty-protocol guard as before), ui 26, scrollback 8, ghost 14, attention 10, policy 12, place 13, qol 16, sessions 10, shells 25,
+release 20, config 18, soak 4. The unit tests are now 30. The release exe is 1.07 MB.
+
+- **New real-hotkey checks (first time run), all passing:** Ctrl+Alt+. docked the window in a corner and a second press moved it to the
+  next corner, Ctrl+Alt+, went back, and the window never took focus; Ctrl+Alt+= / Ctrl+Alt+- changed the font size; Ctrl+Alt+N opened a
+  second shell; Ctrl+Alt+PageUp / PageDown / 1 switched shells; Ctrl+Alt+W closed a shell only on the second press.
+- **Second launch (first time run):** a second start of the normal build exited and brought the hidden first window forward.
+- **Soak:** whole process tree 217 -> 219 MB after the first minute (five minutes of output); host process under 40 MB private.
+- The settings file was restored byte-for-byte by both the `release` and `config` suites. Not covered by this run: the profile-picker
+  hotkey with a real key press (it takes the keyboard; tested through the host function only), a real mouse click on a tab, and real
+  mouse drags for edge snapping (tested through simulated move messages).
+
+## Previous full run (scripts/test-all.ps1 -Sandbox ..., 2026-11-19, after the fixes below): 159 pass, 0 fail, 2 intentional skips
 
 Run on freshly built release and harness executables, including the real-prompt suite through both CLIs. Per suite: static 16,
 keys 6, width 3, hideshow 3, clickfocus 3, clipboard 3, autotest 18 (+2 intentional skips), ui 20, scrollback 8, ghost 14,

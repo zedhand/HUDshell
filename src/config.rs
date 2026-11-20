@@ -23,6 +23,27 @@ pub struct Hotkeys {
     pub quit: String,
     /// Ghost preset: click-through plus a dimmed window in one key; press again to restore.
     pub ghost: String,
+    /// Move to the next / previous screen corner (clockwise), keeping the size.
+    pub corner_next: String,
+    pub corner_prev: String,
+    /// Cycle through the `sizes` presets, keeping the nearest corner anchored.
+    pub size_cycle: String,
+    pub font_bigger: String,
+    pub font_smaller: String,
+    /// Next / previous shell (works while HUDshell is passive: they are global hotkeys).
+    pub shell_next: String,
+    pub shell_prev: String,
+    /// Open a new shell with the default profile / close the active shell (press twice to confirm).
+    pub shell_new: String,
+    pub shell_close: String,
+    /// Show the shell list overlay for a moment.
+    pub shell_list: String,
+    /// Open the profile picker (grabs the keyboard; press a number to start that profile).
+    pub shell_picker: String,
+    /// Jump to the next shell that has unseen output or rang the bell.
+    pub shell_attention: String,
+    /// Modifiers for jumping straight to shell 1-9: "Ctrl+Alt" means Ctrl+Alt+1 ... Ctrl+Alt+9.
+    pub shell_jump: String,
 }
 
 impl Default for Hotkeys {
@@ -37,7 +58,41 @@ impl Default for Hotkeys {
             settings: "Ctrl+Alt+S".into(),
             quit: "Ctrl+Alt+Q".into(),
             ghost: "Ctrl+Alt+X".into(),
+            corner_next: "Ctrl+Alt+.".into(),
+            corner_prev: "Ctrl+Alt+,".into(),
+            size_cycle: "Ctrl+Alt+/".into(),
+            font_bigger: "Ctrl+Alt+=".into(),
+            font_smaller: "Ctrl+Alt+-".into(),
+            shell_next: "Ctrl+Alt+PageDown".into(),
+            shell_prev: "Ctrl+Alt+PageUp".into(),
+            shell_new: "Ctrl+Alt+N".into(),
+            shell_close: "Ctrl+Alt+W".into(),
+            shell_list: "Ctrl+Alt+`".into(),
+            shell_picker: "Ctrl+Alt+Shift+N".into(),
+            shell_attention: "Ctrl+Alt+;".into(),
+            shell_jump: "Ctrl+Alt".into(),
         }
+    }
+}
+
+/// A kind of shell to start: where, what to run in it, and an optional accent colour for its tab.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[serde(default)]
+pub struct Profile {
+    pub name: String,
+    /// Start directory; `%VAR%` environment variables are expanded. Default: the user profile folder.
+    pub dir: Option<String>,
+    /// Typed into the new shell (followed by Enter), for example `claude`.
+    pub command: Option<String>,
+    /// Full path of a different shell to run for this profile.
+    pub shell: Option<String>,
+    /// Tab accent colour, `#rrggbb`.
+    pub color: Option<String>,
+}
+
+impl Default for Profile {
+    fn default() -> Self {
+        Self { name: "pwsh".into(), dir: None, command: None, shell: None, color: None }
     }
 }
 
@@ -91,6 +146,29 @@ pub struct Config {
     pub attention_cue: bool,
     /// Also show a tray notification for such requests while the window is hidden.
     pub attention_toast: bool,
+    /// Dragging within this many pixels (96-dpi) of a screen edge snaps to it. 0 turns snapping off.
+    pub snap_distance: u32,
+    /// Gap (96-dpi pixels) kept between a snapped or docked window and the screen edge.
+    pub snap_margin: u32,
+    /// Size presets [width, height] in 96-dpi pixels for the size hotkey.
+    pub sizes: Vec<[u32; 2]>,
+    /// Opacity used while HUDshell holds the keyboard. `null` = same as `opacity`.
+    pub active_opacity: Option<u32>,
+    /// Dim the window after this many seconds without shell output (0 = off). Output brings it back.
+    pub idle_dim_seconds: u32,
+    /// Opacity (20-100) while dimmed for idleness; never brighter than the normal opacity.
+    pub idle_opacity: u32,
+    /// Start with the window hidden (show it with the show/hide hotkey or the tray menu).
+    pub start_hidden: bool,
+    /// Start in ghost mode.
+    pub start_ghost: bool,
+    /// How the shell list shows: "auto" = a tab strip once there is more than one shell, "always" = a tab
+    /// strip even for one shell, "overlay" = no strip, only a short overlay on switch and on the list hotkey.
+    pub tabs: String,
+    /// Kinds of shell the new-shell hotkey and the picker can start.
+    pub profiles: Vec<Profile>,
+    /// Name of the profile the new-shell hotkey uses (default: the first one).
+    pub default_profile: String,
 }
 
 impl Default for Config {
@@ -115,6 +193,17 @@ impl Default for Config {
             osc52: "off".into(),
             attention_cue: true,
             attention_toast: true,
+            snap_distance: 16,
+            snap_margin: 8,
+            sizes: vec![[640, 360], [900, 520], [1280, 720]],
+            active_opacity: None,
+            idle_dim_seconds: 0,
+            idle_opacity: 50,
+            start_hidden: false,
+            start_ghost: false,
+            tabs: "auto".into(),
+            profiles: vec![Profile::default()],
+            default_profile: String::new(),
         }
     }
 }
@@ -180,6 +269,24 @@ fn validate(cfg: &mut Config) {
         cfg.shift_enter = "kitty".into();
     }
     cfg.ghost_opacity = cfg.ghost_opacity.clamp(MIN_OPACITY, 100);
+    if !matches!(cfg.tabs.as_str(), "auto" | "always" | "overlay") {
+        cfg.tabs = "auto".into();
+    }
+    validate_profiles(cfg);
+    cfg.snap_distance = cfg.snap_distance.min(200);
+    cfg.active_opacity = cfg.active_opacity.map(|v| v.clamp(MIN_OPACITY, 100));
+    cfg.idle_dim_seconds = cfg.idle_dim_seconds.min(3600);
+    cfg.idle_opacity = cfg.idle_opacity.clamp(MIN_OPACITY, 100);
+    cfg.snap_margin = cfg.snap_margin.min(200);
+    cfg.sizes.retain(|s| s[0] >= 240 && s[1] >= 120);
+    for s in cfg.sizes.iter_mut() {
+        s[0] = s[0].min(8000);
+        s[1] = s[1].min(8000);
+    }
+    cfg.sizes.truncate(8);
+    if cfg.sizes.is_empty() {
+        cfg.sizes = Config::default().sizes;
+    }
     if !matches!(cfg.right_click.as_str(), "off" | "paste") {
         cfg.right_click = "off".into();
     }
@@ -216,12 +323,63 @@ fn validate(cfg: &mut Config) {
         ("settings", &mut cfg.hotkeys.settings, def.settings),
         ("quit", &mut cfg.hotkeys.quit, def.quit),
         ("ghost", &mut cfg.hotkeys.ghost, def.ghost),
+        ("corner_next", &mut cfg.hotkeys.corner_next, def.corner_next),
+        ("corner_prev", &mut cfg.hotkeys.corner_prev, def.corner_prev),
+        ("size_cycle", &mut cfg.hotkeys.size_cycle, def.size_cycle),
+        ("font_bigger", &mut cfg.hotkeys.font_bigger, def.font_bigger),
+        ("font_smaller", &mut cfg.hotkeys.font_smaller, def.font_smaller),
+        ("shell_next", &mut cfg.hotkeys.shell_next, def.shell_next),
+        ("shell_prev", &mut cfg.hotkeys.shell_prev, def.shell_prev),
+        ("shell_new", &mut cfg.hotkeys.shell_new, def.shell_new),
+        ("shell_close", &mut cfg.hotkeys.shell_close, def.shell_close),
+        ("shell_list", &mut cfg.hotkeys.shell_list, def.shell_list),
+        ("shell_picker", &mut cfg.hotkeys.shell_picker, def.shell_picker),
+        ("shell_attention", &mut cfg.hotkeys.shell_attention, def.shell_attention),
     ] {
         if parse_hotkey(hk).is_none() {
             crate::notice(&format!("Hotkey '{hk}' for {name} is not valid; using {fallback}"));
             *hk = fallback;
         }
     }
+}
+
+/// Keep profiles sane: at most 12, unique non-empty names, no control characters in commands, valid colours.
+fn validate_profiles(cfg: &mut Config) {
+    let clean = |s: &str| s.chars().filter(|c| !c.is_control()).collect::<String>().trim().to_string();
+    let mut seen = std::collections::HashSet::new();
+    let mut out: Vec<Profile> = Vec::new();
+    for p in cfg.profiles.drain(..) {
+        let name = clean(&p.name).chars().take(24).collect::<String>();
+        if name.is_empty() || !seen.insert(name.to_lowercase()) || out.len() >= 12 {
+            continue;
+        }
+        let opt = |v: Option<String>, max: usize| {
+            v.map(|x| clean(&x).chars().take(max).collect::<String>()).filter(|x| !x.is_empty())
+        };
+        out.push(Profile {
+            name,
+            dir: opt(p.dir, 260),
+            command: opt(p.command, 500),
+            shell: opt(p.shell, 260),
+            color: p.color.filter(|c| is_hex_colour(c)),
+        });
+    }
+    if out.is_empty() {
+        out.push(Profile::default());
+    }
+    cfg.profiles = out;
+    cfg.default_profile = clean(&cfg.default_profile);
+    if !cfg.default_profile.is_empty() && !cfg.profiles.iter().any(|p| p.name.eq_ignore_ascii_case(&cfg.default_profile)) {
+        cfg.default_profile = String::new();
+    }
+}
+
+/// The profile the new-shell hotkey starts: the configured default, else the first.
+pub fn default_profile(cfg: &Config) -> &Profile {
+    cfg.profiles
+        .iter()
+        .find(|p| p.name.eq_ignore_ascii_case(&cfg.default_profile))
+        .unwrap_or(&cfg.profiles[0])
 }
 
 pub fn load() -> Config {
@@ -305,6 +463,15 @@ pub fn parse_hotkey(s: &str) -> Option<(u32, u32)> {
                     "/" | "slash" => 0xBF,
                     "-" | "minus" => 0xBD,
                     "=" | "equals" => 0xBB,
+                    "pageup" | "pgup" => 0x21,
+                    "pagedown" | "pgdn" => 0x22,
+                    "home" => 0x24,
+                    "end" => 0x23,
+                    "insert" => 0x2D,
+                    "left" => 0x25,
+                    "up" => 0x26,
+                    "right" => 0x27,
+                    "down" => 0x28,
                     "[" => 0xDB,
                     "]" => 0xDD,
                     _ if k.len() == 1 && k.as_bytes()[0].is_ascii_alphanumeric() => {
@@ -352,11 +519,17 @@ mod tests {
     #[test]
     fn default_hotkeys_are_all_valid_and_distinct() {
         let h = Hotkeys::default();
-        let all = [&h.click_through, &h.grab_focus, &h.show_hide, &h.cycle_colours, &h.opacity_up, &h.opacity_down, &h.settings, &h.quit, &h.ghost];
+        let all = [&h.click_through, &h.grab_focus, &h.show_hide, &h.cycle_colours, &h.opacity_up, &h.opacity_down, &h.settings, &h.quit, &h.ghost, &h.corner_next, &h.corner_prev, &h.size_cycle, &h.font_bigger, &h.font_smaller,
+            &h.shell_next, &h.shell_prev, &h.shell_new, &h.shell_close, &h.shell_list, &h.shell_picker, &h.shell_attention];
         let mut seen = std::collections::HashSet::new();
         for s in all {
             let parsed = parse_hotkey(s).unwrap_or_else(|| panic!("default hotkey {s} must parse"));
             assert!(seen.insert(parsed), "duplicate default hotkey {s}");
+        }
+        for n in 1..=9 {
+            let s = format!("{}+{n}", h.shell_jump);
+            let parsed = parse_hotkey(&s).unwrap_or_else(|| panic!("jump hotkey {s} must parse"));
+            assert!(seen.insert(parsed), "jump hotkey {s} collides with another default");
         }
     }
 
@@ -404,6 +577,64 @@ mod tests {
         assert_eq!((d.right_click.as_str(), d.osc52.as_str()), ("off", "off"), "clipboard policies are opt-in");
         assert!(d.attention_cue && d.attention_toast);
         assert_eq!(d.ghost_opacity, 40);
+    }
+
+    #[test]
+    fn placement_settings_are_validated() {
+        let mut c = Config { snap_distance: 9999, snap_margin: 9999, sizes: vec![[10, 10], [99999, 99999]], ..Config::default() };
+        validate(&mut c);
+        assert_eq!((c.snap_distance, c.snap_margin), (200, 200));
+        assert_eq!(c.sizes, vec![[8000, 8000]], "too-small presets are dropped, huge ones clamped");
+        c.sizes = vec![[10, 10]];
+        validate(&mut c);
+        assert_eq!(c.sizes, Config::default().sizes, "an empty list falls back to the defaults");
+    }
+
+    #[test]
+    fn opacity_extras_are_validated() {
+        let mut c = Config { active_opacity: Some(3), idle_dim_seconds: 99999, idle_opacity: 0, ..Config::default() };
+        validate(&mut c);
+        assert_eq!((c.active_opacity, c.idle_dim_seconds, c.idle_opacity), (Some(MIN_OPACITY), 3600, MIN_OPACITY));
+        let d = Config::default();
+        assert_eq!((d.active_opacity, d.idle_dim_seconds, d.start_hidden, d.start_ghost), (None, 0, false, false));
+    }
+
+    #[test]
+    fn navigation_keys_parse() {
+        assert_eq!(parse_hotkey("Ctrl+Alt+PageDown"), Some((0x4000 | 0x2 | 0x1, 0x22)));
+        assert_eq!(parse_hotkey("ctrl+alt+pgup"), Some((0x4000 | 0x2 | 0x1, 0x21)));
+        assert_eq!(parse_hotkey("Ctrl+Alt+Shift+N"), Some((0x4000 | 0x2 | 0x1 | 0x4, b'N' as u32)));
+        assert_eq!(parse_hotkey("Ctrl+Alt+`"), Some((0x4000 | 0x2 | 0x1, 0xC0)));
+    }
+
+    #[test]
+    fn profiles_are_cleaned_and_defaulted() {
+        let mut c = Config {
+            profiles: vec![
+                Profile { name: "  claude  ".into(), command: Some("claude\r\nrm -rf /".into()), color: Some("#12ab34".into()), ..Profile::default() },
+                Profile { name: "CLAUDE".into(), ..Profile::default() },
+                Profile { name: "".into(), ..Profile::default() },
+                Profile { name: "x".into(), color: Some("red".into()), dir: Some("   ".into()), ..Profile::default() },
+            ],
+            default_profile: "nope".into(),
+            tabs: "weird".into(),
+            ..Config::default()
+        };
+        validate(&mut c);
+        assert_eq!(c.profiles.len(), 2, "duplicate and empty names are dropped");
+        assert_eq!(c.profiles[0].name, "claude");
+        assert_eq!(c.profiles[0].command.as_deref(), Some("clauderm -rf /"), "control characters are removed, so a command can never smuggle a second line");
+        assert_eq!(c.profiles[0].color.as_deref(), Some("#12ab34"));
+        assert_eq!(c.profiles[1].color, None, "an invalid colour is dropped");
+        assert_eq!(c.profiles[1].dir, None, "a blank directory is dropped");
+        assert_eq!(c.default_profile, "", "an unknown default falls back");
+        assert_eq!(c.tabs, "auto");
+        let mut empty = Config { profiles: vec![], ..Config::default() };
+        validate(&mut empty);
+        assert_eq!(empty.profiles, vec![Profile::default()], "never an empty profile list");
+        assert_eq!(default_profile(&c).name, "claude");
+        c.default_profile = "X".into();
+        assert_eq!(default_profile(&c).name, "x", "the default is matched without regard to case");
     }
 
     #[test]

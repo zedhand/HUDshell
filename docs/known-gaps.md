@@ -20,14 +20,20 @@ Everything here is either untested or not implemented. Verified behaviour is in 
 | Long, busy sessions at low opacity over a game (readability) | judgement over real use |
 | Whether Claude Code or Codex ring the terminal bell (the census does not count BEL; they sent no OSC 9 / OSC 777 in the real run) | count BEL in the census, or configure the CLIs' own notification setting (not done: it would edit their configuration) |
 | The permission prompt about pasting clipboard text seen once during a policy run | its source was not identified; no WebView2 permission request was logged and a search found no documented Windows prompt of that kind. If it recurs, note the exact wording and the step |
+| Corner docking, size presets and edge snapping on a second monitor with different scaling, and with the taskbar on another edge (tested on one monitor at 100% through simulated move messages, not a real mouse drag) | a second display at 125-200% |
+| Tabs: a real mouse click on a tab (the test clicks by dispatching the event in the page), tab strip while click-through is on (clicks pass through by design), the real picker hotkey (it takes the keyboard) | by hand |
+| A profile's start command timing (typed 0.9 s after the shell starts; a slow profile script could miss it) | try a heavy profile |
+| Memory and CPU cost of several shells (each is a ConPTY + PowerShell; the WebView is shared) | measure with 1, 3 and 9 shells |
 | Clicking an OSC 8 link, the ghost tray menu item, the tray notification for attention requests, keyboard scrollback inside the CLIs | by hand |
 
 ## Not implemented
 
 - Full settings UI (the panel covers opacity and colour theme; font, hotkeys and shell are edited in `config.json`).
-- Live config reload (config is read at start); `WM_DPICHANGED` handling; WebView2 crash recovery; shell-exit restart.
+- Live config reload (config is read at start); `WM_DPICHANGED` handling; WebView2 crash recovery.
 - A friendly error when the shell cannot start (it is logged only).
-- Autostart with Windows; the second launch bringing the first to the front (it just exits).
+- Split panes / layout presets and zoom, several windows (detach, snap to each other, move as a group), and session restore (reopening the same shells and layout at launch). Planned next; one window holds up to 9 shells as tabs only.
+- Tab drag-to-reorder, rename by hand, and a tab for a shell started outside HUDshell.
+- Win+Arrow (native Windows snapping) is not supported or tested; HUDshell snaps itself.
 - Opening OSC 8 links: deliberately **not** done (clicks are ignored); copy the link text instead. OSC 52 is refused unless `osc52` is `write`.
 - A right-click context menu (right-click copies / pastes only when `right_click` is `paste`), kitty-style OSC 99 notifications, and per-game position profiles.
 - Background-only opacity (text stays crisp): needs composition hosting of the web view.
