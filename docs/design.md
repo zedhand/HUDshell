@@ -62,11 +62,38 @@ Key decisions and why:
   Every bridge message that belongs to a shell carries `s`, the session id. The page keeps one xterm.js view per id and shows one.
 - The list of shells and which is active lives in the host (`shells.rs`, pure logic with unit tests), so the global hotkeys work while
   the page has no keyboard. The page draws what the host says: a tab strip (`tabs = auto | always`) or a short overlay list (`overlay`).
-- Tab names come from each program's own window title (OSC 0 / 2); an executable path (PowerShell's default) is replaced by the profile
-  name. A tab is marked when it receives output while not shown, and marked more strongly when its program rings the bell.
+- Tab names come from each program's own window title (OSC 0 / 2), shown whole (up to 40 characters, the tab cuts the rest with an
+  ellipsis), as a normal terminal tab does; an executable path (PowerShell's default) is replaced by the profile name.
+- **Program label.** Every 2 s the host takes a snapshot of the process list and, for each shell, looks at the processes below the
+  shell's own process (`src/progs.rs`, unit-tested on made-up process trees). A recognised program (`claude`, `codex`, `gemini`,
+  `aider`, `opencode`; with `tab_program = "all"` also the deepest other program, ignoring helpers and nested shells) is put in front of the
+  title (`claude · <title>`). It is read-only: nothing is injected, no program's configuration is touched, and the names are not logged
+  (what a shell runs says what the user is doing). The label only changes when the answer changes. A tab is marked when it receives output while not shown, and marked more strongly when its program rings the bell.
 - Closing asks twice (a second press within 3 s), because a shell may be running an agent. Closing the last shell starts a fresh one.
   A shell that exits stays in its tab until Enter starts a new one.
 - A profile is `{name, dir, command, shell, color}`. The command is typed into the new shell about 0.9 s after it starts.
+
+## Split panes
+
+- By default (`pane_shells = "shared"`) panes are views onto shells from the one tab list, not a separate kind of shell.
+  With `pane_shells = "own"` each pane keeps its own list of shells (still the same shells and the same limit of nine):
+  the tab strip, list overlay, previous / next and the number keys refer to the focused pane's list, a new shell (and a profile
+  picked in the picker) joins the focused pane, a new pane starts empty (or gets a new shell with `layout_fill = "new"`), closing a
+  pane's last shell leaves the pane empty and moves the keyboard to a pane that has a shell, and going to fewer panes appends the
+  dropped panes' shells to the focused pane's list so none is lost. The attention key still searches every pane. The pane's corner
+  name reads `position/length name`, with a dot when another shell of that pane has unseen output. The host keeps the layout (`src/layout.rs`, pure logic
+  with unit tests): the preset (single, side by side, stacked, 2 x 2), which shell is in each pane (or none), the focused pane, zoom,
+  and the split percentages. The page only draws what it is sent; each shell's ConPTY is told its own pane's size.
+- Shared mode: choosing a preset fills the panes with the focused shell, then the shells already on screen, then the rest of the tab order.
+  With `layout_fill = "new"` missing shells are started; with `"empty"` the panes stay empty with a hint.
+- Switching to a shell that is already on screen focuses its pane; switching to one that is not puts it into the focused pane.
+  A new shell goes into the focused pane if it is empty, else the first empty one. Closing a shell refills its pane with a shell
+  that is not on screen, or leaves it empty.
+- The page reports the terminal area in cells; if a pane would fall under `pane_min`, the host draws a smaller preset (2 x 2 ->
+  side by side -> stacked -> single) showing the focused pane and the ones after it, and goes back when the window grows.
+- Zoom shows the focused pane alone at full size; moving the pane focus while zoomed shows the next pane zoomed.
+- Equal splits by default. `split` sets uneven ones; `pane_dividers` adds draggable dividers (mouse only, so not while click-through).
+- The layout is not restored at start unless `remember_layout` is on, and then only the preset and split (session restore is later).
 
 ## Clipboard, links and permissions
 

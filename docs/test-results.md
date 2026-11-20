@@ -4,7 +4,30 @@ Machine: Windows 11 build 26300, WebView2 Runtime 157.x, Rust 1.99 (MSVC), Power
 Codex CLI 0.170.0, three displays (all at 100% scaling). Latest full regression: 2026-11-20 with `scripts/test-all.ps1`.
 "Tested" means observed in a log, a cell-text dump or a screenshot; anything not listed is in [known-gaps.md](known-gaps.md).
 
-## Latest full run (scripts/test-all.ps1, no sandbox, 2026-11-20): 228 pass, 0 fail, 2 intentional skips
+## Latest full run (scripts/test-all.ps1, no sandbox, 2026-11-20, split panes build): 279 pass, 0 fail, 2 intentional skips
+
+Run on freshly built release and harness executables after adding split panes (presets, zoom, per-pane shell lists), program labels on
+tabs and whole-title tab names. The real-prompt suite was **not** run (no sandbox given), so no prompt went to Claude Code or Codex. Per
+suite: static 16 (54 unit tests; release exe 1.12 MB), keys 6, width 3, hideshow 3, clickfocus 3, clipboard 3, autotest 18 (+2
+intentional skips), ui 29, scrollback 8, ghost 14, attention 10, policy 12, place 13, qol 16, sessions 10, shells 34, layout 35,
+release 20, config 22, soak 4. The settings file was restored byte-for-byte by `release` and `config`; soak memory 214 -> 214 MB.
+
+- **New real-hotkey checks, all passing:** Ctrl+Alt+' stepped through side by side, stacked, grid and single; Ctrl+Alt+O moved the
+  keyboard to the next pane; Ctrl+Alt+Z zoomed and unzoomed; the window never took focus. These three chords registered on this machine
+  (no conflict notice). `config` also saved the layout only with `remember_layout` on (a real Ctrl+Alt+' press) and replaced bad layout
+  values by the defaults.
+- **Not covered:** dragging a pane divider with the real mouse (the `layout` suite drags with events inside the page), a non-100%
+  display, and the real Claude Code and Codex for the program label: the `shells` tests use a renamed copy of cmd.exe called `codex.exe`
+  that only pings localhost, so whether the real `claude.exe` and the `codex.exe` started by Codex's npm launcher are recognised is
+  unverified.
+
+**The path to this result.** The first full run of this build was 266 pass, 4 fail. Three `shells` checks failed because of a real
+bug I had introduced: closing the shell in a single pane showed the first shell in tab order instead of its right-hand neighbour (the pane
+refill ignored the neighbour chosen by the tab list); fixed, with a unit test. One `layout` check failed because of a wrong assumption in
+the test (two shells bring up the tab strip, which costs one row) and a PowerShell variable-name slip in its message; the test was
+corrected. After the fixes the no-input suites were rerun (95 pass), and then this full run.
+
+## Earlier full run today (phases 1-3 build, 2026-11-20): 228 pass, 0 fail, 2 intentional skips
 
 First full run after adding corners and size presets, edge snapping, font hotkeys, active and idle opacity, start options, second
 launch, Start with Windows, several shells per window and tabs. Run on freshly built release and harness executables, Claude Code

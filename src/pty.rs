@@ -64,6 +64,8 @@ struct Shared {
 
 struct Session {
     id: SessionId,
+    /// Process id of the shell itself (used to find the program running below it).
+    pid: u32,
     hpc: isize,
     job: isize,
     tx: mpsc::Sender<Vec<u8>>,
@@ -488,7 +490,7 @@ unsafe fn spawn_inner(hwnd: isize, id: SessionId, cols: i16, rows: i16, opts: &S
             });
         }
         if let Ok(mut s) = SESSIONS.lock() {
-            s.push(Session { id, hpc: hpc.0, job: job.0 as isize, tx, cols, rows, shared });
+            s.push(Session { id, pid: pi.dwProcessId, hpc: hpc.0, job: job.0 as isize, tx, cols, rows, shared });
         }
         Ok(path)
     }
@@ -498,6 +500,14 @@ unsafe fn spawn_inner(hwnd: isize, id: SessionId, cols: i16, rows: i16, opts: &S
 #[cfg(feature = "harness")]
 pub fn write(bytes: Vec<u8>) {
     write_to(active(), bytes);
+}
+
+/// (session id, shell process id) of every shell that is still running.
+pub fn shell_pids() -> Vec<(SessionId, u32)> {
+    SESSIONS
+        .lock()
+        .map(|s| s.iter().filter(|x| !x.shared.exited.load(Ordering::SeqCst)).map(|x| (x.id, x.pid)).collect())
+        .unwrap_or_default()
 }
 
 pub fn write_to(id: SessionId, bytes: Vec<u8>) {

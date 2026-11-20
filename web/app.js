@@ -45,6 +45,12 @@
   const active = () => views.get(activeId);
   // Every shell-bound message names its session.
   const sendS = (id, o) => send(Object.assign({ s: id }, o));
+  // Split panes: the host decides which shells are on screen and where (layout.rs); the page draws it.
+  let L = { shape: [1, 1], cells: [], focus: 0, zoom: false, split: [50, 50], dividers: false, hint: '', preset: 'single', shown: 'single',
+            own: false, groups: [], strip: [] };
+  let haveLayout = false;
+  const shownIds = () => (haveLayout ? L.cells.map((c) => c.id).filter((id) => id) : [activeId]);
+  const isShown = (id) => shownIds().includes(id);
 
   // Tell the host something happened, at most once a minute per kind, never with terminal content.
   const noted = {};
@@ -70,6 +76,12 @@
     pane.className = 'pane';
     pane.dataset.id = String(id);
     termHost.appendChild(pane);
+    // Small name in the corner of each pane while the window is split.
+    const label = document.createElement('div');
+    label.className = 'plabel';
+    pane.appendChild(label);
+    // A click on a pane that is not the focused one moves the keyboard there (the host decides).
+    pane.addEventListener('mousedown', () => { if (id !== activeId) send({ t: 'switch', s: id }); });
     const term = new Terminal({
       // OSC 8 hyperlinks are drawn but never opened: xterm.js' default handler would show a confirm()
       // dialog and open a window, which has no place over a game. Copy the link text instead.
@@ -95,8 +107,8 @@
     } catch (e) {
       send({ t: 'jserror', where: 'unicode-addon', msg: String(e) });
     }
-    const v = { id, term, fit, pane, exited: false, lastSize: '', kitty: { flags: 0, stack: [] },
-               title: '', unread: false, attn: false, profile: '', color: '' };
+    const v = { id, term, fit, pane, label, exited: false, lastSize: '', kitty: { flags: 0, stack: [] },
+               title: '', prog: '', unread: false, attn: false, profile: '', color: '' };
     // The program's own window title (OSC 0 / 2) names the tab; control characters are never shown.
     term.onTitleChange((t) => {
       const clean = String(t).replace(/[\u0000-\u001f\u007f-\u009f]/g, '').trim();
@@ -215,7 +227,7 @@
     // Programs ask for attention with the bell, OSC 9 (iTerm2 style) or OSC 777;notify (rxvt style).
     // The host decides whether to pulse the window or show a tray notification; it never logs the text.
     const attention = (kind, text) => {
-      if (id !== activeId && !v.attn) { v.attn = true; renderTabs(); }
+      if (!isShown(id) && !v.attn) { v.attn = true; renderTabs(); }
       sendS(id, { t: 'attention', kind, text: String(text || '').slice(0, 200) });
     };
     term.onBell(() => attention('bell', ''));
@@ -263,17 +275,129 @@
 
   let currentTheme = startTheme;
 
-  // Show one view, hide the others, refit (a hidden pane has no size) and give it the keyboard.
+  // Make a view the active one (it gets the keyboard); the layout decides what else is on screen.
   function showView(id) {
     const v = views.get(id);
     if (!v) return;
     activeId = id;
     v.unread = false;
     v.attn = false;
-    for (const o of views.values()) o.pane.classList.toggle('hidden', o !== v);
-    v.fit.fit();
+    drawLayout();
     v.term.focus();
     renderTabs();
+  }
+
+  // ---- split panes ----------------------------------------------------------------------------------
+  const GAP = 3; // pixels between panes
+  function cellRects(shape) {
+    const [c, r] = shape;
+    const cw = c === 2 ? [L.split[0], 100 - L.split[0]] : [100];
+    const rh = r === 2 ? [L.split[1], 100 - L.split[1]] : [100];
+    const out = [];
+    for (let y = 0; y < r; y++) for (let x = 0; x < c; x++) out.push({ l: x === 0 ? 0 : cw[0], t: y === 0 ? 0 : rh[0], w: cw[x], h: rh[y], x, y });
+    return out;
+  }
+  function place(el, q, shape) {
+    const gl = q.x > 0 ? GAP / 2 : 0, gr = q.x < shape[0] - 1 ? GAP / 2 : 0;
+    const gt = q.y > 0 ? GAP / 2 : 0, gb = q.y < shape[1] - 1 ? GAP / 2 : 0;
+    el.style.left = 'calc(' + q.l + '% + ' + gl + 'px)';
+    el.style.top = 'calc(' + q.t + '% + ' + gt + 'px)';
+    el.style.width = 'calc(' + q.w + '% - ' + (gl + gr) + 'px)';
+    el.style.height = 'calc(' + q.h + '% - ' + (gt + gb) + 'px)';
+  }
+  const fitShown = () => { for (const id of shownIds()) { const w = views.get(id); if (w) w.fit.fit(); } };
+  function updateLabels() {
+    for (const v of views.values()) v.label.textContent = '';
+    if (!(haveLayout && L.cells.length > 1)) return;
+    for (const c of L.cells) {
+      const v = views.get(c.id);
+      const i = v ? tabs.list.findIndex((e) => e.id === v.id) : -1;
+      if (i < 0) continue;
+      if (L.own) {
+        // Own lists: "2/3 name" = the second of this pane's three shells, a dot when another one has news.
+        const g = L.groups[c.slot] || [];
+        const other = g.some((x) => { const w = views.get(x); return x !== v.id && w && (w.unread || w.attn); });
+        v.label.textContent = (g.indexOf(v.id) + 1) + '/' + g.length + ' ' + labelOf(tabs.list[i]) + (other ? ' \u2022' : '');
+      } else {
+        v.label.textContent = (i + 1) + ' ' + labelOf(tabs.list[i]);
+      }
+    }
+  }
+  function drawLayout() {
+    termHost.querySelectorAll('.empty, .divider').forEach((e) => e.remove());
+    const shape = haveLayout ? L.shape : [1, 1];
+    const cells = haveLayout ? L.cells : [{ slot: 0, id: activeId }];
+    const split = cells.length > 1;
+    const rects = cellRects(shape);
+    const on = new Set();
+    cells.forEach((c, i) => {
+      const q = rects[i] || rects[0];
+      const focused = !haveLayout || c.slot === L.focus;
+      const w = c.id ? views.get(c.id) : null;
+      if (w) {
+        on.add(c.id);
+        place(w.pane, q, shape);
+        w.pane.classList.toggle('split', split);
+        w.pane.classList.toggle('focus', split && focused);
+      } else if (!c.id) {
+        const e = document.createElement('div');
+        e.className = 'pane empty split' + (focused ? ' focus' : '');
+        e.dataset.slot = String(c.slot);
+        e.textContent = 'empty pane' + (L.hint ? '\n' + L.hint + ' starts a shell here' : '');
+        place(e, q, shape);
+        e.addEventListener('mousedown', () => send({ t: 'panefocus', i: c.slot }));
+        termHost.appendChild(e);
+      }
+    });
+    for (const v of views.values()) v.pane.classList.toggle('hidden', !on.has(v.id));
+    if (haveLayout && L.dividers && !L.zoom) addDividers(shape);
+    fitShown();
+    updateLabels();
+    // The keyboard goes nowhere while the focused pane is empty.
+    const fc = cells.find((c) => !haveLayout || c.slot === L.focus);
+    if (fc && !fc.id) { const a = active(); if (a) a.term.blur(); }
+    requestAnimationFrame(reportArea);
+  }
+  // Draggable dividers (config pane_dividers). They need the mouse, so they only work while the window
+  // is not click-through.
+  let drag = null, dragFrame = 0;
+  function addDividers(shape) {
+    const mk = (axis, pos) => {
+      const d = document.createElement('div');
+      d.className = 'divider ' + axis;
+      d.style[axis === 'v' ? 'left' : 'top'] = 'calc(' + pos + '% - 3px)';
+      d.addEventListener('mousedown', (e) => { drag = axis; e.preventDefault(); e.stopPropagation(); });
+      termHost.appendChild(d);
+    };
+    if (shape[0] === 2) mk('v', L.split[0]);
+    if (shape[1] === 2) mk('h', L.split[1]);
+  }
+  window.addEventListener('mousemove', (e) => {
+    if (!drag) return;
+    const r = termHost.getBoundingClientRect();
+    const pct = drag === 'v' ? ((e.clientX - r.left) / r.width) * 100 : ((e.clientY - r.top) / r.height) * 100;
+    L.split[drag === 'v' ? 0 : 1] = Math.max(20, Math.min(80, Math.round(pct)));
+    if (!dragFrame) dragFrame = requestAnimationFrame(() => { dragFrame = 0; drawLayout(); });
+  });
+  window.addEventListener('mouseup', () => {
+    if (drag) { drag = null; send({ t: 'split', c: L.split[0], r: L.split[1] }); }
+  });
+  // Tell the host how many cells the whole terminal area holds, so a window too small for the layout can
+  // show fewer panes. The cell size comes from a pane on screen.
+  let lastArea = '';
+  function reportArea() {
+    const v = isShown(activeId) ? views.get(activeId) : views.get(shownIds()[0]);
+    if (!v || !v.term.cols || !v.term.rows) return;
+    const core = v.term._core;
+    const cell = core && core._renderService && core._renderService.dimensions && core._renderService.dimensions.css.cell;
+    const pr = v.pane.getBoundingClientRect();
+    const cw = (cell && cell.width) || pr.width / v.term.cols;
+    const ch = (cell && cell.height) || pr.height / v.term.rows;
+    const tr = termHost.getBoundingClientRect();
+    if (!cw || !ch || !tr.width || !tr.height) return;
+    const cols = Math.floor(tr.width / cw), rows = Math.floor(tr.height / ch);
+    const k = cols + 'x' + rows;
+    if (k !== lastArea) { lastArea = k; send({ t: 'area', cols, rows }); }
   }
 
   function closeView(id) {
@@ -295,18 +419,28 @@
   const pickerEl = document.getElementById('picker');
   // A bare executable path (PowerShell's default title) says nothing; show the profile name instead.
   const isExePath = (t) => /\.exe$/i.test(t);
+  // What the tab says: the program's own title (like a normal terminal tab), else the profile name; with the
+  // program running in it in front when the host recognised one (config tab_program).
   const labelOf = (e) => {
     const v = views.get(e.id);
     const t = v && v.title && !isExePath(v.title) ? v.title : '';
-    return (t || e.profile || ('shell ' + e.id)).slice(0, 24);
+    const base = (t || e.profile || ('shell ' + e.id)).slice(0, 40);
+    const p = v && v.prog;
+    return p && !base.toLowerCase().includes(p) ? p + ' \u00b7 ' + base : base;
   };
   const markOf = (e) => { const v = views.get(e.id); return v ? (v.attn ? '!' : (v.unread ? '\u2022' : '')) : ''; };
-  const stripWanted = () => tabs.mode === 'always' || (tabs.mode === 'auto' && tabs.list.length > 1);
+  // The shells the tab strip, the list overlay and the number keys refer to: all of them, or (own lists per
+  // pane) the ones of the focused pane.
+  function stripList() {
+    if (haveLayout && L.own) return L.strip.map((id) => tabs.list.find((e) => e.id === id)).filter(Boolean);
+    return tabs.list;
+  }
+  const stripWanted = () => tabs.mode === 'always' || (tabs.mode === 'auto' && stripList().length > 1);
   function renderTabs() {
     tabsEl.textContent = '';
-    tabs.list.forEach((e, i) => {
+    stripList().forEach((e, i) => {
       const d = document.createElement('div');
-      d.className = 'tab' + (e.id === activeId ? ' on' : '');
+      d.className = 'tab' + (e.id === activeId ? ' on' : (isShown(e.id) ? ' vis' : ''));
       d.dataset.id = String(e.id);
       if (e.color) d.style.setProperty('--accent', e.color);
       d.appendChild(document.createTextNode((i + 1) + ' ' + labelOf(e)));
@@ -317,8 +451,9 @@
     const want = stripWanted();
     if (want !== document.body.classList.contains('tabs-on')) {
       document.body.classList.toggle('tabs-on', want);
-      requestAnimationFrame(() => { const a = active(); if (a) a.fit.fit(); });
+      requestAnimationFrame(() => { fitShown(); reportArea(); });
     }
+    updateLabels();
   }
   tabsEl.addEventListener('mousedown', (e) => {
     const t = e.target.closest('.tab');
@@ -326,7 +461,7 @@
   });
   let overlayTimer;
   function listText() {
-    return tabs.list.map((e, i) => (e.id === activeId ? '\u25b6 ' : '  ') + (i + 1) + ' ' + labelOf(e) + (markOf(e) ? '  ' + markOf(e) : '')).join('\n');
+    return stripList().map((e, i) => (e.id === activeId ? '\u25b6 ' : '  ') + (i + 1) + ' ' + labelOf(e) + (markOf(e) ? '  ' + markOf(e) : '')).join('\n');
   }
   function flashOverlay(extra) {
     shellsEl.textContent = listText() + (extra ? '\n\n' + extra : '');
@@ -357,7 +492,7 @@
   }, true);
 
   let rt;
-  new ResizeObserver(() => { clearTimeout(rt); rt = setTimeout(() => { const v = active(); if (v) v.fit.fit(); }, 40); }).observe(document.body);
+  new ResizeObserver(() => { clearTimeout(rt); rt = setTimeout(() => { fitShown(); reportArea(); }, 40); }).observe(document.body);
 
   wv.addEventListener('message', (ev) => {
     let m;
@@ -377,10 +512,24 @@
         showView(sid);
         break;
       case 'close': closeView(sid); renderTabs(); break;
+      case 'layout':
+        L = { shape: m.shape || [1, 1], cells: m.cells || [], focus: m.focus || 0, zoom: !!m.zoom, split: m.split || [50, 50],
+              dividers: !!m.dividers, hint: m.hint || '', preset: m.preset || 'single', shown: m.shown || 'single',
+              own: !!m.own, groups: m.groups || [], strip: m.strip || [] };
+        haveLayout = true;
+        drawLayout();
+        renderTabs();
+        break;
       case 'tabs':
         { const before = tabs.active; tabs.list = m.list || []; tabs.active = m.active; tabs.mode = m.mode || 'auto'; tabs.profiles = m.profiles || [];
           if (tabs.mode === 'overlay' && tabs.list.length > 1 && m.active !== before) setTimeout(() => flashOverlay(''), 0); }
         for (const e of tabs.list) { const w = views.get(e.id); if (w) { w.profile = e.profile; w.color = e.color || ''; } }
+        renderTabs();
+        break;
+      case 'prog':
+        // The host's full list of recognised programs (shells not listed run none).
+        for (const w of views.values()) w.prog = '';
+        for (const e of (m.list || [])) { const w = views.get(e.s); if (w) w.prog = String(e.p || '').slice(0, 20); }
         renderTabs();
         break;
       case 'overlay': flashOverlay(''); break;
@@ -407,7 +556,7 @@
         if (!v) { send({ t: 'ack', n: a2b(m.d).length }); break; }
         const u = a2b(m.d);
         v.term.write(u, () => send({ t: 'ack', n: u.length }));
-        if (sid !== activeId && !v.unread) { v.unread = true; renderTabs(); }
+        if (!isShown(sid) && !v.unread) { v.unread = true; renderTabs(); }
         break;
       }
       case 'exit':
@@ -423,7 +572,8 @@
       case 'font':
         // Live font size change from the host hotkeys; refit so each shell gets the new cell count.
         for (const o of views.values()) o.term.options.fontSize = m.size;
-        { const a = active(); if (a) a.fit.fit(); }
+        fitShown();
+        requestAnimationFrame(reportArea);
         break;
       case 'paste': { const a = active(); if (a) a.term.paste(m.text); break; }
       case 'selectall': { const a = active(); if (a) a.term.selectAll(); break; }
@@ -452,7 +602,15 @@
                cue: document.body.classList.contains('cue'), fs: term.options.fontSize,
                ui: { strip: document.body.classList.contains('tabs-on'), active: activeId,
                      labels: tabs.list.map((e, i) => (i + 1) + ' ' + labelOf(e) + markOf(e)),
-                     overlay: shellsEl.classList.contains('open') ? shellsEl.textContent : '', picker: pickerOpen() },
+                     progs: tabs.list.map((e) => (views.get(e.id) || {}).prog || '').join(','),
+                     overlay: shellsEl.classList.contains('open') ? shellsEl.textContent : '', picker: pickerOpen(),
+                     layout: { own: L.own, gt: L.groups.map((g) => g.join(',')).join('|'), st: L.strip.join(','),
+                               te: tabsEl.querySelectorAll('.tab').length, preset: L.preset, shown: L.shown, shape: L.shape, cells: L.cells.map((c) => c.id), focus: L.focus,
+                               zoom: L.zoom, split: L.split, area: lastArea,
+                               sizes: L.cells.map((c) => { const w = views.get(c.id); return w ? w.term.cols + 'x' + w.term.rows : '-'; }),
+                               visible: [...views.values()].filter((w) => !w.pane.classList.contains('hidden')).map((w) => w.id),
+                               labels: L.cells.map((c) => { const w = views.get(c.id); return w ? w.label.textContent : ''; }),
+                               dividers: termHost.querySelectorAll('.divider').length, empties: termHost.querySelectorAll('.empty').length } },
                lines });
         break;
       }

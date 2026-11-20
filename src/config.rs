@@ -44,6 +44,12 @@ pub struct Hotkeys {
     pub shell_attention: String,
     /// Modifiers for jumping straight to shell 1-9: "Ctrl+Alt" means Ctrl+Alt+1 ... Ctrl+Alt+9.
     pub shell_jump: String,
+    /// Step through the split layouts: single, side by side, stacked, 2 x 2.
+    pub layout_cycle: String,
+    /// Zoom the focused pane to the whole window, or back.
+    pub pane_zoom: String,
+    /// Move the keyboard focus to the next pane.
+    pub pane_next: String,
 }
 
 impl Default for Hotkeys {
@@ -71,6 +77,9 @@ impl Default for Hotkeys {
             shell_picker: "Ctrl+Alt+Shift+N".into(),
             shell_attention: "Ctrl+Alt+;".into(),
             shell_jump: "Ctrl+Alt".into(),
+            layout_cycle: "Ctrl+Alt+'".into(),
+            pane_zoom: "Ctrl+Alt+Z".into(),
+            pane_next: "Ctrl+Alt+O".into(),
         }
     }
 }
@@ -165,10 +174,29 @@ pub struct Config {
     /// How the shell list shows: "auto" = a tab strip once there is more than one shell, "always" = a tab
     /// strip even for one shell, "overlay" = no strip, only a short overlay on switch and on the list hotkey.
     pub tabs: String,
+    /// Label a tab with the program running in it: "known" = Claude Code, Codex and a few similar tools, "all" =
+    /// also any other program, "off" = never. Found by looking at the processes below the shell; read-only.
+    pub tab_program: String,
     /// Kinds of shell the new-shell hotkey and the picker can start.
     pub profiles: Vec<Profile>,
     /// Name of the profile the new-shell hotkey uses (default: the first one).
     pub default_profile: String,
+    /// Split layout at start: "single", "side-by-side", "stacked" or "grid" (2 x 2).
+    pub layout: String,
+    /// When a layout has more panes than there are shells: "new" starts shells (default profile) for them,
+    /// "empty" leaves the panes empty until a shell is started there.
+    pub layout_fill: String,
+    /// How panes get their shells: "shared" = every pane shows a shell from the one tab list; "own" = each pane
+    /// has its own list of shells (the tab strip, switch and jump hotkeys act on the focused pane's list).
+    pub pane_shells: String,
+    /// Save the chosen layout (and divider positions) in `layout` / `split` whenever it changes.
+    pub remember_layout: bool,
+    /// Share in percent (20-80) of the first column and of the first row.
+    pub split: [u32; 2],
+    /// Draggable dividers between panes (they need the mouse, so the window must not be click-through).
+    pub pane_dividers: bool,
+    /// Smallest pane worth drawing, [columns, rows]. Smaller windows show fewer panes.
+    pub pane_min: [u32; 2],
 }
 
 impl Default for Config {
@@ -202,8 +230,16 @@ impl Default for Config {
             start_hidden: false,
             start_ghost: false,
             tabs: "auto".into(),
+            tab_program: "known".into(),
             profiles: vec![Profile::default()],
             default_profile: String::new(),
+            layout: "single".into(),
+            layout_fill: "new".into(),
+            pane_shells: "shared".into(),
+            remember_layout: false,
+            split: [50, 50],
+            pane_dividers: false,
+            pane_min: [30, 6],
         }
     }
 }
@@ -273,6 +309,20 @@ fn validate(cfg: &mut Config) {
         cfg.tabs = "auto".into();
     }
     validate_profiles(cfg);
+    if !matches!(cfg.tab_program.as_str(), "known" | "all" | "off") {
+        cfg.tab_program = "known".into();
+    }
+    cfg.layout = crate::layout::Preset::parse(&cfg.layout).unwrap_or(crate::layout::Preset::Single).name().to_string();
+    if !matches!(cfg.layout_fill.as_str(), "new" | "empty") {
+        cfg.layout_fill = "new".into();
+    }
+    if !matches!(cfg.pane_shells.as_str(), "shared" | "own") {
+        cfg.pane_shells = "shared".into();
+    }
+    for v in cfg.split.iter_mut() {
+        *v = (*v).clamp(crate::layout::SPLIT_MIN, crate::layout::SPLIT_MAX);
+    }
+    cfg.pane_min = [cfg.pane_min[0].clamp(10, 200), cfg.pane_min[1].clamp(3, 100)];
     cfg.snap_distance = cfg.snap_distance.min(200);
     cfg.active_opacity = cfg.active_opacity.map(|v| v.clamp(MIN_OPACITY, 100));
     cfg.idle_dim_seconds = cfg.idle_dim_seconds.min(3600);
@@ -335,6 +385,9 @@ fn validate(cfg: &mut Config) {
         ("shell_list", &mut cfg.hotkeys.shell_list, def.shell_list),
         ("shell_picker", &mut cfg.hotkeys.shell_picker, def.shell_picker),
         ("shell_attention", &mut cfg.hotkeys.shell_attention, def.shell_attention),
+        ("layout_cycle", &mut cfg.hotkeys.layout_cycle, def.layout_cycle),
+        ("pane_zoom", &mut cfg.hotkeys.pane_zoom, def.pane_zoom),
+        ("pane_next", &mut cfg.hotkeys.pane_next, def.pane_next),
     ] {
         if parse_hotkey(hk).is_none() {
             crate::notice(&format!("Hotkey '{hk}' for {name} is not valid; using {fallback}"));
@@ -520,7 +573,8 @@ mod tests {
     fn default_hotkeys_are_all_valid_and_distinct() {
         let h = Hotkeys::default();
         let all = [&h.click_through, &h.grab_focus, &h.show_hide, &h.cycle_colours, &h.opacity_up, &h.opacity_down, &h.settings, &h.quit, &h.ghost, &h.corner_next, &h.corner_prev, &h.size_cycle, &h.font_bigger, &h.font_smaller,
-            &h.shell_next, &h.shell_prev, &h.shell_new, &h.shell_close, &h.shell_list, &h.shell_picker, &h.shell_attention];
+            &h.shell_next, &h.shell_prev, &h.shell_new, &h.shell_close, &h.shell_list, &h.shell_picker, &h.shell_attention,
+            &h.layout_cycle, &h.pane_zoom, &h.pane_next];
         let mut seen = std::collections::HashSet::new();
         for s in all {
             let parsed = parse_hotkey(s).unwrap_or_else(|| panic!("default hotkey {s} must parse"));
@@ -635,6 +689,33 @@ mod tests {
         assert_eq!(default_profile(&c).name, "claude");
         c.default_profile = "X".into();
         assert_eq!(default_profile(&c).name, "x", "the default is matched without regard to case");
+    }
+
+    #[test]
+    fn layout_settings_are_validated() {
+        let d = Config::default();
+        assert_eq!((d.layout.as_str(), d.layout_fill.as_str(), d.remember_layout, d.split, d.pane_dividers, d.pane_min),
+            ("single", "new", false, [50, 50], false, [30, 6]), "defaults are the recommended behaviour");
+        assert_eq!(d.pane_shells, "shared");
+        assert_eq!(d.tab_program, "known");
+        let mut t = Config { tab_program: "x".into(), ..Config::default() };
+        validate(&mut t);
+        assert_eq!(t.tab_program, "known");
+        t.tab_program = "all".into();
+        validate(&mut t);
+        assert_eq!(t.tab_program, "all");
+        let mut c = Config { layout: " GRID ".into(), layout_fill: "x".into(), pane_shells: "x".into(), split: [1, 99], pane_min: [1, 999], ..Config::default() };
+        validate(&mut c);
+        assert_eq!((c.layout.as_str(), c.layout_fill.as_str(), c.split, c.pane_min), ("grid", "new", [20, 80], [10, 100]));
+        assert_eq!(c.pane_shells, "shared", "an unknown value falls back");
+        c.pane_shells = "own".into();
+        validate(&mut c);
+        assert_eq!(c.pane_shells, "own");
+        c.layout = "2x2".into();
+        c.layout_fill = "empty".into();
+        validate(&mut c);
+        assert_eq!((c.layout.as_str(), c.layout_fill.as_str()), ("single", "empty"));
+        assert_eq!(parse_hotkey("Ctrl+Alt+'"), Some((0x4000 | 0x2 | 0x1, 0xDE)));
     }
 
     #[test]

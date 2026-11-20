@@ -30,25 +30,27 @@ clipboard text and restores it. `scrollback`, `ghost` and `attention` send no OS
 | `clickfocus` | click-through vs interactive hit tests, a real click takes focus, grab/release cycles |
 | `clipboard` | real Ctrl+V paste and Ctrl+Shift+C copy; no DevTools window opens |
 | `autotest` | typing, history, paste, Ctrl+C, Claude Code and Codex start and exit, focus grab cycles, click-through, no focus stolen while passive |
-| `ui` | opacity hotkeys and the 20% floor, the real ghost hotkey, corner / font / new-shell / switch / close hotkeys, settings panel keys and real mouse (click, drag, arrows, close, Esc) |
+| `ui` | opacity hotkeys and the 20% floor, the real ghost hotkey, corner / font / new-shell / switch / close / layout / pane / zoom hotkeys, settings panel keys and real mouse (click, drag, arrows, close, Esc) |
 | `place` | corner docking, size presets, font hotkeys (and that the page applied the font) and magnetic snapping, through the host functions (no OS input) |
 | `qol` | idle dim, active opacity, start options and the Start with Windows registry entry (test-only value name, removed afterwards) |
 | `sessions` | several shells in one window: isolation, which one the host writes to, restart after exit, close (no OS input) |
 | `shells` | tabs, profiles, switching, marks, titles, closing, picker, tab modes, the nine-shell limit (no OS input) |
+| `shells` (labels part) | the tab shows a 35-character title whole; `tab_program` = known / all / off with a renamed copy of cmd.exe called `codex.exe` that only pings localhost (never a real Claude Code or Codex): the label appears, goes away when it ends, ordinary programs are labelled only in `all` mode (no OS input) |
+| `layout` | split panes: each preset, new shells for empty panes, pane sizes, which pane gets typing, zoom, small-window fallback, closing and refilling a pane, `layout_fill = empty`, start layout, uneven split, dragging a divider with page mouse events, and `pane_shells = own` (new shells join the focused pane, strip / keys / close stay inside it, empty pane, merging into one pane) (no OS input) |
 | `scrollback` | keyboard scrollback keys, checked from the viewport position after 200 lines (no OS input) |
 | `ghost` | the ghost preset through the host functions: levels, restore, never brightens, pointer mode, leaving ghost (no OS input) |
 | `attention` | bell / OSC 9 / OSC 777 cue, progress and cwd ignored, rate limit, not while focused, hidden path, text kept out of the log (no OS input) |
 | `policy` | OSC 52, OSC 8, copy-on-select and right-click, driven by DevTools mouse events; temporarily uses the real clipboard and restores it |
 | `release` | normal build runs from any folder, ignores test switches, single instance (a second launch brings the first window forward), tray icon, logging, opacity persists across restarts |
-| `config` | invalid JSON, out-of-range values, bad hotkeys, hotkey conflicts, unknown keys, UTF-8 BOM, ghost clamp and not persisted, bad clipboard-policy values |
+| `config` | invalid JSON, out-of-range values, bad hotkeys, hotkey conflicts, unknown keys, UTF-8 BOM, ghost clamp and not persisted, bad clipboard-policy values, bad layout values, `remember_layout` off / on (a real Ctrl+Alt+' press) |
 | `soak` | five minutes of continuous output: memory stays flat |
 | `real` | real prompts in a sandbox folder through Claude Code and Codex: a tool task, a two-line Shift+Enter prompt, a long stream with a mid-stream resize and Esc interrupt, `/exit` |
 
 ## Harness build and switches (`--features harness` only)
 
 Scenario switches: `--autotest`, `--keys`, `--widthtest`, `--probe*`, `--real`, `--clickfocus`, `--hideshow`,
-`--clipboard`, `--placetest`, `--idletest`, `--starttest`, `--autostarttest`, `--sessiontest`, `--shellstest`, `--tabmodes`, `--shellsfull`, `--scrolltest`, `--ghosttest`, `--attention`, `--policytest`, `--soak [seconds]`, `--selftest`, `--selftest2`, `--idle` (no script; for external drivers).
-Modifiers: `--osc52 write`, `--right-click paste`, `--copy-on-select`, `--no-cue`, `--no-toast`, `--ghost-opacity <n>`, `--opacity <n>`, `--active-opacity <n>`, `--idle-dim <s>`, `--idle-opacity <n>`, `--start-hidden`, `--start-ghost`, `--tabs auto|always|overlay`, `--test-profiles` (override the built-in test config),
+`--clipboard`, `--placetest`, `--idletest`, `--starttest`, `--autostarttest`, `--sessiontest`, `--shellstest`, `--tabmodes`, `--shellsfull`, `--layouttest`, `--layoutempty`, `--layoutstart`, `--layoutown`, `--labeltest`, `--scrolltest`, `--ghosttest`, `--attention`, `--policytest`, `--soak [seconds]`, `--selftest`, `--selftest2`, `--idle` (no script; for external drivers).
+Modifiers: `--osc52 write`, `--right-click paste`, `--copy-on-select`, `--no-cue`, `--no-toast`, `--ghost-opacity <n>`, `--opacity <n>`, `--active-opacity <n>`, `--idle-dim <s>`, `--idle-opacity <n>`, `--start-hidden`, `--start-ghost`, `--tabs auto|always|overlay`, `--test-profiles`, `--layout <name>`, `--layout-fill new|empty`, `--pane-shells shared|own`, `--tab-program known|all|off`, `--split <c>,<r>`, `--pane-min <c>,<r>`, `--dividers` (override the built-in test config),
 `--delay <s>`, `--no-grab` (never send OS-level hotkeys or clicks), `--log-input` (log the bytes sent to
 the shell), `--pty-flags <n>`, `--unicode default|11|graphemes`, `--shift-enter none|esc-cr|kitty`.
 Environment: `HUDSHELL_TEST_DIR` (a scratch folder the scenarios `cd` into) and `HUDSHELL_SANDBOX` (a folder the CLIs

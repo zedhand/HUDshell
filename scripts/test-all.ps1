@@ -1,7 +1,7 @@
 <#
 HUDshell full test runner (Windows PowerShell 5.1 or PowerShell 7).
 
-  scripts\test-all.ps1 [-Suite static,keys,width,hideshow,clickfocus,clipboard,autotest,ui,scrollback,ghost,attention,policy,place,qol,sessions,shells,release,config,soak,real | all]
+  scripts\test-all.ps1 [-Suite static,keys,width,hideshow,clickfocus,clipboard,autotest,ui,scrollback,ghost,attention,policy,place,qol,sessions,shells,layout,release,config,soak,real | all]
                        [-Sandbox <folder both Claude Code and Codex already trust>] [-SoakSeconds 300]
 
 What it touches (read before running):
@@ -33,7 +33,7 @@ New-Item -ItemType Directory -Force $scratch | Out-Null
 $env:HUDSHELL_TEST_DIR = $scratch
 if ($Sandbox) { $env:HUDSHELL_SANDBOX = $Sandbox } else { $env:HUDSHELL_SANDBOX = $scratch }
 $Suite = @($Suite | ForEach-Object { $_ -split ',' } | Where-Object { $_ })
-$want = if ($Suite -contains 'all') { @('static', 'keys', 'width', 'hideshow', 'clickfocus', 'clipboard', 'autotest', 'ui', 'scrollback', 'ghost', 'attention', 'policy', 'place', 'qol', 'sessions', 'shells', 'release', 'config', 'soak') + $(if ($Sandbox) { 'real' } else { @() }) } else { $Suite }
+$want = if ($Suite -contains 'all') { @('static', 'keys', 'width', 'hideshow', 'clickfocus', 'clipboard', 'autotest', 'ui', 'scrollback', 'ghost', 'attention', 'policy', 'place', 'qol', 'sessions', 'shells', 'layout', 'release', 'config', 'soak') + $(if ($Sandbox) { 'real' } else { @() }) } else { $Suite }
 
 $script:R = New-Object System.Collections.Generic.List[object]
 function Check([string]$suite, [string]$name, [bool]$ok, [string]$detail = '') {
@@ -283,6 +283,18 @@ function Suite-Ui {
     Check 'ui' 'Ctrl+Alt+N opens a second shell' (@($sl | Where-Object { $_ -match 'new shell 2 from profile' }).Count -eq 1)
     Check 'ui' 'Ctrl+Alt+PageUp / PageDown / 1 switch between shells' ((@($sl | Where-Object { $_ -match 'shell 1 is now active \(step -1\)' }).Count -eq 1) -and (@($sl | Where-Object { $_ -match 'shell 2 is now active \(step 1\)' }).Count -eq 1) -and (@($sl | Where-Object { $_ -match 'jumped to shell 1' }).Count -eq 1))
     Check 'ui' 'Ctrl+Alt+W needs a second press: the first asks, the second closes' ((@($sl | Where-Object { $_ -match 'close shell 1: press again to confirm' }).Count -eq 1) -and (@($sl | Where-Object { $_ -match 'shell 1 closed' }).Count -eq 1) -and -not [GT]::IsFg($h))
+    $nl = LineCount $log
+    [GT]::Hotkey(0xDE); Start-Sleep -Milliseconds 2500
+    [GT]::Hotkey(0x4F); Start-Sleep -Milliseconds 600
+    [GT]::Hotkey(0x5A); Start-Sleep -Milliseconds 600
+    [GT]::Hotkey(0x5A); Start-Sleep -Milliseconds 600
+    [GT]::Hotkey(0xDE); Start-Sleep -Milliseconds 600
+    [GT]::Hotkey(0xDE); Start-Sleep -Milliseconds 3000
+    [GT]::Hotkey(0xDE); Start-Sleep -Milliseconds 800
+    $ll = @(Cut $log $nl)
+    Check 'ui' "Ctrl+Alt+' steps through the layouts (side by side, stacked, grid, single)" (((@($ll | Where-Object { $_ -match 'layout -> (side-by-side|stacked|grid|single) ' }) | ForEach-Object { if ($_ -match 'layout -> (\S+)') { $Matches[1] } }) -join ',') -eq 'side-by-side,stacked,grid,single')
+    Check 'ui' 'Ctrl+Alt+O moves the keyboard to the next pane' (@($ll | Where-Object { $_ -match 'pane focus -> pane 2' }).Count -ge 1)
+    Check 'ui' 'Ctrl+Alt+Z zooms and unzooms, and the window never took focus' ((@($ll | Where-Object { $_ -match 'zoom on' }).Count -eq 1) -and (@($ll | Where-Object { $_ -match 'zoom off' }).Count -eq 1) -and -not [GT]::IsFg($h))
     [GT]::Hotkey(0x53); Start-Sleep -Milliseconds 1500
     Check 'ui' 'Ctrl+Alt+S opens the panel and takes keyboard focus' ([GT]::IsFg($h))
     [GT]::Key(0x25); [GT]::Key(0x25); Start-Sleep -Milliseconds 700
@@ -460,6 +472,26 @@ function Suite-Config {
     Quit-Rel $p
     $saved = Get-Content -LiteralPath $cfgPath -Raw
     Check 'config' 'bad values fell back to right_click=off, osc52=off; valid copy_on_select kept' (($saved -match '"right_click":\s*"off"') -and ($saved -match '"osc52":\s*"off"') -and ($saved -match '"copy_on_select":\s*true'))
+    # 9. Layout settings: bad values fall back; the layout is saved only when remember_layout is on.
+    Fresh
+    [IO.File]::WriteAllText($cfgPath, '{"layout": "weird", "layout_fill": "x", "pane_shells": "x", "tab_program": "x", "split": [1, 99]}')
+    $p = Start-Rel
+    Check 'config' 'bad layout values: app starts and no .bad file is made' ((-not $p.HasExited) -and -not (Test-Path (Join-Path $cfgDir 'config.json.bad-1')))
+    Quit-Rel $p
+    $saved = Get-Content -LiteralPath $cfgPath -Raw
+    Check 'config' 'bad layout values fell back to single / new / shared / known and the split was clamped to 20..80' (($saved -match '"layout":\s*"single"') -and ($saved -match '"layout_fill":\s*"new"') -and ($saved -match '"pane_shells":\s*"shared"') -and ($saved -match '"tab_program":\s*"known"') -and ($saved -match '"split":\s*\[\s*20,\s*80\s*\]'))
+    Fresh
+    [IO.File]::WriteAllText($cfgPath, '{"layout": "single"}')
+    $p = Start-Rel
+    [GT]::Hotkey(0xDE); Start-Sleep -Milliseconds 3000
+    Quit-Rel $p
+    Check 'config' 'remember_layout off (default): a layout change is not saved' ((Get-Content -LiteralPath $cfgPath -Raw) -match '"layout":\s*"single"')
+    Fresh
+    [IO.File]::WriteAllText($cfgPath, '{"layout": "single", "remember_layout": true}')
+    $p = Start-Rel
+    [GT]::Hotkey(0xDE); Start-Sleep -Milliseconds 3000
+    Quit-Rel $p
+    Check 'config' 'remember_layout on: the chosen layout is saved' ((Get-Content -LiteralPath $cfgPath -Raw) -match '"layout":\s*"side-by-side"')
   } finally { Restore-Config }
   if ($script:hadCfg) { Check 'config' 'your config.json was restored byte-for-byte' ((Get-FileHash $cfgPath).Hash -eq $script:cfgHash) } else { Check 'config' 'test config files removed (none existed before)' (@(Get-ChildItem $cfgDir -Force -ErrorAction SilentlyContinue | Where-Object { $_.Name -like 'config.json*' }).Count -eq 0) }
 }
@@ -704,10 +736,105 @@ function Suite-Shells {
       'overlay' { Check 'shells' 'tabs=overlay: never a strip; a quick overlay appears on switch and fades' ($one -and -not $one.strip -and -not $two.strip -and $nx.overlay -match '\u25b6' -and -not $later.overlay) }
     }
   }
+  # tab labels: the program's whole title, and the program running in the shell (tab_program)
+  foreach ($mode in 'known', 'all', 'off') {
+    $r = Run-Scenario @('--term', '--labeltest', '--tab-program', $mode, '--delay', '2') 90000
+    $t = Get-Ui $r 'p-title'; $c = Get-Ui $r 'p-codex'; $a = Get-Ui $r 'p-after'; $g = Get-Ui $r 'p-ping'; $a2 = Get-Ui $r 'p-after2'
+    if ($mode -eq 'known') {
+      Check 'shells' 'the tab shows the program''s whole window title (35 characters, not cut at 24)' ($t -and $t.labels[0] -ceq '1 HUDshell multi-shell phase 4 labels') (($t.labels) -join ' | ')
+      Check 'shells' 'tab_program=known: a program called codex in the shell labels the tab "codex" (found below a cmd wrapper)' ($c -and $c.progs -ceq 'codex' -and $c.labels[0] -cmatch '^1 codex . HUDshell') (($c.labels) -join ' | ')
+      Check 'shells' 'tab_program=known: the label goes away when the program ends' ($a -and $a.progs -ceq '' -and $a.labels[0] -ceq '1 HUDshell multi-shell phase 4 labels') (($a.labels) -join ' | ')
+      Check 'shells' 'tab_program=known: an ordinary program (ping) gets no label' ($g -and $g.progs -ceq '' -and $a2 -and $a2.progs -ceq '') ("progs=" + $g.progs)
+    }
+    if ($mode -eq 'all') {
+      Check 'shells' 'tab_program=all: any other program is named too (ping), and a known one still wins (codex)' ($c -and $c.progs -ceq 'codex' -and $g -and $g.progs -ceq 'ping' -and $g.labels[0] -cmatch '^1 ping . ' -and $a2 -and $a2.progs -ceq '') ("codex=" + $c.progs + " ping=" + $g.progs)
+    }
+    if ($mode -eq 'off') {
+      Check 'shells' 'tab_program=off: no program labels at all' ($c -and $c.progs -ceq '' -and $g -and $g.progs -ceq '' -and $c.labels[0] -ceq '1 HUDshell multi-shell phase 4 labels') (($c.labels) -join ' | ')
+    }
+    Check 'shells' "tab labels ($mode): no start failures logged" (@($r | Where-Object { $_ -match 'FAILED to start' }).Count -eq 0)
+  }
   # the window holds nine shells
   $r = Run-Scenario @('--term', '--shellsfull', '--delay', '2') 90000
   $n9 = Get-Ui $r 'nine'; $n10 = Get-Ui $r 'tenth-refused'
   Check 'shells' 'nine shells fit; the tenth is refused with a message' ($n9 -and @($n9.labels).Count -eq 9 -and $n10 -and @($n10.labels).Count -eq 9 -and $n10.overlay -match 'at most 9' -and @($r | Where-Object { $_ -match 'new shell refused' }).Count -eq 1)
+}
+
+function Suite-Layout {
+  Write-Host "=== layout: split panes, presets, focus, zoom, fallback, own lists per pane, dividers (no OS input) ==="
+  function Cols($sz) { if ($sz -and $sz -ne '-') { [int](($sz -split 'x')[0]) } else { 0 } }
+  function Rows($sz) { if ($sz -and $sz -ne '-') { [int](($sz -split 'x')[1]) } else { 0 } }
+  function Ids($u) { if ($u -and $u.layout) { (@($u.layout.cells) -join ',') } else { '?' } }
+  $run = Run-Scenario @('--term', '--layouttest', '--delay', '2') 120000
+  $one = Get-Ui $run 'l-single'
+  Check 'layout' 'one shell: a single pane, no pane label' ($one -and $one.layout.shown -eq 'single' -and (Ids $one) -eq '1' -and -not ($one.layout.labels -join ''))
+  $c1 = Cols $one.layout.sizes[0]; $r1 = Rows $one.layout.sizes[0]
+  $u = Get-Ui $run 'l-side'
+  Check 'layout' 'side by side: the second pane gets a new shell (layout_fill = new)' ($u -and $u.layout.shown -eq 'side-by-side' -and (Ids $u) -eq '1,2' -and @($run | Where-Object { $_ -match 'layout: started 1 shell\(s\) for empty panes' }).Count -ge 1) (Ids $u)
+  Check 'layout' 'both panes are on screen, each about half as wide, with a name in the corner' ($u -and @($u.layout.visible).Count -eq 2 -and (Cols $u.layout.sizes[0]) -lt $c1 * 0.6 -and (Cols $u.layout.sizes[1]) -lt $c1 * 0.6 -and (Rows $u.layout.sizes[0]) -ge ($r1 - 2) -and (Rows $u.layout.sizes[0]) -le $r1 -and ($u.layout.labels[0] -match '^1 ') -and ($u.layout.labels[1] -match '^2 ')) (($u.layout.sizes -join ' ') + " vs ${c1}x${r1} for one pane")
+  Check 'layout' 'dividers are off by default' ($u -and $u.layout.dividers -eq 0)
+  Check 'layout' 'each pane shows only its own shell' ((Dump-Has $run 'l-side' 'PANE-ONE') -and -not (Dump-Has $run 'l-side' 'PANE-TWO') -and (Dump-Has $run 'l-side2' 'PANE-TWO') -and -not (Dump-Has $run 'l-side2' 'PANE-ONE'))
+  $u = Get-Ui $run 'l-stacked'
+  Check 'layout' 'stacked: two panes above each other, full width, about half as tall' ($u -and $u.layout.shown -eq 'stacked' -and (Ids $u) -eq '1,2' -and (Rows $u.layout.sizes[0]) -lt $r1 * 0.6 -and (Cols $u.layout.sizes[0]) -ge $c1 - 2) ($u.layout.sizes -join ' ')
+  $u = Get-Ui $run 'l-grid'
+  Check 'layout' 'grid: four panes, two more shells started' ($u -and $u.layout.shown -eq 'grid' -and (Ids $u) -eq '1,2,3,4' -and @($u.layout.visible).Count -eq 4 -and @($run | Where-Object { $_ -match 'layout: started 2 shell\(s\)' }).Count -ge 1) (Ids $u)
+  $u = Get-Ui $run 'l-focus2'
+  Check 'layout' 'the pane hotkey moves the keyboard: typing goes to the shell in pane 2 only' ($u -and $u.layout.focus -eq 1 -and $u.active -eq 2 -and (Dump-Has $run 'l-focus2' 'TYPED-IN-PANE-TWO') -and -not (Dump-Has $run 'l-jump' 'TYPED-IN-PANE-TWO'))
+  $u = Get-Ui $run 'l-zoom'
+  Check 'layout' 'zoom shows only the focused pane, at full size' ($u -and $u.layout.zoom -and (@($u.layout.visible) -join ',') -eq '2' -and (Cols $u.layout.sizes[0]) -ge $c1 - 2) (($u.layout.visible -join ',') + ' ' + ($u.layout.sizes -join ' '))
+  $u = Get-Ui $run 'l-unzoom'
+  Check 'layout' 'zoom again restores the four panes' ($u -and -not $u.layout.zoom -and @($u.layout.visible).Count -eq 4)
+  $u = Get-Ui $run 'l-jump'
+  Check 'layout' 'jumping to a shell already on screen focuses its pane (nothing moves)' ($u -and $u.active -eq 1 -and $u.layout.focus -eq 0 -and (Ids $u) -eq '1,2,3,4')
+  $u = Get-Ui $run 'l-small'
+  Check 'layout' 'a window too small for the grid shows fewer panes' ($u -and $u.layout.shown -ne 'grid' -and @($u.layout.visible).Count -lt 4 -and @($run | Where-Object { $_ -match 'layout: area \d+x\d+ cells, showing (stacked|side-by-side|single)' }).Count -ge 1) ($u.layout.shown + ' area ' + $u.layout.area)
+  $u = Get-Ui $run 'l-big'
+  Check 'layout' 'growing the window brings the grid back' ($u -and $u.layout.shown -eq 'grid' -and @($u.layout.visible).Count -eq 4)
+  $u = Get-Ui $run 'l-closed'
+  Check 'layout' 'closing a shell on screen leaves its pane empty when every other shell is showing' ($u -and (Ids $u) -eq '0,2,3,4' -and $u.layout.empties -eq 1 -and $u.active -eq 2) (Ids $u)
+  $u = Get-Ui $run 'l-refill'
+  Check 'layout' 'a new shell goes into the empty pane and gets the keyboard' ($u -and (Ids $u) -eq '5,2,3,4' -and $u.layout.focus -eq 0 -and $u.active -eq 5) (Ids $u)
+  $u = Get-Ui $run 'l-single-again'
+  Check 'layout' 'back to single: one pane, the other shells stay open as tabs' ($u -and $u.layout.shown -eq 'single' -and (Ids $u) -eq '5' -and @($u.labels).Count -eq 4)
+  Check 'layout' 'no start failures logged' (@($run | Where-Object { $_ -match 'FAILED to start' }).Count -eq 0)
+  # layout_fill = empty
+  $run = Run-Scenario @('--term', '--layoutempty', '--layout-fill', 'empty', '--delay', '2') 60000
+  $u = Get-Ui $run 'e-grid'
+  Check 'layout' 'layout_fill = empty: the grid leaves three empty panes and starts no shell' ($u -and (Ids $u) -eq '1,0,0,0' -and $u.layout.empties -eq 3 -and @($u.labels).Count -eq 1) (Ids $u)
+  $u = Get-Ui $run 'e-focus-empty'
+  Check 'layout' 'an empty pane can take the focus' ($u -and $u.layout.focus -eq 1)
+  $u = Get-Ui $run 'e-filled'
+  Check 'layout' 'a new shell goes into the focused empty pane' ($u -and (Ids $u) -eq '1,2,0,0' -and $u.layout.focus -eq 1) (Ids $u)
+  # pane_shells = own: every pane has its own list of shells
+  $run = Run-Scenario @('--term', '--layoutown', '--pane-shells', 'own', '--delay', '2') 120000
+  $u = Get-Ui $run 'o-side'
+  Check 'layout' 'own lists: the new pane starts its own shell, and each pane lists only its own shells' ($u -and $u.layout.own -and $u.layout.gt -eq '1|2' -and (Ids $u) -eq '1,2' -and $u.layout.focus -eq 0) ("groups " + $u.layout.gt)
+  $u = Get-Ui $run 'o-joined'
+  Check 'layout' 'own lists: a new shell joins the focused pane (now two shells); the other pane is untouched' ($u -and $u.layout.gt -eq '1,3|2' -and (Ids $u) -eq '3,2' -and $u.active -eq 3) ("groups " + $u.layout.gt + " showing " + (Ids $u))
+  Check 'layout' 'own lists: the tab strip shows only the focused pane''s two shells (not all three)' ($u -and $u.layout.te -eq 2 -and $u.layout.st -eq '1,3' -and @($u.labels).Count -eq 3) ("tabs " + $u.layout.te)
+  Check 'layout' 'own lists: pane names read position/length (2/2 and 1/1)' ($u -and $u.layout.labels[0] -match '^2/2 ' -and $u.layout.labels[1] -match '^1/1 ') (($u.layout.labels) -join ' | ')
+  $u = Get-Ui $run 'o-prev'
+  Check 'layout' 'own lists: previous shell stays inside the focused pane (the other pane does not change)' ($u -and (Ids $u) -eq '1,2' -and $u.active -eq 1 -and (Dump-Has $run 'o-prev' 'OWN-ONE')) (Ids $u)
+  $u = Get-Ui $run 'o-jump'
+  Check 'layout' 'own lists: the number keys count inside the focused pane (2 does not exist there, 1 is its shell)' ($u -and $u.layout.focus -eq 1 -and $u.active -eq 2 -and $u.layout.st -eq '2' -and @($run | Where-Object { $_ -match 'no shell 2 to jump to' }).Count -ge 1) ("strip " + $u.layout.st)
+  $u = Get-Ui $run 'o-second-tab'
+  Check 'layout' 'own lists: a new shell in the second pane gives that pane two tabs' ($u -and $u.layout.gt -eq '1,3|2,4' -and (Ids $u) -eq '1,4' -and $u.layout.st -eq '2,4' -and $u.layout.labels[1] -match '^2/2 ') ("groups " + $u.layout.gt)
+  $u = Get-Ui $run 'o-closed'
+  Check 'layout' 'own lists: closing a shell shows the next one of the same pane' ($u -and $u.layout.gt -eq '1,3|2' -and (Ids $u) -eq '1,2' -and $u.active -eq 2) ("groups " + $u.layout.gt)
+  $u = Get-Ui $run 'o-last-closed'
+  Check 'layout' 'own lists: closing a pane''s last shell leaves it empty (nothing borrowed) and the keyboard moves to a pane with a shell' ($u -and $u.layout.gt -eq '1,3|' -and (Ids $u) -eq '1,0' -and $u.layout.empties -eq 1 -and $u.layout.focus -eq 0 -and $u.active -eq 1) ("groups " + $u.layout.gt + " showing " + (Ids $u))
+  $u = Get-Ui $run 'o-merged'
+  Check 'layout' 'own lists: going back to one pane keeps every shell (they become that pane''s tabs)' ($u -and $u.layout.gt -eq '1,3' -and (Ids $u) -eq '1' -and $u.layout.st -eq '1,3' -and @($u.labels).Count -eq 2) ("groups " + $u.layout.gt)
+  Check 'layout' 'own lists: no start failures logged' (@($run | Where-Object { $_ -match 'FAILED to start' }).Count -eq 0)
+  # start layout, uneven split, dividers
+  $run = Run-Scenario @('--term', '--layoutstart', '--layout', 'side-by-side', '--split', '60,50', '--dividers', '--delay', '2') 60000
+  $u = Get-Ui $run 'st-start'
+  Check 'layout' 'layout at start: side by side with a second shell' ($u -and $u.layout.shown -eq 'side-by-side' -and (Ids $u) -eq '1,2' -and @($run | Where-Object { $_ -match 'layout at start: side-by-side' }).Count -eq 1) (Ids $u)
+  $a0 = Cols $u.layout.sizes[0]; $b0 = Cols $u.layout.sizes[1]
+  Check 'layout' 'split 60,50: the first pane is wider' ($u -and $a0 -gt $b0 -and (($u.layout.split) -join ',') -eq '60,50') "$a0 vs $b0"
+  Check 'layout' 'pane_dividers: one divider is drawn' ($u -and $u.layout.dividers -eq 1)
+  $u = Get-Ui $run 'st-dragged'
+  Check 'layout' 'dragging the divider to 70% resizes the panes and tells the host' ($u -and (($u.layout.split) -join ',') -eq '70,50' -and (Cols $u.layout.sizes[0]) -gt $a0 -and @($run | Where-Object { $_ -match 'split -> 70,50' }).Count -eq 1) (($u.layout.sizes) -join ' ')
 }
 
 function Tree-Memory([int]$rootPid) {
@@ -768,6 +895,7 @@ foreach ($s in $want) {
     'qol' { Suite-Qol }
     'sessions' { Suite-Sessions }
     'shells' { Suite-Shells }
+    'layout' { Suite-Layout }
     'ghost' { Suite-Ghost }
     'attention' { Suite-Attention }
     'policy' { Suite-Policy }

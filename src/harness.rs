@@ -460,6 +460,116 @@ const SHELLSFULL: &[(u64, &str)] = &[
     (13700, "quit"),
 ];
 
+/// `--layouttest`: split panes through the host functions (no OS input). Presets in hotkey order, new shells
+/// for empty panes, which pane gets typing, zoom, jumping to a shell already on screen, the fallback to fewer
+/// panes in a small window, closing a shell that is on screen, a new shell filling the empty pane.
+const LAYOUT: &[(u64, &str)] = &[
+    (1500, "cdp-focus"),
+    (2000, "resize:900,520"),
+    (2500, "w:echo PANE-ONE\r"),
+    (3500, "dumps:1:l-single"),
+    (4000, "layout:next"),
+    (8000, "wto:2:echo PANE-TWO\r"),
+    (9000, "dumps:1:l-side"),
+    (9500, "dumps:2:l-side2"),
+    (10000, "layout:next"),
+    (11000, "dumps:1:l-stacked"),
+    (11500, "layout:next"),
+    (16000, "dumps:1:l-grid"),
+    (16500, "pane:next"),
+    (17000, "w:echo TYPED-IN-PANE-TWO\r"),
+    (18000, "dumps:2:l-focus2"),
+    (18500, "pane:zoom"),
+    (19000, "dumps:2:l-zoom"),
+    (19500, "pane:zoom"),
+    (20000, "dumps:2:l-unzoom"),
+    (20500, "shell:jump:1"),
+    (21000, "dumps:1:l-jump"),
+    (21500, "resize:480,300"),
+    (23000, "dumps:1:l-small"),
+    (23500, "resize:900,520"),
+    (25000, "dumps:1:l-big"),
+    (25500, "shell:close"),
+    (26000, "shell:close"),
+    (27500, "dumps:2:l-closed"),
+    (28000, "shell:new"),
+    (32000, "dumps:5:l-refill"),
+    (32500, "layout:next"),
+    (33500, "dumps:5:l-single-again"),
+    (34000, "quit"),
+];
+
+/// `--labeltest` (run once each with `--tab-program known|all|off`): the tab shows the program's whole title, and the
+/// program running in the shell. `codex.exe` here is a renamed copy of cmd.exe that only pings localhost, so no real
+/// program is started and nothing is sent anywhere.
+const LABELS: &[(u64, &str)] = &[
+    (1500, "cdp-focus"),
+    (2000, "w:$Host.UI.RawUI.WindowTitle='HUDshell multi-shell phase 4 labels'\r"),
+    (3000, "dumps:1:p-title"),
+    (3500, "w:Copy-Item \"$env:SystemRoot\\System32\\cmd.exe\" \"$env:HUDSHELL_TEST_DIR\\codex.exe\"\r"),
+    (4500, "w:& \"$env:HUDSHELL_TEST_DIR\\codex.exe\" /c \"ping -n 9 127.0.0.1 >nul\"\r"),
+    (8500, "dumps:1:p-codex"),
+    (15500, "dumps:1:p-after"),
+    (16000, "w:ping -n 9 127.0.0.1\r"),
+    (20000, "dumps:1:p-ping"),
+    (27500, "dumps:1:p-after2"),
+    (28000, "quit"),
+];
+
+/// `--layoutown` (run with `--pane-shells own`): each pane has its own list of shells. New shells join the focused
+/// pane, switching and jumping stay inside it, closing refills from its own list, fewer panes merge the lists.
+const LAYOUTOWN: &[(u64, &str)] = &[
+    (1500, "cdp-focus"),
+    (2000, "resize:900,520"),
+    (2500, "w:echo OWN-ONE\r"),
+    (3500, "layout:next"),
+    (8000, "dumps:2:o-side"),
+    (8500, "shell:new"),
+    (12500, "dumps:3:o-joined"),
+    (13000, "shell:prev"),
+    (13800, "dumps:1:o-prev"),
+    (14300, "pane:next"),
+    (14800, "shell:jump:2"),
+    (15300, "shell:jump:1"),
+    (15800, "dumps:2:o-jump"),
+    (16300, "shell:new"),
+    (20300, "dumps:4:o-second-tab"),
+    (20800, "shell:close"),
+    (21200, "shell:close"),
+    (22500, "dumps:2:o-closed"),
+    (23000, "shell:close"),
+    (23400, "shell:close"),
+    (24500, "dumps:1:o-last-closed"),
+    (25000, "layout:set:single"),
+    (26000, "dumps:1:o-merged"),
+    (26500, "quit"),
+];
+
+/// `--layoutempty` (run with `--layout-fill empty`): a layout leaves panes empty; a new shell goes into the
+/// focused empty pane.
+const LAYOUTEMPTY: &[(u64, &str)] = &[
+    (1500, "cdp-focus"),
+    (2000, "resize:900,520"),
+    (2500, "layout:set:grid"),
+    (3500, "dumps:1:e-grid"),
+    (4000, "pane:next"),
+    (4500, "dumps:1:e-focus-empty"),
+    (5000, "shell:new"),
+    (9000, "dumps:2:e-filled"),
+    (9500, "quit"),
+];
+
+/// `--layoutstart` (run with `--layout side-by-side --split 60,50 --dividers`): the start layout, an uneven
+/// split, and dragging the divider (DevTools mouse events inside the page, no OS input).
+const LAYOUTSTART: &[(u64, &str)] = &[
+    (1500, "cdp-focus"),
+    (2000, "resize:900,520"),
+    (6500, "dumps:1:st-start"),
+    (7000, "js:(()=>{const d=document.querySelector('.divider.v');const r=document.getElementById('term').getBoundingClientRect();const y=r.top+20;d.dispatchEvent(new MouseEvent('mousedown',{bubbles:true,clientX:r.left+r.width*0.6,clientY:y}));window.dispatchEvent(new MouseEvent('mousemove',{clientX:r.left+r.width*0.7,clientY:y}));window.dispatchEvent(new MouseEvent('mouseup',{clientX:r.left+r.width*0.7,clientY:y}));})()"),
+    (8500, "dumps:1:st-dragged"),
+    (9000, "quit"),
+];
+
 /// `--placetest`: corner docking, size presets, font size and magnetic snapping through the host functions.
 const PLACE: &[(u64, &str)] = &[
     (1500, "resize:900,520"),
@@ -770,6 +880,11 @@ fn build_soak() -> &'static [(u64, &'static str)] {
 
 fn scen() -> &'static [(u64, &'static str)] {
     match SCEN_SEL.load(Ordering::SeqCst) {
+        28 => LABELS,
+        27 => LAYOUTOWN,
+        26 => LAYOUTSTART,
+        25 => LAYOUTEMPTY,
+        24 => LAYOUT,
         23 => SHELLSFULL,
         22 => TABMODES,
         21 => SHELLS,
@@ -1040,6 +1155,25 @@ unsafe fn run_action(hwnd: HWND, act: &str) {
         // Opens the picker in the page only; the real hotkey also grabs the keyboard, which tests avoid.
         push_tabs();
         wv::post("{\"t\":\"picker\"}");
+    } else if act == "layout:next" {
+        layout_cycle();
+    } else if let Some(name) = act.strip_prefix("layout:set:") {
+        let p = crate::layout::Preset::parse(name).unwrap_or(crate::layout::Preset::Single);
+        let (order, active) = {
+            let sh = shells_lock();
+            (sh.ids(), sh.active())
+        };
+        let empty = layout_lock().set_preset(p, &order, active);
+        log(&format!("layout -> {} ({} panes, {} empty)", p.name(), p.panes(), empty));
+        after_layout_change(empty, active);
+    } else if act == "pane:next" {
+        pane_step(1);
+    } else if act == "pane:prev" {
+        pane_step(-1);
+    } else if act == "pane:zoom" {
+        pane_zoom();
+    } else if let Some(i) = act.strip_prefix("pane:focus:") {
+        on_pane_focus(i.parse().unwrap_or(0));
     } else if act == "shell:attention" {
         wv::post("{\"t\":\"attentionnext\"}");
     } else if let Some(expr) = act.strip_prefix("js:") {
@@ -1048,17 +1182,25 @@ unsafe fn run_action(hwnd: HWND, act: &str) {
         // The host creates a session; the page builds its view and answers "ready", which starts the shell.
         let id = NEXT_TEST_SESSION.fetch_add(1, Ordering::SeqCst);
         log(&format!("SESSION open {id}"));
+        // Like a new shell: the layout shows it first, so its view is created on screen at a real size.
+        layout_lock().place_new(id);
+        push_layout();
         wv::post(&serde_json::json!({ "t": "open", "s": id }).to_string());
         pty::set_active(id);
     } else if let Some(v) = act.strip_prefix("session:show:") {
         let id: u32 = v.parse().unwrap_or(1);
         log(&format!("SESSION show {id}"));
+        layout_lock().show(id);
+        push_layout();
         wv::post(&serde_json::json!({ "t": "show", "s": id }).to_string());
         pty::set_active(id);
     } else if let Some(v) = act.strip_prefix("session:close:") {
         let id: u32 = v.parse().unwrap_or(1);
         log(&format!("SESSION close {id}"));
         pty::close(id);
+        let others: Vec<u32> = pty::session_ids().into_iter().filter(|s| *s != id).collect();
+        layout_lock().remove(id, &others, 0);
+        push_layout();
         wv::post(&serde_json::json!({ "t": "close", "s": id }).to_string());
         if pty::active() == id {
             pty::set_active(pty::session_ids().first().copied().unwrap_or(1));
@@ -1244,7 +1386,7 @@ const SCENARIO_FLAGS: &[&str] = &[
     "--autotest", "--keys", "--widthtest", "--probe", "--probe2", "--probe3", "--probe4", "--real",
     "--clickfocus", "--hideshow", "--clipboard", "--soak", "--scrolltest", "--ghosttest", "--attention",
     "--policytest", "--placetest", "--idletest", "--starttest", "--autostarttest", "--sessiontest", "--shellstest",
-    "--tabmodes", "--shellsfull",
+    "--tabmodes", "--shellsfull", "--layouttest", "--layoutempty", "--layoutstart", "--layoutown", "--labeltest",
 ];
 
 pub(crate) fn is_test_mode() -> bool {
@@ -1317,7 +1459,7 @@ pub(crate) unsafe fn arm(hwnd: HWND) {
     if SCENARIO_FLAGS.iter().any(|f| any_scen(f)) {
         let args: Vec<String> = std::env::args().collect();
         SCEN_SEL.store(
-            if any_scen("--shellsfull") { 23 } else if any_scen("--tabmodes") { 22 } else if any_scen("--shellstest") { 21 } else if any_scen("--sessiontest") { 20 } else if any_scen("--autostarttest") { 19 } else if any_scen("--starttest") { 18 } else if any_scen("--idletest") { 17 } else if any_scen("--placetest") { 16 } else if any_scen("--policytest") { 15 } else if any_scen("--attention") { 14 } else if any_scen("--ghosttest") { 13 } else if any_scen("--scrolltest") { 12 } else if any_scen("--soak") { 11 } else if any_scen("--clipboard") { 10 } else if any_scen("--hideshow") { 9 } else if any_scen("--clickfocus") { 8 } else if any_scen("--real") { 7 } else if any_scen("--probe4") { 6 } else if any_scen("--probe3") { 5 } else if any_scen("--probe2") { 4 } else if any_scen("--probe") { 3 } else if any_scen("--widthtest") { 2 } else if any_scen("--keys") { 1 } else { 0 },
+            if any_scen("--labeltest") { 28 } else if any_scen("--layoutown") { 27 } else if any_scen("--layoutstart") { 26 } else if any_scen("--layoutempty") { 25 } else if any_scen("--layouttest") { 24 } else if any_scen("--shellsfull") { 23 } else if any_scen("--tabmodes") { 22 } else if any_scen("--shellstest") { 21 } else if any_scen("--sessiontest") { 20 } else if any_scen("--autostarttest") { 19 } else if any_scen("--starttest") { 18 } else if any_scen("--idletest") { 17 } else if any_scen("--placetest") { 16 } else if any_scen("--policytest") { 15 } else if any_scen("--attention") { 14 } else if any_scen("--ghosttest") { 13 } else if any_scen("--scrolltest") { 12 } else if any_scen("--soak") { 11 } else if any_scen("--clipboard") { 10 } else if any_scen("--hideshow") { 9 } else if any_scen("--clickfocus") { 8 } else if any_scen("--real") { 7 } else if any_scen("--probe4") { 6 } else if any_scen("--probe3") { 5 } else if any_scen("--probe2") { 4 } else if any_scen("--probe") { 3 } else if any_scen("--widthtest") { 2 } else if any_scen("--keys") { 1 } else { 0 },
             Ordering::SeqCst,
         );
         let delay = args
@@ -1385,6 +1527,31 @@ pub(crate) fn override_config(mut c: config::Config) -> config::Config {
     }
     if let Some(v) = opt("--tabs") {
         c.tabs = v;
+    }
+    let pair = |v: String| -> Option<[u32; 2]> {
+        let (a, b) = v.split_once(',')?;
+        Some([a.trim().parse().ok()?, b.trim().parse().ok()?])
+    };
+    if let Some(v) = opt("--layout") {
+        c.layout = v;
+    }
+    if let Some(v) = opt("--layout-fill") {
+        c.layout_fill = v;
+    }
+    if let Some(v) = opt("--pane-shells") {
+        c.pane_shells = v;
+    }
+    if let Some(v) = opt("--tab-program") {
+        c.tab_program = v;
+    }
+    if let Some(v) = opt("--split").and_then(pair) {
+        c.split = v;
+    }
+    if let Some(v) = opt("--pane-min").and_then(pair) {
+        c.pane_min = v;
+    }
+    if args.iter().any(|a| a == "--dividers") {
+        c.pane_dividers = true;
     }
     if args.iter().any(|a| a == "--test-profiles") {
         c.profiles = vec![

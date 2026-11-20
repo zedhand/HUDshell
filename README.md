@@ -14,7 +14,8 @@ click-through by default, an explicit keyboard-focus toggle, and an adjustable o
 - **Click-through** by default (mouse input goes to the window underneath). Toggle with a hotkey.
 - **Grab / release keyboard focus** with a hotkey, or click the terminal while it is interactive.
 - **Opacity** from 20% to 100% (hotkeys, settings panel, or `config.json`).
-- **Several shells in one window** (up to 9): visible tabs, a compact overlay-only list, switch hotkeys that work while the game has the keyboard, tab names taken from each program's own window title, a mark on tabs with unseen output, and profiles (start folder, start command, accent colour).
+- **Several shells in one window** (up to 9): visible tabs, a compact overlay-only list, switch hotkeys that work while the game has the keyboard, tab names taken from each program's own window title (like a normal terminal tab), a label when a tab runs Claude Code, Codex or a similar tool, a mark on tabs with unseen output, and profiles (start folder, start command, accent colour).
+- **Split panes**: show two shells side by side or stacked, or four in a 2 x 2 grid, in the same window; a hotkey moves the keyboard between panes and another zooms one pane to the whole window. A window too small for the layout shows fewer panes. Equal halves by default; uneven splits, draggable dividers and a separate list of shells per pane are options.
 - **Corners and sizes**: a hotkey docks the window in the next screen corner, another cycles size presets, and dragging near a screen edge snaps to it.
 - **Opacity that follows you**: a separate opacity while you are typing, and an optional dim after the shell has been quiet for a while.
 - **Start options**: start hidden or ghosted; a second launch brings the running window forward; "Start with Windows" in the tray menu.
@@ -63,6 +64,9 @@ Or by hand: `npm install`, `npm run build`, `cargo build --release`.
 | Ctrl+Alt+` | show the shell list for a moment |
 | Ctrl+Alt+; | jump to the next shell with unseen output |
 | Ctrl+Alt+W | close the active shell (press twice within 3 s; closing the last shell starts a fresh one) |
+| Ctrl+Alt+' | next layout: single, side by side, stacked, 2 x 2 |
+| Ctrl+Alt+O | move the keyboard to the next pane |
+| Ctrl+Alt+Z | zoom the focused pane to the whole window, press again to go back |
 | Ctrl+Alt+Q | quit |
 
 Inside the terminal: **Shift+Enter** inserts a newline in Claude Code and Codex; **Ctrl+Shift+C** or
@@ -84,7 +88,7 @@ values are range-checked, and an unreadable file is kept as `config.json.bad-N` 
 | `font_family` / `font_size` | Cascadia Mono, Consolas / 14 | size 8-48 |
 | `scrollback` | `2000` | lines, 100-100000 |
 | `shell` | none | full path of a shell to use instead of PowerShell 7 |
-| `hotkeys` | see table above | `click_through`, `grab_focus`, `show_hide`, `cycle_colours`, `opacity_up`, `opacity_down`, `settings`, `ghost`, `quit`, `corner_next`, `corner_prev`, `size_cycle`, `font_bigger`, `font_smaller`, `shell_next`, `shell_prev`, `shell_new`, `shell_close`, `shell_list`, `shell_picker`, `shell_attention`, `shell_jump` (modifiers only; `Ctrl+Alt` means Ctrl+Alt+1..9); every chord needs at least one modifier |
+| `hotkeys` | see table above | `click_through`, `grab_focus`, `show_hide`, `cycle_colours`, `opacity_up`, `opacity_down`, `settings`, `ghost`, `quit`, `corner_next`, `corner_prev`, `size_cycle`, `font_bigger`, `font_smaller`, `shell_next`, `shell_prev`, `shell_new`, `shell_close`, `shell_list`, `shell_picker`, `shell_attention`, `layout_cycle`, `pane_zoom`, `pane_next`, `shell_jump` (modifiers only; `Ctrl+Alt` means Ctrl+Alt+1..9); every chord needs at least one modifier |
 | `ghost_opacity` | `40` | percent used by the ghost preset (20-100); never brightens a window that is already dimmer; never saved over `opacity` |
 | `copy_on_select` | `false` | copy the selection when the mouse button is released |
 | `right_click` | `"off"` | `"paste"`: right-click copies a selection, or pastes when nothing is selected |
@@ -94,8 +98,16 @@ values are range-checked, and an unreadable file is kept as `config.json.bad-N` 
 | `active_opacity` | `null` | opacity while HUDshell holds the keyboard (`null` = same as `opacity`) |
 | `idle_dim_seconds` / `idle_opacity` | `0` / `50` | dim to `idle_opacity` after this many seconds without shell output (0 = off); output brightens it at once |
 | `start_hidden` / `start_ghost` | `false` / `false` | start hidden / in ghost mode |
+| `tab_program` | `"known"` | label a tab with the program running in it (`claude · <title>`): `"known"` = Claude Code, Codex, Gemini CLI, Aider, OpenCode; `"all"` = also any other program (`git`, `ssh`, ...); `"off"` = never. Found by reading the process list below each shell: nothing is injected and nothing is written to the log |
 | `tabs` | `"auto"` | `"auto"`: tab strip once there are 2+ shells; `"always"`: strip even for one; `"overlay"`: no strip, only a short overlay on switch and on the list hotkey |
 | `profiles` / `default_profile` | one `pwsh` profile / `""` | kinds of shell: `{name, dir, command, shell, color}`. `dir` expands `%VARS%`; `command` is typed into the new shell; `color` is a tab accent `#rrggbb` |
+| `layout` | `"single"` | layout at start: `"single"`, `"side-by-side"`, `"stacked"` or `"grid"` (2 x 2) |
+| `pane_shells` | `"shared"` | `"shared"`: every pane shows a shell from the one tab list; `"own"`: each pane has its own list of shells (the tab strip, PageUp/PageDown and the number keys then act on the focused pane's list; a new shell joins the focused pane; going to fewer panes moves the shells into the focused pane) |
+| `layout_fill` | `"new"` | when a layout has more panes than there are shells: `"new"` starts shells (default profile) for them, `"empty"` leaves the panes empty until you start a shell there |
+| `remember_layout` | `false` | save the chosen layout and divider positions in `layout` / `split` whenever they change (which shell is in which pane is not saved) |
+| `split` | `[50, 50]` | share in percent (20-80) of the first column and of the first row |
+| `pane_dividers` | `false` | draggable dividers between panes (needs the mouse, so the window must not be click-through) |
+| `pane_min` | `[30, 6]` | smallest pane worth drawing, in columns and rows; a smaller window shows fewer panes |
 | `attention_cue` / `attention_toast` | `true` / `true` | pulse the border, and show a tray notification while hidden, when a program rings the bell or sends OSC 9 / OSC 777 |
 | `window` | remembered | position and size in physical pixels |
 

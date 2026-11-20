@@ -18,7 +18,9 @@ mod assets;
 mod config;
 #[cfg(feature = "harness")]
 mod harness;
+mod layout;
 mod place;
+mod progs;
 mod pty;
 mod shells;
 mod wv;
@@ -53,6 +55,9 @@ const HK_CORNER_PREV: i32 = 11;
 const HK_SIZE: i32 = 12;
 const HK_FONT_UP: i32 = 13;
 const HK_FONT_DOWN: i32 = 14;
+const HK_LAYOUT: i32 = 15;
+const HK_PANE_ZOOM: i32 = 16;
+const HK_PANE_NEXT: i32 = 17;
 const HK_SHELL_NEXT: i32 = 20;
 const HK_SHELL_PREV: i32 = 21;
 const HK_SHELL_NEW: i32 = 22;
@@ -843,6 +848,13 @@ fn shells_lock() -> std::sync::MutexGuard<'static, shells::Shells> {
     SHELLS.lock().unwrap_or_else(|p| p.into_inner())
 }
 
+/// Split panes: which shell each pane shows, the focused pane, zoom (see layout.rs).
+static LAYOUT: Mutex<layout::Layout> = Mutex::new(layout::Layout::new());
+
+fn layout_lock() -> std::sync::MutexGuard<'static, layout::Layout> {
+    LAYOUT.lock().unwrap_or_else(|p| p.into_inner())
+}
+
 /// Expand `%NAME%` environment variables in a configured path.
 fn expand_env(s: &str) -> String {
     let mut out = String::new();
@@ -899,12 +911,192 @@ pub fn push_tabs() {
     wv::post(
         &serde_json::json!({ "t": "tabs", "list": list, "active": sh.active(), "mode": c.tabs, "profiles": names }).to_string(),
     );
+    drop(sh);
+    push_layout();
+}
+
+/// Tell the page what to draw: the panes on screen (shape, which shell in each), focus, zoom and split.
+pub fn push_layout() {
+    let c = cfg();
+    let l = layout_lock();
+    let shown = l.shown();
+    let (sc, sr) = shown.shape();
+    let cells: Vec<serde_json::Value> =
+        l.cells().iter().map(|(i, id)| serde_json::json!({ "slot": i, "id": id })).collect();
+    let (spc, spr) = l.split();
+    let groups: Vec<Vec<u32>> = if l.own() { (0..l.slots().len()).map(|i| l.group(i).to_vec()).collect() } else { Vec::new() };
+    wv::post(
+        &serde_json::json!({
+            "t": "layout", "preset": l.preset().name(), "shown": shown.name(), "shape": [sc, sr], "cells": cells,
+            "focus": l.focus(), "zoom": l.zoomed(), "split": [spc, spr], "dividers": c.pane_dividers,
+            "hint": c.hotkeys.shell_new, "own": l.own(), "groups": groups, "strip": l.tab_order().unwrap_or_default(),
+        })
+        .to_string(),
+    );
+}
+
+/// The focused pane changed: its shell (if any) becomes the active one.
+fn pane_focus_changed() {
+    let (i, id) = {
+        let l = layout_lock();
+        (l.focus(), l.focused_id())
+    };
+    log(&format!("pane focus -> pane {} (shell {id})", i + 1));
+    if id != 0 {
+        shells_lock().activate(id);
+        pty::set_active(id);
+        wv::post(&serde_json::json!({ "t": "show", "s": id }).to_string());
+    }
+    push_tabs();
+}
+
+/// After a new layout was chosen: remember it if asked to, start shells for empty panes (layout_fill =
+/// "new"), and keep the focus on the shell that had it.
+fn after_layout_change(empty: usize, active: u32) {
+    let c = cfg();
+    if c.remember_layout {
+        let name = layout_lock().preset().name().to_string();
+        cfg_update(|c| c.layout = name);
+    }
+    if empty > 0 && c.layout_fill == "new" {
+        let mut started = 0;
+        let (own, panes) = {
+            let l = layout_lock();
+            (l.own(), l.empty_panes())
+        };
+        for i in panes.into_iter().take(empty) {
+            if shells_lock().len() >= shells::MAX_SHELLS {
+                break;
+            }
+            if own {
+                layout_lock().set_focus(i); // a new shell joins the focused pane's own list
+            }
+            new_shell(None);
+            started += 1;
+        }
+        log(&format!("layout: started {started} shell(s) for empty panes"));
+        if started > 0 && active != 0 {
+            switch_to(active);
+            return;
+        }
+    }
+    pane_focus_changed();
+}
+
+/// The layout hotkey: single -> side by side -> stacked -> 2 x 2 -> single.
+fn layout_cycle() {
+    let (order, active) = {
+        let sh = shells_lock();
+        (sh.ids(), sh.active())
+    };
+    let (p, empty) = {
+        let mut l = layout_lock();
+        let e = l.cycle(&order, active);
+        (l.preset(), e)
+    };
+    log(&format!("layout -> {} ({} panes, {} empty)", p.name(), p.panes(), empty));
+    after_layout_change(empty, active);
+}
+
+/// Apply the configured start layout once the page is up (it needs the first shell's view).
+pub fn layout_page_ready() {
+    static DONE: AtomicBool = AtomicBool::new(false);
+    if DONE.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    let p = layout::Preset::parse(&cfg().layout).unwrap_or(layout::Preset::Single);
+    if p == layout::Preset::Single {
+        return;
+    }
+    let (order, active) = {
+        let sh = shells_lock();
+        (sh.ids(), sh.active())
+    };
+    let empty = layout_lock().set_preset(p, &order, active);
+    log(&format!("layout at start: {} ({} empty)", p.name(), empty));
+    after_layout_change(empty, active);
+}
+
+fn pane_step(delta: i32) {
+    layout_lock().focus_step(delta);
+    pane_focus_changed();
+}
+
+/// A click on a pane (the page sends its index; used for empty panes, which have no shell to switch to).
+pub fn on_pane_focus(i: usize) {
+    if layout_lock().set_focus(i) {
+        pane_focus_changed();
+    }
+}
+
+fn pane_zoom() {
+    let (n, on) = {
+        let mut l = layout_lock();
+        (l.slots().len(), l.toggle_zoom())
+    };
+    if n <= 1 {
+        log("zoom: there is only one pane");
+    } else {
+        log(&format!("zoom {}", if on { "on" } else { "off" }));
+    }
+    push_layout();
+}
+
+/// The page measured the terminal area in cells; a window too small for the layout shows fewer panes.
+pub fn on_area(cols: u32, rows: u32) {
+    let changed = layout_lock().set_area(cols, rows);
+    if changed {
+        log(&format!("layout: area {cols}x{rows} cells, showing {}", layout_lock().shown().name()));
+        push_layout();
+    }
+}
+
+/// The program label of each shell (session id, name), as last sent to the page.
+static PROGS_SENT: Mutex<Vec<(u32, String)>> = Mutex::new(Vec::new());
+
+/// Every couple of seconds: look at what runs below each shell and tell the page when a label changed.
+fn poll_programs() {
+    let mode = cfg().tab_program;
+    let pids = pty::shell_pids();
+    let mut now: Vec<(u32, String)> = Vec::new();
+    if mode != "off" && !pids.is_empty() {
+        let all = progs::snapshot();
+        for (id, pid) in pids {
+            let name = progs::label_for(&all, pid, &mode);
+            if !name.is_empty() {
+                now.push((id, name));
+            }
+        }
+    }
+    now.sort();
+    let mut last = PROGS_SENT.lock().unwrap_or_else(|p| p.into_inner());
+    if *last != now {
+        let list: Vec<serde_json::Value> = now.iter().map(|(s, p)| serde_json::json!({ "s": s, "p": p })).collect();
+        // Not logged: what a shell runs says what the user is doing.
+        wv::post(&serde_json::json!({ "t": "prog", "list": list }).to_string());
+        *last = now;
+    }
+}
+
+/// A divider was dragged (pane_dividers = true).
+pub fn on_split(cols_pct: u32, rows_pct: u32) {
+    let (c, r) = {
+        let mut l = layout_lock();
+        l.set_split(cols_pct, rows_pct);
+        l.split()
+    };
+    log(&format!("split -> {c},{r}"));
+    if cfg().remember_layout {
+        cfg_update(|cf| cf.split = [c, r]);
+    }
+    push_layout();
 }
 
 /// Show shell `id` (the page swaps its view) and make it the one keystrokes and harness writes go to.
 pub fn switch_to(id: u32) {
     let ok = shells_lock().activate(id);
     if ok {
+        layout_lock().show(id);
         pty::set_active(id);
         wv::post(&serde_json::json!({ "t": "show", "s": id }).to_string());
         push_tabs();
@@ -913,8 +1105,15 @@ pub fn switch_to(id: u32) {
 }
 
 fn shell_step(delta: i32) {
-    let id = shells_lock().step(delta);
+    // pane_shells = "own": step through the focused pane's own shells; otherwise through the whole tab list.
+    let own = layout_lock().own();
+    let id = if own { layout_lock().group_step(delta) } else { shells_lock().step(delta) };
     if let Some(id) = id {
+        if own {
+            shells_lock().activate(id);
+        } else {
+            layout_lock().show(id);
+        }
         pty::set_active(id);
         wv::post(&serde_json::json!({ "t": "show", "s": id }).to_string());
         push_tabs();
@@ -923,9 +1122,15 @@ fn shell_step(delta: i32) {
 }
 
 fn shell_jump(n: usize) {
-    let id = shells_lock().jump(n);
+    let own = layout_lock().own();
+    let id = if own { layout_lock().group_jump(n) } else { shells_lock().jump(n) };
     match id {
         Some(id) => {
+            if own {
+                shells_lock().activate(id);
+            } else {
+                layout_lock().show(id);
+            }
             pty::set_active(id);
             wv::post(&serde_json::json!({ "t": "show", "s": id }).to_string());
             push_tabs();
@@ -952,7 +1157,11 @@ pub fn new_shell(profile: Option<&str>) {
     }
     log(&format!("new shell {id} from profile '{}'", p.name));
     shells_lock().activate(id);
+    layout_lock().place_new(id);
     pty::set_active(id);
+    // The layout goes first, so the new view is created in a pane that is already on screen and starts
+    // its shell at that pane's size.
+    push_layout();
     wv::post(&serde_json::json!({ "t": "open", "s": id }).to_string());
     push_tabs();
 }
@@ -991,6 +1200,32 @@ fn close_shell(id: u32) {
     if let Ok(mut l) = SPAWN_PROFILES.lock() {
         l.retain(|(i, _)| *i != id);
     }
+    // Its pane shows a shell that was not on screen, if there is one; otherwise the focus goes to the
+    // neighbour the tab list picked (and the pane stays empty when every shell is already showing).
+    let order = shells_lock().ids();
+    let refill = {
+        let mut l = layout_lock();
+        l.remove(id, &order, next.unwrap_or(0));
+        l.focused_id()
+    };
+    let next = if refill != 0 {
+        shells_lock().activate(refill);
+        Some(refill)
+    } else if layout_lock().own() {
+        // The pane's own list is empty: it stays empty and the keyboard goes to a pane that still has a shell.
+        let n = layout_lock().focus_nonempty();
+        if n != 0 {
+            shells_lock().activate(n);
+            Some(n)
+        } else {
+            next
+        }
+    } else {
+        if let Some(n) = next {
+            layout_lock().show(n);
+        }
+        next
+    };
     log(&format!("shell {id} closed"));
     wv::post(&serde_json::json!({ "t": "close", "s": id }).to_string());
     if let Some(n) = next {
@@ -1139,6 +1374,9 @@ unsafe fn tray_menu(hwnd: HWND) {
         let _ = AppendMenuW(menu, MF_STRING | ghost_chk, 7, w!("Ghost (click-through + dim)"));
         let _ = AppendMenuW(menu, MF_STRING, 9, w!("New shell"));
         let _ = AppendMenuW(menu, MF_STRING, 10, w!("Next shell"));
+        let _ = AppendMenuW(menu, MF_STRING, 11, w!("Next layout (split panes)"));
+        let zoom_chk = if layout_lock().zoomed() { MF_CHECKED } else { MF_UNCHECKED };
+        let _ = AppendMenuW(menu, MF_STRING | zoom_chk, 12, w!("Zoom pane"));
         let _ = AppendMenuW(menu, MF_STRING, 6, w!("Settings (opacity, colours)..."));
         let _ = AppendMenuW(menu, MF_STRING | auto_chk, 8, w!("Start with Windows"));
         let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
@@ -1179,6 +1417,8 @@ unsafe fn tray_menu(hwnd: HWND) {
             7 => toggle_ghost(hwnd),
             9 => new_shell(None),
             10 => shell_step(1),
+            11 => layout_cycle(),
+            12 => pane_zoom(),
             8 => {
                 let on = !autostart_enabled();
                 if !set_autostart(on) {
@@ -1224,6 +1464,9 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                     HK_SIZE => cycle_size(hwnd),
                     HK_FONT_UP => change_font(1),
                     HK_FONT_DOWN => change_font(-1),
+                    HK_LAYOUT => layout_cycle(),
+                    HK_PANE_ZOOM => pane_zoom(),
+                    HK_PANE_NEXT => pane_step(1),
                     HK_SHELL_NEXT => shell_step(1),
                     HK_SHELL_PREV => shell_step(-1),
                     HK_SHELL_NEW => new_shell(None),
@@ -1345,6 +1588,8 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             WM_TIMER => {
                 if wparam.0 == 4 {
                     idle_tick(hwnd);
+                } else if wparam.0 == 5 {
+                    poll_programs();
                 } else if wparam.0 == 3 {
                     let _ = KillTimer(Some(hwnd), 3);
                     wv::log_children(hwnd);
@@ -1534,6 +1779,9 @@ fn main() -> windows::core::Result<()> {
             (HK_SHELL_LIST, &hk.shell_list, "shell list"),
             (HK_SHELL_PICKER, &hk.shell_picker, "shell picker"),
             (HK_SHELL_ATTN, &hk.shell_attention, "next shell needing attention"),
+            (HK_LAYOUT, &hk.layout_cycle, "next layout"),
+            (HK_PANE_ZOOM, &hk.pane_zoom, "zoom pane"),
+            (HK_PANE_NEXT, &hk.pane_next, "next pane"),
         ] {
             match config::parse_hotkey(spec) {
                 Some((mods, vk)) => match RegisterHotKey(Some(hwnd), id, HOT_KEY_MODIFIERS(mods), vk) {
@@ -1566,6 +1814,11 @@ fn main() -> windows::core::Result<()> {
         {
             let c0 = cfg();
             shells_lock().adopt(1, &config::default_profile(&c0).name);
+            let mut l = layout_lock();
+            l.set_own(c0.pane_shells == "own");
+            l.start(1);
+            l.set_min(c0.pane_min[0], c0.pane_min[1]);
+            l.set_split(c0.split[0], c0.split[1]);
             if let Ok(mut l) = SPAWN_PROFILES.lock() {
                 l.push((1, config::default_profile(&c0).clone()));
             }
@@ -1625,6 +1878,9 @@ fn main() -> windows::core::Result<()> {
                 Ok(()) => {
                     log("WebView2 ready");
                     let _ = SetTimer(Some(hwnd), 3, 1500, None);
+                    if loaded.tab_program != "off" {
+                        let _ = SetTimer(Some(hwnd), 5, 2000, None);
+                    }
                     #[cfg(feature = "harness")]
                     harness::arm(hwnd);
                 }

@@ -6,6 +6,7 @@ Everything here is either untested or not implemented. Verified behaviour is in 
 
 | Item | What it takes |
 |---|---|
+| Dragging a pane divider with a real mouse (the `layout` suite drags with events inside the page); pane frames and names drawn over the edge cells of a pane; the small-window fallback on a monitor that is not at 100% | by hand |
 | Mixed-DPI behaviour (all test displays were 100%) | a second display at 125-200% |
 | Other games; exclusive-fullscreen games (overlays cannot draw over them); anti-cheat titles | try each under normal use; stop at any warning |
 | Frame-time / FPS impact next to a running game | capture frame times with and without HUDshell |
@@ -31,7 +32,10 @@ Everything here is either untested or not implemented. Verified behaviour is in 
 - Full settings UI (the panel covers opacity and colour theme; font, hotkeys and shell are edited in `config.json`).
 - Live config reload (config is read at start); `WM_DPICHANGED` handling; WebView2 crash recovery.
 - A friendly error when the shell cannot start (it is logged only).
-- Split panes / layout presets and zoom, several windows (detach, snap to each other, move as a group), and session restore (reopening the same shells and layout at launch). Planned next; one window holds up to 9 shells as tabs only.
+- Several windows (detach, snap to each other, move as a group) and session restore (reopening the same shells, folders and panes at launch). Planned next.
+- Per-pane shell lists (`pane_shells = "own"`) have no per-pane close confirmation text, no drag of a shell from one pane to another, and the list hotkey shows only the focused pane's shells.
+- Program labels (`tab_program`) look at process names only: a tool started through `node` (for example an npm-installed Claude Code) shows as `node` in `all` mode and not at all in `known` mode; any program that happens to be called `claude` or `codex` gets the label. Detection of the real Claude Code (native `claude.exe`) and Codex (the native `codex.exe` its npm launcher starts) has **not** been tested: the tests use a renamed copy of cmd.exe as a stand-in. The label can lag by up to 2 s and a very short program may never be seen.
+- Free-form splitting: a window has at most four panes in the fixed presets (single, side by side, stacked, 2 x 2). `remember_layout` saves the preset and split only, not which shell is in which pane.
 - Tab drag-to-reorder, rename by hand, and a tab for a shell started outside HUDshell.
 - Win+Arrow (native Windows snapping) is not supported or tested; HUDshell snaps itself.
 - Opening OSC 8 links: deliberately **not** done (clicks are ignored); copy the link text instead. OSC 52 is refused unless `osc52` is `write`.

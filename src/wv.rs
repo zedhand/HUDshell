@@ -350,7 +350,23 @@ fn handle_term_message(hwnd: isize, m: &str) {
             crate::picker_closed(hwnd);
         }
         Some("pickerclose") => crate::picker_closed(hwnd),
-        Some("tabsneeded") => crate::push_tabs(),
+        Some("tabsneeded") => {
+            crate::layout_page_ready();
+            crate::push_tabs();
+        }
+        Some("area") => {
+            let cols = v["cols"].as_u64().unwrap_or(0);
+            let rows = v["rows"].as_u64().unwrap_or(0);
+            if (1..=2000).contains(&cols) && (1..=1000).contains(&rows) {
+                crate::on_area(cols as u32, rows as u32);
+            }
+        }
+        Some("split") => {
+            let c = v["c"].as_u64().unwrap_or(50).min(100) as u32;
+            let r = v["r"].as_u64().unwrap_or(50).min(100) as u32;
+            crate::on_split(c, r);
+        }
+        Some("panefocus") => crate::on_pane_focus(v["i"].as_u64().unwrap_or(99) as usize),
         Some("in") => {
             if let Some(d) = v["d"].as_str() {
                 if d.len() <= 2_000_000 {
