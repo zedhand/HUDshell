@@ -603,6 +603,12 @@
                ui: { strip: document.body.classList.contains('tabs-on'), active: activeId,
                      labels: tabs.list.map((e, i) => (i + 1) + ' ' + labelOf(e) + markOf(e)),
                      progs: tabs.list.map((e) => (views.get(e.id) || {}).prog || '').join(','),
+                     rects: (() => {
+                       const rc = (el) => { const b = el.getBoundingClientRect(); return [Math.round(b.left), Math.round(b.top), Math.round(b.width), Math.round(b.height)]; };
+                       return { dpr: window.devicePixelRatio, term: rc(termHost),
+                                tabs: [...tabsEl.querySelectorAll('.tab')].map((t) => ({ id: Number(t.dataset.id), r: rc(t) })),
+                                dividers: [...termHost.querySelectorAll('.divider')].map((d) => ({ axis: d.classList.contains('v') ? 'v' : 'h', r: rc(d) })) };
+                     })(),
                      overlay: shellsEl.classList.contains('open') ? shellsEl.textContent : '', picker: pickerOpen(),
                      layout: { own: L.own, gt: L.groups.map((g) => g.join(',')).join('|'), st: L.strip.join(','),
                                te: tabsEl.querySelectorAll('.tab').length, preset: L.preset, shown: L.shown, shape: L.shape, cells: L.cells.map((c) => c.id), focus: L.focus,
@@ -682,7 +688,18 @@
   }, true);
   // A click on the terminal asks the host for keyboard focus ("click to type"); the host only
   // acts on it when the window is interactive and not already focused.
-  window.addEventListener('mousedown', () => send({ t: 'click' }), true);
+  // The web view covers the whole window, so a press on the top strip or on an edge never reaches the host's own
+  // hit-test (which says "caption" / "border" there). The page says so instead, and the host starts Windows' own
+  // move / resize loop (so edge snapping and the size limits apply). Neither takes the keyboard.
+  window.addEventListener('mousedown', (e) => {
+    const t = e.target && e.target.closest ? e.target.closest('#drag, .edge') : null;
+    if (t && e.button === 0) {
+      send({ t: 'nc', hit: t.id === 'drag' ? 'caption' : t.dataset.hit });
+      e.preventDefault();
+      return;
+    }
+    send({ t: 'click' });
+  }, true);
 
   window.addEventListener('focus', () => { const a = active(); if (a) a.term.focus(); });
 

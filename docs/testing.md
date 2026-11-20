@@ -12,8 +12,8 @@ scripts\test-all.ps1 -Suite real -Sandbox C:\path\to\trusted\folder
 
 The runner prints PASS / FAIL / WARN per check and exits with the number of failures.
 
-**Before you run it:** the `ui`, `clickfocus`, `autotest`, `clipboard` and `hideshow` suites send real hotkeys
-(Ctrl+Alt+letter) and some move and click the real mouse or paste with the real keyboard, so do not use the
+**Before you run it:** the `ui`, `clickfocus`, `autotest`, `clipboard`, `hideshow`, `input` and `cost` suites send real hotkeys
+(Ctrl+Alt+letter) and some move and click the real mouse (`input` also drags and resizes the window) or paste with the real keyboard, so do not use the
 keyboard or mouse while they run (the cursor, clipboard text and your settings file are restored afterwards).
 `config` and `release` run the normal build against `%APPDATA%\HUDshell\config.json` (and send the real Ctrl+Alt+X / Ctrl+Alt+Q hotkeys): an
 existing file is backed up and restored byte-for-byte, and files the tests created beside it are removed. `policy` temporarily replaces the
@@ -29,13 +29,15 @@ clipboard text and restores it. `scrollback`, `ghost` and `attention` send no OS
 | `hideshow` | output produced while the window is hidden is all there after showing it |
 | `clickfocus` | click-through vs interactive hit tests, a real click takes focus, grab/release cycles |
 | `clipboard` | real Ctrl+V paste and Ctrl+Shift+C copy; no DevTools window opens |
-| `autotest` | typing, history, paste, Ctrl+C, Claude Code and Codex start and exit, focus grab cycles, click-through, no focus stolen while passive |
+| `autotest` | typing, history, paste, Ctrl+C, Claude Code and Codex start and exit (with their real tab label while running), focus grab cycles, click-through, no focus stolen while passive |
 | `ui` | opacity hotkeys and the 20% floor, the real ghost hotkey, corner / font / new-shell / switch / close / layout / pane / zoom hotkeys, settings panel keys and real mouse (click, drag, arrows, close, Esc) |
 | `place` | corner docking, size presets, font hotkeys (and that the page applied the font) and magnetic snapping, through the host functions (no OS input) |
 | `qol` | idle dim, active opacity, start options and the Start with Windows registry entry (test-only value name, removed afterwards) |
 | `sessions` | several shells in one window: isolation, which one the host writes to, restart after exit, close (no OS input) |
 | `shells` | tabs, profiles, switching, marks, titles, closing, picker, tab modes, the nine-shell limit (no OS input) |
 | `shells` (labels part) | the tab shows a 35-character title whole; `tab_program` = known / all / off with a renamed copy of cmd.exe called `codex.exe` that only pings localhost (never a real Claude Code or Codex): the label appears, goes away when it ends, ordinary programs are labelled only in `all` mode (no OS input) |
+| `input` | the real profile-picker hotkey and key, real mouse clicks on tabs, a real divider drag, real window drags (far from edges the window moves exactly; near the left or top edge it snaps to the margin), a real edge resize, and that none of it takes the keyboard |
+| `cost` | memory (whole process tree and the HUDshell process) and idle CPU with 1, 3 and 9 shells; the limits it checks are sanity bounds I chose, not requirements |
 | `layout` | split panes: each preset, new shells for empty panes, pane sizes, which pane gets typing, zoom, small-window fallback, closing and refilling a pane, `layout_fill = empty`, start layout, uneven split, dragging a divider with page mouse events, and `pane_shells = own` (new shells join the focused pane, strip / keys / close stay inside it, empty pane, merging into one pane) (no OS input) |
 | `scrollback` | keyboard scrollback keys, checked from the viewport position after 200 lines (no OS input) |
 | `ghost` | the ghost preset through the host functions: levels, restore, never brightens, pointer mode, leaving ghost (no OS input) |

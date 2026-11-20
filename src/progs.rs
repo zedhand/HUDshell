@@ -16,6 +16,12 @@ pub struct Proc {
     pub name: String,
 }
 
+/// `name` is the known program `k`, or `k` followed by `-`, `_` or `.` (a launcher's platform build such as
+/// `codex-x86_64-pc-windows-msvc`).
+fn is_known(name: &str, k: &str) -> bool {
+    name == k || name.strip_prefix(k).is_some_and(|r| r.starts_with(['-', '_', '.']))
+}
+
 /// "C:\x\Claude.EXE" or "Claude.exe" -> "claude".
 pub fn normalize(exe: &str) -> String {
     let base = exe.rsplit(['\\', '/']).next().unwrap_or(exe).to_ascii_lowercase();
@@ -49,7 +55,7 @@ pub fn label_for(all: &[Proc], root: u32, mode: &str) -> String {
         return String::new();
     }
     let d = descendants(all, root);
-    if let Some(k) = KNOWN.iter().find(|k| d.iter().any(|p| p.name == **k)) {
+    if let Some(k) = KNOWN.iter().find(|k| d.iter().any(|p| is_known(&p.name, k))) {
         return k.to_string();
     }
     if mode == "all" {
@@ -145,6 +151,14 @@ mod tests {
         u.push(p(70, 50, "conhost.exe"));
         u.push(p(71, 50, "pwsh.exe"));
         assert_eq!(label_for(&u, 50, "all"), "", "helpers and nested shells are ignored");
+    }
+
+    #[test]
+    fn a_platform_suffix_still_counts_but_a_longer_word_does_not() {
+        let t = vec![p(10, 0, "pwsh.exe"), p(11, 10, "codex-x86_64-pc-windows-msvc.exe"), p(20, 0, "pwsh.exe"), p(21, 20, "claudette.exe")];
+        assert_eq!(label_for(&t, 10, "known"), "codex");
+        assert_eq!(label_for(&t, 20, "known"), "", "claudette is not claude");
+        assert!(is_known("claude", "claude") && is_known("claude_code", "claude") && !is_known("claudex", "claude"));
     }
 
     #[test]

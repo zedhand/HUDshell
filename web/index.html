@@ -9,7 +9,17 @@
   html, body { margin: 0; height: 100%; background: var(--bg); overflow: hidden; }
   /* Slim drag strip: same colour as the terminal, with a faint grip. The host treats this band
      (see DRAG_STRIP_PX) as the window's title area, so it drags like a title bar. */
-  #drag { height: 22px; color: var(--fg); user-select: none; }
+  #drag { height: 22px; color: var(--fg); user-select: none; cursor: move; }
+  /* Invisible resize handles along the edges and corners (see the mousedown handler in app.js). */
+  .edge { position: fixed; z-index: 30; }
+  #e-l { left: 0; top: 10px; bottom: 10px; width: 6px; cursor: ew-resize; }
+  #e-r { right: 0; top: 10px; bottom: 10px; width: 6px; cursor: ew-resize; }
+  #e-t { top: 0; left: 10px; right: 10px; height: 6px; cursor: ns-resize; }
+  #e-b { bottom: 0; left: 10px; right: 10px; height: 6px; cursor: ns-resize; }
+  #e-tl { top: 0; left: 0; width: 10px; height: 10px; cursor: nwse-resize; }
+  #e-br { bottom: 0; right: 0; width: 10px; height: 10px; cursor: nwse-resize; }
+  #e-tr { top: 0; right: 0; width: 10px; height: 10px; cursor: nesw-resize; }
+  #e-bl { bottom: 0; left: 0; width: 10px; height: 10px; cursor: nesw-resize; }
   #drag::after { content: ''; display: block; width: 38px; height: 3px; border-radius: 2px;
                  background: currentColor; opacity: 0.22; margin: 9px auto 0; }
   #term { position: absolute; top: 22px; left: 6px; right: 0; bottom: 4px; }
@@ -59,6 +69,10 @@
 </head>
 <body>
 <div id="drag"></div>
+<div class="edge" id="e-l" data-hit="left"></div><div class="edge" id="e-r" data-hit="right"></div>
+<div class="edge" id="e-t" data-hit="top"></div><div class="edge" id="e-b" data-hit="bottom"></div>
+<div class="edge" id="e-tl" data-hit="topleft"></div><div class="edge" id="e-tr" data-hit="topright"></div>
+<div class="edge" id="e-bl" data-hit="bottomleft"></div><div class="edge" id="e-br" data-hit="bottomright"></div>
 <div id="tabs"></div>
 <div id="term"></div>
 <div id="shells"></div>

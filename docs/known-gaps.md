@@ -6,7 +6,7 @@ Everything here is either untested or not implemented. Verified behaviour is in 
 
 | Item | What it takes |
 |---|---|
-| Dragging a pane divider with a real mouse (the `layout` suite drags with events inside the page); pane frames and names drawn over the edge cells of a pane; the small-window fallback on a monitor that is not at 100% | by hand |
+| Pane frames and names drawn over the edge cells of a pane; the small-window fallback on a monitor that is not at 100% | by hand |
 | Mixed-DPI behaviour (all test displays were 100%) | a second display at 125-200% |
 | Other games; exclusive-fullscreen games (overlays cannot draw over them); anti-cheat titles | try each under normal use; stop at any warning |
 | Frame-time / FPS impact next to a running game | capture frame times with and without HUDshell |
@@ -21,10 +21,9 @@ Everything here is either untested or not implemented. Verified behaviour is in 
 | Long, busy sessions at low opacity over a game (readability) | judgement over real use |
 | Whether Claude Code or Codex ring the terminal bell (the census does not count BEL; they sent no OSC 9 / OSC 777 in the real run) | count BEL in the census, or configure the CLIs' own notification setting (not done: it would edit their configuration) |
 | The permission prompt about pasting clipboard text seen once during a policy run | its source was not identified; no WebView2 permission request was logged and a search found no documented Windows prompt of that kind. If it recurs, note the exact wording and the step |
-| Corner docking, size presets and edge snapping on a second monitor with different scaling, and with the taskbar on another edge (tested on one monitor at 100% through simulated move messages, not a real mouse drag) | a second display at 125-200% |
-| Tabs: a real mouse click on a tab (the test clicks by dispatching the event in the page), tab strip while click-through is on (clicks pass through by design), the real picker hotkey (it takes the keyboard) | by hand |
+| Corner docking, size presets, edge snapping and mouse resizing on a second monitor with different scaling, and with the taskbar on another edge (tested on one monitor at 100%, with real mouse drags for snapping and resizing) | a second display at 125-200% |
+| Tab strip while click-through is on (clicks pass through by design) | by hand |
 | A profile's start command timing (typed 0.9 s after the shell starts; a slow profile script could miss it) | try a heavy profile |
-| Memory and CPU cost of several shells (each is a ConPTY + PowerShell; the WebView is shared) | measure with 1, 3 and 9 shells |
 | Clicking an OSC 8 link, the ghost tray menu item, the tray notification for attention requests, keyboard scrollback inside the CLIs | by hand |
 
 ## Not implemented

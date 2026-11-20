@@ -31,6 +31,12 @@ Key decisions and why:
 - The window is `WS_EX_TOPMOST | TOOLWINDOW | NOACTIVATE | LAYERED`. While passive it never takes the keyboard
   (`MA_NOACTIVATE`), so a game keeps focus.
 - **Click-through** adds `WS_EX_TRANSPARENT`: mouse input falls through. It is a user setting (default on).
+- **Moving and resizing.** The web view covers the whole window, so a real mouse press on the top strip or an edge lands on the web view and
+  never reaches the host's own hit-test (`WM_NCHITTEST` still answers "caption" / "border" there, for hit-test queries). The page therefore
+  has an invisible handle on each edge and corner and treats the top strip as a handle: a press on one sends `nc` with its kind, and the host
+  posts `WM_NCLBUTTONDOWN` with the matching hit-test code, which starts Windows' own move / resize loop (so edge snapping in `WM_MOVING`
+  and the size limits apply). These presses are not "clicks on the terminal", so they never take the keyboard. Before 2026-11-20 this did not
+  work: the window could only be moved with the corner hotkeys.
 - **Grab focus** (hotkey, tray, or clicking the terminal while interactive) clears `NOACTIVATE`, calls
   `SetForegroundWindow` (allowed because a registered hotkey or real input is in progress) and makes the window
   clickable while focused. **Release** restores the previous foreground window and click-through.

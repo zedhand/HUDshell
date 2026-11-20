@@ -1,7 +1,7 @@
 <#
 HUDshell full test runner (Windows PowerShell 5.1 or PowerShell 7).
 
-  scripts\test-all.ps1 [-Suite static,keys,width,hideshow,clickfocus,clipboard,autotest,ui,scrollback,ghost,attention,policy,place,qol,sessions,shells,layout,release,config,soak,real | all]
+  scripts\test-all.ps1 [-Suite static,keys,width,hideshow,clickfocus,clipboard,autotest,ui,scrollback,ghost,attention,policy,place,qol,sessions,shells,layout,input,cost,release,config,soak,real | all]
                        [-Sandbox <folder both Claude Code and Codex already trust>] [-SoakSeconds 300]
 
 What it touches (read before running):
@@ -33,7 +33,7 @@ New-Item -ItemType Directory -Force $scratch | Out-Null
 $env:HUDSHELL_TEST_DIR = $scratch
 if ($Sandbox) { $env:HUDSHELL_SANDBOX = $Sandbox } else { $env:HUDSHELL_SANDBOX = $scratch }
 $Suite = @($Suite | ForEach-Object { $_ -split ',' } | Where-Object { $_ })
-$want = if ($Suite -contains 'all') { @('static', 'keys', 'width', 'hideshow', 'clickfocus', 'clipboard', 'autotest', 'ui', 'scrollback', 'ghost', 'attention', 'policy', 'place', 'qol', 'sessions', 'shells', 'layout', 'release', 'config', 'soak') + $(if ($Sandbox) { 'real' } else { @() }) } else { $Suite }
+$want = if ($Suite -contains 'all') { @('static', 'keys', 'width', 'hideshow', 'clickfocus', 'clipboard', 'autotest', 'ui', 'scrollback', 'ghost', 'attention', 'policy', 'place', 'qol', 'sessions', 'shells', 'layout', 'input', 'cost', 'release', 'config', 'soak') + $(if ($Sandbox) { 'real' } else { @() }) } else { $Suite }
 
 $script:R = New-Object System.Collections.Generic.List[object]
 function Check([string]$suite, [string]$name, [bool]$ok, [string]$detail = '') {
@@ -75,6 +75,8 @@ public static class GT {
   public static IntPtr Find(uint pid) { IntPtr found = IntPtr.Zero; EnumWindows((h,l)=>{ uint p; GetWindowThreadProcessId(h,out p); if(p==pid){ var sb=new StringBuilder(64); GetClassName(h,sb,64); if(sb.ToString().ToLower().Contains("hudshell")){found=h; return false;} } return true; }, IntPtr.Zero); return found; }
   public static int Alpha(IntPtr h) { uint k; byte a; uint f; GetLayeredWindowAttributes(h,out k,out a,out f); return a; }
   public static bool IsFg(IntPtr h) { return GetForegroundWindow() == h; }
+  public static void HotkeyShift(byte vk) { keybd_event(0x11,0,0,UIntPtr.Zero); keybd_event(0x12,0,0,UIntPtr.Zero); keybd_event(0x10,0,0,UIntPtr.Zero); keybd_event(vk,0,0,UIntPtr.Zero); keybd_event(vk,0,2,UIntPtr.Zero); keybd_event(0x10,0,2,UIntPtr.Zero); keybd_event(0x12,0,2,UIntPtr.Zero); keybd_event(0x11,0,2,UIntPtr.Zero); }
+  public static void Move(int x, int y) { SetCursorPos(x, y); mouse_event(0x1,0,0,0,UIntPtr.Zero); }
 }
 '@
 
@@ -228,6 +230,9 @@ function Suite-Autotest {
     if ($start.Trim().Length -lt 20) { Warn 'autotest' "$prog start screen empty (not installed?)"; continue }
     Check 'autotest' "$prog started and drew its screen" ($start -match $prog)
     Check 'autotest' "$prog exited back to the PowerShell prompt" (Dump-Has $run "$prog-exited" 'PS ') ''
+    $uS = Get-Ui $run "$prog-start"; $uE = Get-Ui $run "$prog-exited2"
+    Check 'autotest' "$prog (the real program): its tab is labelled '$prog' while it runs" ($uS -and $uS.progs -ceq $prog) ("progs=[" + $uS.progs + "] label=" + $uS.labels[0])
+    Check 'autotest' "$prog (the real program): the label is gone once it has exited" ($uE -and $uE.progs -ceq '') ("progs=[" + $uE.progs + "]")
     if ($skipped) { Warn 'autotest' "${prog}: a step was skipped (dialog or protocol guard)" }
   }
   foreach ($n in 1, 2, 3) { Check 'autotest' "grab cycle $n typed text" (Dump-Has $run 'after-grab-cycles' "GRAB-$n") }
@@ -837,6 +842,157 @@ function Suite-Layout {
   Check 'layout' 'dragging the divider to 70% resizes the panes and tells the host' ($u -and (($u.layout.split) -join ',') -eq '70,50' -and (Cols $u.layout.sizes[0]) -gt $a0 -and @($run | Where-Object { $_ -match 'split -> 70,50' }).Count -eq 1) (($u.layout.sizes) -join ' ')
 }
 
+# The latest page dump's `ui` object / window state in a slice of the log (the `--inputtest` scenario writes both every second).
+function Last-Ui([string[]]$lines) {
+  for ($k = $lines.Count - 1; $k -ge 0; $k--) {
+    if ($lines[$k] -match 'terminal dump:.* ui=(\{.*\})\s*$') { try { return ($Matches[1] | ConvertFrom-Json) } catch { return $null } }
+  }
+  return $null
+}
+function Last-State([string[]]$lines) {
+  for ($k = $lines.Count - 1; $k -ge 0; $k--) {
+    if ($lines[$k] -match 'STATE label=m rect=(-?\d+),(-?\d+),(-?\d+),(-?\d+) work=(-?\d+),(-?\d+),(-?\d+),(-?\d+)') {
+      return @{ L = [int]$Matches[1]; T = [int]$Matches[2]; R = [int]$Matches[3]; B = [int]$Matches[4]; WL = [int]$Matches[5]; WT = [int]$Matches[6]; WR = [int]$Matches[7]; WB = [int]$Matches[8] }
+    }
+  }
+  return $null
+}
+
+function Suite-Input {
+  Write-Host "=== input: real picker hotkey, real mouse (tab click, divider drag, window drag, edge snap) - do not touch mouse/keyboard ==="
+  Stop-HUDshell
+  GTSave
+  $p = $null
+  try {
+    $n = LineCount $log
+    $p = Start-Process $dbg -ArgumentList @('--term', '--inputtest', '--interactive', '--layout', 'side-by-side', '--dividers', '--tabs', 'always', '--delay', '2') -PassThru
+    $ready = $null
+    for ($i = 0; $i -lt 60 -and -not $ready; $i++) {
+      Start-Sleep 1
+      if ($p.HasExited) { break }
+      $u = Last-Ui @(Cut $log $n)
+      if ($u -and $u.rects -and @($u.layout.cells).Count -eq 2 -and $u.layout.dividers -eq 1 -and @($u.rects.tabs).Count -eq 2) { $ready = $u }
+    }
+    $h = [GT]::Find([uint32]$p.Id)
+    Check 'input' 'window found with two panes, one divider and two tabs' ($null -ne $ready -and $h -ne [IntPtr]::Zero)
+    if (-not $ready) { return }
+    function Now-Ui { Last-Ui @(Cut $log $n) }
+    function Now-State { Last-State @(Cut $log $n) }
+    function Pt($st, $dpr, $r) { return @([int]($st.L + ($r[0] + $r[2] / 2) * $dpr), [int]($st.T + ($r[1] + $r[3] / 2) * $dpr)) }
+    function Click-At($pt) { [GT]::Move($pt[0], $pt[1]); Start-Sleep -Milliseconds 300; [GT]::MouseDown(); Start-Sleep -Milliseconds 120; [GT]::MouseUp(); Start-Sleep -Milliseconds 2200 }
+    function Drag-To($x0, $y0, $x1, $y1) {
+      [GT]::Move($x0, $y0); Start-Sleep -Milliseconds 300; [GT]::MouseDown(); Start-Sleep -Milliseconds 250
+      for ($i = 1; $i -le 10; $i++) { [GT]::Move([int]($x0 + ($x1 - $x0) * $i / 10), [int]($y0 + ($y1 - $y0) * $i / 10)); Start-Sleep -Milliseconds 80 }
+      Start-Sleep -Milliseconds 250; [GT]::MouseUp(); Start-Sleep -Milliseconds 2500
+    }
+    # 1. the real profile-picker hotkey (it takes the keyboard) and a real key press
+    $nn = LineCount $log
+    [GT]::HotkeyShift(0x4E); Start-Sleep -Milliseconds 2000
+    $u = Now-Ui
+    Check 'input' 'Ctrl+Alt+Shift+N opens the picker and takes the keyboard' ($u -and $u.picker -and [GT]::IsFg($h))
+    [GT]::Key(0x31); Start-Sleep -Milliseconds 5000
+    $u = Now-Ui
+    Check 'input' 'the real key 1 starts that profile as a new shell, and the keyboard is given back' ((@(Cut $log $nn | Where-Object { $_ -match 'new shell 3 from profile' }).Count -eq 1) -and @($u.labels).Count -eq 3 -and -not $u.picker -and -not [GT]::IsFg($h)) ("shells " + @($u.labels).Count)
+    [GT]::HotkeyShift(0x4E); Start-Sleep -Milliseconds 1800
+    $open = (Now-Ui).picker
+    [GT]::Key(0x1B); Start-Sleep -Milliseconds 2200
+    $u = Now-Ui
+    Check 'input' 'Esc closes the picker without starting a shell, and the keyboard is given back' ($open -and -not $u.picker -and @($u.labels).Count -eq 3 -and -not [GT]::IsFg($h))
+    # 2. a real mouse click on a tab
+    $u = Now-Ui; $st = Now-State; $dpr = $u.rects.dpr
+    $t1 = @($u.rects.tabs | Where-Object { $_.id -eq 1 })[0]; $t2 = @($u.rects.tabs | Where-Object { $_.id -eq 2 })[0]
+    Click-At (Pt $st $dpr $t1.r)
+    $a = (Now-Ui).active
+    $u = Now-Ui; $st = Now-State
+    Click-At (Pt $st $dpr (@($u.rects.tabs | Where-Object { $_.id -eq 2 })[0]).r)
+    $b = (Now-Ui).active
+    Check 'input' 'a real click on tab 1, then on tab 2, switches to each' ($a -eq 1 -and $b -eq 2) "active $a then $b"
+    # 3. dragging a pane divider with the real mouse
+    $u = Now-Ui; $st = Now-State
+    $dv = @($u.rects.dividers | Where-Object { $_.axis -eq 'v' })[0]
+    $split0 = [int]$u.layout.split[0]
+    $c = Pt $st $dpr $dv.r
+    $termW = $u.rects.term[2] * $dpr
+    $nd = LineCount $log
+    Drag-To $c[0] $c[1] ($c[0] + [int]($termW * 0.15)) $c[1]
+    $split1 = [int](Now-Ui).layout.split[0]
+    Check 'input' 'dragging the divider with the real mouse moves it by about 15% and the host is told' (($split1 -ge $split0 + 11) -and ($split1 -le $split0 + 19) -and (@(Cut $log $nd | Where-Object { $_ -match 'split -> \d+,\d+' }).Count -ge 1)) "$split0 -> $split1"
+    # 4. dragging the window by its top strip: far from every edge it moves exactly; near an edge it snaps.
+    # The clicks above took the keyboard (clicking the terminal does, by design); give it back first, so the check at the
+    # end proves that dragging and resizing do not take it.
+    if ([GT]::IsFg($h)) { [GT]::Hotkey(0x47); Start-Sleep -Milliseconds 1500 }
+    Check 'input' 'before the drags the keyboard is released' (-not [GT]::IsFg($h))
+    $st = Now-State
+    $gx = $st.L + [int](300 * $dpr); $gy = $st.T + [int](10 * $dpr)
+    Drag-To $gx $gy ($gx + 40) ($gy + 30)
+    $s2 = Now-State
+    Check 'input' 'a real window drag far from every edge moves it by exactly the drag distance (no snapping)' ([Math]::Abs(($s2.L - $st.L) - 40) -le 3 -and [Math]::Abs(($s2.T - $st.T) - 30) -le 3) ("moved " + ($s2.L - $st.L) + "," + ($s2.T - $st.T))
+    $gx = $s2.L + [int](300 * $dpr); $gy = $s2.T + [int](10 * $dpr)
+    $margin = [int](8 * $dpr)
+    $dx = ($s2.WL + [int](5 * $dpr)) - $s2.L
+    Drag-To $gx $gy ($gx + $dx) $gy
+    $s3 = Now-State
+    Check 'input' 'a real drag that ends 5 px from the left screen edge snaps the window to the margin (8 px)' ([Math]::Abs($s3.L - ($s3.WL + $margin)) -le 2 -and [Math]::Abs($s3.T - $s2.T) -le 3) ("left " + ($s3.L - $s3.WL) + " px from the work area, top moved " + ($s3.T - $s2.T))
+    $gx = $s3.L + [int](300 * $dpr); $gy = $s3.T + [int](10 * $dpr)
+    $dy = ($s3.WT + [int](4 * $dpr)) - $s3.T
+    Drag-To $gx $gy $gx ($gy + $dy)
+    $s4 = Now-State
+    Check 'input' 'a real drag that ends 4 px from the top edge snaps to the margin there too' ([Math]::Abs($s4.T - ($s4.WT + $margin)) -le 2) ("top " + ($s4.T - $s4.WT) + " px from the work area")
+    # 5. resizing by dragging the right edge outwards (the edge handles are drawn by the page)
+    $s5 = Now-State
+    $ex = $s5.R - [int](2 * $dpr); $ey = $s5.T + [int](($s5.B - $s5.T) / 2)
+    Drag-To $ex $ey ($ex + 60) $ey
+    $s6 = Now-State
+    Check 'input' 'a real drag of the right edge 60 px outwards makes the window about 60 px wider (same top-left)' (([Math]::Abs(($s6.R - $s5.R) - 60) -le 4) -and ($s6.L -eq $s5.L) -and ($s6.T -eq $s5.T)) ("width " + ($s5.R - $s5.L) + " -> " + ($s6.R - $s6.L))
+    Check 'input' 'moving, snapping and resizing with the mouse never took the keyboard' (-not [GT]::IsFg($h))
+    Check 'input' 'no start failures logged' (@(Cut $log $n | Where-Object { $_ -match 'FAILED to start' }).Count -eq 0)
+  } finally {
+    Stop-HUDshell
+    [GT]::RestoreCursor()
+  }
+}
+
+function Tree-Ids([int]$rootPid) {
+  $all = Get-CimInstance Win32_Process -Property ProcessId, ParentProcessId
+  $ids = New-Object System.Collections.Generic.HashSet[int]; [void]$ids.Add($rootPid)
+  $grew = $true
+  while ($grew) { $grew = $false; foreach ($x in $all) { if ($ids.Contains([int]$x.ParentProcessId) -and -not $ids.Contains([int]$x.ProcessId)) { [void]$ids.Add([int]$x.ProcessId); $grew = $true } } }
+  return $ids
+}
+function Tree-Cpu([int]$rootPid) {
+  $sum = 0.0
+  foreach ($id in (Tree-Ids $rootPid)) { $pr = Get-Process -Id $id -ErrorAction SilentlyContinue; if ($pr) { try { $sum += $pr.TotalProcessorTime.TotalSeconds } catch { } } }
+  return $sum
+}
+function Suite-Cost {
+  Write-Host "=== cost: memory and idle CPU with 1, 3 and 9 shells (sends Ctrl+Alt+N; do not touch the keyboard) ==="
+  Stop-HUDshell
+  $p = $null
+  try {
+    $n = LineCount $log
+    $p = Start-Process $dbg -ArgumentList '--idle' -PassThru
+    Start-Sleep 10
+    $h = [GT]::Find([uint32]$p.Id)
+    Check 'cost' 'window found' ($h -ne [IntPtr]::Zero)
+    if ($h -eq [IntPtr]::Zero) { return }
+    $have = 1; $rows = @()
+    foreach ($target in 1, 3, 9) {
+      while ($have -lt $target) { [GT]::Hotkey(0x4E); $have++; Start-Sleep -Milliseconds 1500 }
+      Start-Sleep 12
+      $mem = Tree-Memory $p.Id
+      $c0 = Tree-Cpu $p.Id; Start-Sleep 10; $c1 = Tree-Cpu $p.Id
+      $cpu = [Math]::Round((($c1 - $c0) / 10.0) * 100, 1)
+      $started = @(Cut $log $n | Where-Object { $_ -match 'pty: started .* for session' }).Count
+      $rows += [pscustomobject]@{ Shells = $target; HostMB = [Math]::Round($mem[0] / 1MB, 1); TreeMB = [Math]::Round($mem[1] / 1MB, 0); CpuPct = $cpu; Started = $started }
+      Check 'cost' ("$target shell(s): all running (" + $started + " started), tree " + [Math]::Round($mem[1] / 1MB, 0) + " MB (host " + [Math]::Round($mem[0] / 1MB, 1) + " MB), idle CPU " + $cpu + "% of one core over 10 s") (($started -eq $target) -and ($mem[1] -lt 1.5GB) -and ($cpu -lt 10)) 'sanity bounds: under 1.5 GB and under 10% of one core'
+    }
+    if ($rows.Count -eq 3) {
+      $per = [Math]::Round(($rows[2].TreeMB - $rows[0].TreeMB) / 8.0, 0)
+      Check 'cost' "each extra shell costs about $per MB (1 -> 9 shells: $($rows[0].TreeMB) -> $($rows[2].TreeMB) MB)" ($per -lt 150)
+    }
+  } finally { Stop-HUDshell }
+}
+
 function Tree-Memory([int]$rootPid) {
   $all = Get-CimInstance Win32_Process -Property ProcessId, ParentProcessId, Name
   $ids = New-Object System.Collections.Generic.HashSet[int]; [void]$ids.Add($rootPid)
@@ -896,6 +1052,8 @@ foreach ($s in $want) {
     'sessions' { Suite-Sessions }
     'shells' { Suite-Shells }
     'layout' { Suite-Layout }
+    'input' { Suite-Input }
+    'cost' { Suite-Cost }
     'ghost' { Suite-Ghost }
     'attention' { Suite-Attention }
     'policy' { Suite-Policy }

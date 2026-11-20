@@ -4,7 +4,16 @@ Machine: Windows 11 build 26300, WebView2 Runtime 157.x, Rust 1.99 (MSVC), Power
 Codex CLI 0.170.0, three displays (all at 100% scaling). Latest full regression: 2026-11-20 with `scripts/test-all.ps1`.
 "Tested" means observed in a log, a cell-text dump or a screenshot; anything not listed is in [known-gaps.md](known-gaps.md).
 
-## Latest full run (scripts/test-all.ps1, no sandbox, 2026-11-20, split panes build): 279 pass, 0 fail, 2 intentional skips
+## Latest full run (scripts/test-all.ps1, no sandbox, 2026-11-20, final build with the window-drag fix): 301 pass, 0 fail, 2 intentional skips
+
+Run on freshly built release and harness executables after the fix described under "A defect found by `input`" below. The real-prompt suite
+was **not** run (no sandbox given), so no prompt went to Claude Code or Codex. Per suite: static 16 (55 unit tests; release exe 1.12 MB),
+keys 6, width 3, hideshow 3, clickfocus 3, clipboard 3, autotest 22 (+2 intentional skips), ui 29, scrollback 8, ghost 14, attention 10,
+policy 12, place 13, qol 16, sessions 10, shells 34, layout 35, input 13, cost 5, release 20, config 22, soak 4. The settings file was
+restored byte-for-byte by `release` and `config`; soak memory 219 -> 215 MB. The per-suite detail of the new suites is in the next
+two sections.
+
+## Previous full run (commit 074ba1b, split panes build, before the window-drag fix): 279 pass, 0 fail, 2 intentional skips
 
 Run on freshly built release and harness executables after adding split panes (presets, zoom, per-pane shell lists), program labels on
 tabs and whole-title tab names. The real-prompt suite was **not** run (no sandbox given), so no prompt went to Claude Code or Codex. Per
@@ -26,6 +35,31 @@ bug I had introduced: closing the shell in a single pane showed the first shell 
 refill ignored the neighbour chosen by the tab list); fixed, with a unit test. One `layout` check failed because of a wrong assumption in
 the test (two shells bring up the tab strip, which costs one row) and a PowerShell variable-name slip in its message; the test was
 corrected. After the fixes the no-input suites were rerun (95 pass), and then this full run.
+
+## Real-input runs added after that (2026-11-20, same machine; commit 074ba1b plus the window-drag fix below)
+
+Run for the items the full run did not cover. The real-prompt suite was still not run.
+
+- **`autotest` (22 pass, 2 intentional skips):** with the real Claude Code and the real Codex running in a tab, the tab was labelled
+  `claude` / `codex` (the Codex tab read `codex · <folder name>`); after each exited the label was gone. No prompt was sent and no dialog
+  answered. The label is read from process names; the launcher chain Codex uses (npm shim, then its native binary) was recognised.
+- **`cost` (5 pass):** whole process tree 193 MB with 1 shell, 254 MB with 3, 438 MB with 9 (about 31 MB per extra shell); the HUDshell
+  process itself 4.2 / 4.5 / 5.5 MB; idle CPU over 10 s 1.1% / 0.8% / 2.0% of one core. One machine, 100% scaling, shells sitting at a
+  prompt; busy shells cost more. The pass limits (under 1.5 GB, under 10% of one core) are my own sanity bounds.
+- **`input` (13 pass after the fix):** real Ctrl+Alt+Shift+N opened the picker and took the keyboard, a real key 1 started a shell and the
+  keyboard went back, Esc cancelled it; real clicks switched tabs; a real divider drag moved the split from 50% to 65%; real window drags
+  moved the window by exactly the drag distance away from edges (40,30) and snapped it to the 8 px margin at the left and top edges; a real
+  drag of the right edge made the window 60 px wider (900 -> 960); none of those took the keyboard.
+
+**A defect found by `input`, present since the first release and now fixed.** The first `input` run failed its three window-drag checks
+(the window did not move at all). A probe that sends no input showed why, and showed the same on the commit before this session: the web
+view covers the whole window, so a real press on the top strip or an edge landed on the web view and never reached the host's drag / resize
+logic; the window could only be moved with the corner hotkeys. The fix (see design.md, "Moving and resizing") passed on the second run. The
+earlier statement that dragging was verified referred only to the foreground window not changing during a drag. A second `input` check
+("never took the keyboard") failed once because earlier clicks in the same run had already grabbed the keyboard by design; the test now
+releases it first.
+
+The other suites were rerun on the fixed build in the full run above (301 pass).
 
 ## Earlier full run today (phases 1-3 build, 2026-11-20): 228 pass, 0 fail, 2 intentional skips
 

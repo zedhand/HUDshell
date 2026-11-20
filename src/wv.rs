@@ -377,6 +377,24 @@ fn handle_term_message(hwnd: isize, m: &str) {
             }
         }
         Some("click") => crate::on_page_click(hwnd),
+        Some("nc") => {
+            // A press on the drag strip or an edge: only these hit-test codes can be asked for.
+            let ht = match v["hit"].as_str() {
+                Some("caption") => 2,
+                Some("left") => 10,
+                Some("right") => 11,
+                Some("top") => 12,
+                Some("topleft") => 13,
+                Some("topright") => 14,
+                Some("bottom") => 15,
+                Some("bottomleft") => 16,
+                Some("bottomright") => 17,
+                _ => 0,
+            };
+            if ht != 0 {
+                crate::start_native_drag(hwnd, ht);
+            }
+        }
         Some("settings") => crate::on_settings_message(hwnd, &v),
         Some("applied") => log(&format!("terminal applied settings: {v}")),
         Some("copied") => log(&format!("copy to clipboard: {v}")),

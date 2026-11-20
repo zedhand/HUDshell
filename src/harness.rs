@@ -118,6 +118,7 @@ const AUTOTEST: &[(u64, &str)] = &[
     (29100, "key:Ctrl+C"),
     (29400, "key:Ctrl+C"),
     (31500, "dump:claude-exited"),
+    (31900, "dump:claude-exited2"),
     (32000, "phase:codex"),
     (32100, "type:codex"),
     (32400, "key:Enter"),
@@ -134,6 +135,7 @@ const AUTOTEST: &[(u64, &str)] = &[
     (43700, "key:Ctrl+C"),
     (44000, "key:Ctrl+C"),
     (46000, "dump:codex-exited"),
+    (46400, "dump:codex-exited2"),
     (47000, "phase:grab-cycles"),
     (47100, "fg"),
     (48500, "hotkey:G"),
@@ -878,8 +880,27 @@ fn build_soak() -> &'static [(u64, &'static str)] {
     })
 }
 
+/// `--inputtest` (run with `--interactive --layout side-by-side --dividers --tabs always`): no script of its own. Every
+/// second it dumps the page (with the position of the tabs and dividers) and the window state, so the runner can aim
+/// real mouse and keyboard input at what is really on screen and read the result.
+fn build_inputtest() -> &'static [(u64, &'static str)] {
+    static S: std::sync::OnceLock<&'static [(u64, &'static str)]> = std::sync::OnceLock::new();
+    S.get_or_init(|| {
+        let mut v: Vec<(u64, &'static str)> = vec![(1500, "cdp-focus"), (2000, "resize:900,520")];
+        let mut t = 6000u64;
+        while t <= 80000 {
+            v.push((t, "state:m"));
+            v.push((t + 100, "dump:m"));
+            t += 1000;
+        }
+        v.push((81500, "quit"));
+        &*Box::leak(v.into_boxed_slice())
+    })
+}
+
 fn scen() -> &'static [(u64, &'static str)] {
     match SCEN_SEL.load(Ordering::SeqCst) {
+        29 => build_inputtest(),
         28 => LABELS,
         27 => LAYOUTOWN,
         26 => LAYOUTSTART,
@@ -1386,7 +1407,7 @@ const SCENARIO_FLAGS: &[&str] = &[
     "--autotest", "--keys", "--widthtest", "--probe", "--probe2", "--probe3", "--probe4", "--real",
     "--clickfocus", "--hideshow", "--clipboard", "--soak", "--scrolltest", "--ghosttest", "--attention",
     "--policytest", "--placetest", "--idletest", "--starttest", "--autostarttest", "--sessiontest", "--shellstest",
-    "--tabmodes", "--shellsfull", "--layouttest", "--layoutempty", "--layoutstart", "--layoutown", "--labeltest",
+    "--tabmodes", "--shellsfull", "--layouttest", "--layoutempty", "--layoutstart", "--layoutown", "--labeltest", "--inputtest",
 ];
 
 pub(crate) fn is_test_mode() -> bool {
@@ -1459,7 +1480,7 @@ pub(crate) unsafe fn arm(hwnd: HWND) {
     if SCENARIO_FLAGS.iter().any(|f| any_scen(f)) {
         let args: Vec<String> = std::env::args().collect();
         SCEN_SEL.store(
-            if any_scen("--labeltest") { 28 } else if any_scen("--layoutown") { 27 } else if any_scen("--layoutstart") { 26 } else if any_scen("--layoutempty") { 25 } else if any_scen("--layouttest") { 24 } else if any_scen("--shellsfull") { 23 } else if any_scen("--tabmodes") { 22 } else if any_scen("--shellstest") { 21 } else if any_scen("--sessiontest") { 20 } else if any_scen("--autostarttest") { 19 } else if any_scen("--starttest") { 18 } else if any_scen("--idletest") { 17 } else if any_scen("--placetest") { 16 } else if any_scen("--policytest") { 15 } else if any_scen("--attention") { 14 } else if any_scen("--ghosttest") { 13 } else if any_scen("--scrolltest") { 12 } else if any_scen("--soak") { 11 } else if any_scen("--clipboard") { 10 } else if any_scen("--hideshow") { 9 } else if any_scen("--clickfocus") { 8 } else if any_scen("--real") { 7 } else if any_scen("--probe4") { 6 } else if any_scen("--probe3") { 5 } else if any_scen("--probe2") { 4 } else if any_scen("--probe") { 3 } else if any_scen("--widthtest") { 2 } else if any_scen("--keys") { 1 } else { 0 },
+            if any_scen("--inputtest") { 29 } else if any_scen("--labeltest") { 28 } else if any_scen("--layoutown") { 27 } else if any_scen("--layoutstart") { 26 } else if any_scen("--layoutempty") { 25 } else if any_scen("--layouttest") { 24 } else if any_scen("--shellsfull") { 23 } else if any_scen("--tabmodes") { 22 } else if any_scen("--shellstest") { 21 } else if any_scen("--sessiontest") { 20 } else if any_scen("--autostarttest") { 19 } else if any_scen("--starttest") { 18 } else if any_scen("--idletest") { 17 } else if any_scen("--placetest") { 16 } else if any_scen("--policytest") { 15 } else if any_scen("--attention") { 14 } else if any_scen("--ghosttest") { 13 } else if any_scen("--scrolltest") { 12 } else if any_scen("--soak") { 11 } else if any_scen("--clipboard") { 10 } else if any_scen("--hideshow") { 9 } else if any_scen("--clickfocus") { 8 } else if any_scen("--real") { 7 } else if any_scen("--probe4") { 6 } else if any_scen("--probe3") { 5 } else if any_scen("--probe2") { 4 } else if any_scen("--probe") { 3 } else if any_scen("--widthtest") { 2 } else if any_scen("--keys") { 1 } else { 0 },
             Ordering::SeqCst,
         );
         let delay = args

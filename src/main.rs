@@ -1078,6 +1078,22 @@ fn poll_programs() {
     }
 }
 
+/// The page saw a press on the top strip or on an edge (the web view covers the whole window, so the host's own
+/// hit-test never sees it): start Windows' move / resize loop for that hit-test code, as if the press had landed
+/// on a title bar or border. Posted, so the loop does not run inside the bridge callback.
+pub fn start_native_drag(hwnd_i: isize, ht: u32) {
+    use windows::Win32::Foundation::POINT;
+    use windows::Win32::UI::Input::KeyboardAndMouse::ReleaseCapture;
+    let hwnd = HWND(hwnd_i as *mut std::ffi::c_void);
+    unsafe {
+        let mut pt = POINT::default();
+        let _ = GetCursorPos(&mut pt);
+        let _ = ReleaseCapture();
+        let lp = ((pt.y as isize & 0xFFFF) << 16) | (pt.x as isize & 0xFFFF);
+        let _ = PostMessageW(Some(hwnd), WM_NCLBUTTONDOWN, WPARAM(ht as usize), LPARAM(lp));
+    }
+}
+
 /// A divider was dragged (pane_dividers = true).
 pub fn on_split(cols_pct: u32, rows_pct: u32) {
     let (c, r) = {
