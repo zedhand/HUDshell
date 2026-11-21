@@ -4,6 +4,14 @@ Machine: Windows 11 build 26300, WebView2 Runtime 157.x, Rust 1.99 (MSVC), Power
 Codex CLI 0.170.0, three displays (all at 100% scaling). Latest full regression: 2026-11-20 with `scripts/test-all.ps1`.
 "Tested" means observed in a log, a cell-text dump or a screenshot; anything not listed is in [known-gaps.md](known-gaps.md).
 
+## CI check of the commits after the last full run (2026-11-21)
+
+Commit 7411ade (live settings reload, session restore, web view recovery, start-failure message, AltGr warning, panel rows) was pushed before any
+suite had been run on it. CI (the `static` suite on GitHub's `windows-latest`) failed once: one of the new unit tests, written by me, expected the
+wrong pane order. After the fix (00765f1) CI passed: **66 unit tests pass** and the release exe is 1.19 MB. That is **all** that has run for
+these features: no desktop suite (`reload`, `restore`, `recover`, `sessions`, `kbd`, `ui`, ...) has been run on them, so every behaviour they
+describe is still unverified. The previous full run below is of the code before them.
+
 ## Latest full run (scripts/test-all.ps1, no sandbox, 2026-11-20, mixed scaling, text scaling, snapping and maximize): 394 pass, 0 fail, 3 warnings
 
 Run on freshly built release and harness executables, on a machine with three monitors: 2560x1440 at 100% (primary), 1920x1080 at **150%**
