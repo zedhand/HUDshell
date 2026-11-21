@@ -66,6 +66,26 @@ clipboard text and restores it. `scrollback`, `ghost` and `attention` send no OS
 | `soak` | five minutes of continuous output: memory stays flat |
 | `real` | real prompts in a sandbox folder through Claude Code and Codex: a tool task, a two-line Shift+Enter prompt, a long stream with a mid-stream resize and Esc interrupt, `/exit` |
 
+## The hardware session (manual, one sitting)
+
+Some things only a person or the computer's own state can change: the taskbar, display scaling, a monitor's cable, sleep. `scripts	est-all.ps1 -Suite hardware`
+covers all of them in one run, so nothing has to be repeated. It never changes these settings itself: it says what to do in Windows' settings (console, a beep and
+a notification), notices by itself when it was done, waits 8 seconds, and runs the tests that belong to that state. A step that is not done within 5 minutes is
+skipped with a warning, never failed. Keep hands off the mouse and keyboard while tests run (they use real input). Put the taskbar and scaling back afterwards.
+
+| Step | What the person does | What runs |
+|---|---|---|
+| 1 | taskbar visible at the bottom (turn off auto-hide) | `maxwork` (maximize and half tiles with `maximize_area = work` stop at the taskbar), `place`, `snap` |
+| 2, 3 | taskbar on the left, then the top (only if this Windows version can; skip with `HUDSHELL_HW_SKIP=edges`) | the same three |
+| 4 | main screen scaling 125% | `dpi`, `place`, `input`, `snap` |
+| 5 | main screen scaling 200% | the same four |
+| 6 | scaling back to 100% | nothing |
+| 7 | unplug a monitor's cable, later plug it back | `monitorunplug` |
+| 8 | nothing (needs `HUDSHELL_HW_SLEEP_OK=1`): the computer goes to sleep and a one-time wake-up task wakes it | `sleepresume`: windows, web views and shells still work, heartbeats continue |
+
+`HUDSHELL_HW_SKIP` takes a comma list of `taskbar`, `edges`, `scaling`, `unplug`, `sleep`. The suites `maxwork`, `monitorunplug` and `sleepresume` can also be run alone.
+Whatever the machine does not have is a warning, not a failure (for example `maxwork` when the taskbar is hidden).
+
 ## Harness build and switches (`--features harness` only)
 
 Scenario switches: `--autotest`, `--keys`, `--widthtest`, `--probe*`, `--real`, `--clickfocus`, `--hideshow`,

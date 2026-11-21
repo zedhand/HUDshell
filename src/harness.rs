@@ -1063,6 +1063,33 @@ fn build_dpitest() -> &'static [(u64, &'static str)] {
     })
 }
 
+/// `--sleeptest`: two windows, a shell in each that prints a heartbeat; every second the state of the windows is logged. The runner puts the computer
+/// to sleep and checks everything after it wakes (Suite-SleepResume, manual).
+fn build_sleeptest() -> &'static [(u64, &'static str)] {
+    static S: std::sync::OnceLock<&'static [(u64, &'static str)]> = std::sync::OnceLock::new();
+    S.get_or_init(|| {
+        let mut v: Vec<(u64, &'static str)> = vec![
+            (1500, "cdp-focus"),
+            (2000, "resize:700,420"),
+            (3000, "shell:new"),
+            (6000, "window:detach:2"),
+            (11000, "wto:1:1..2000 | ForEach-Object { 'BEAT-ONE-' + $_ + ' ' + (Get-Date -Format HH:mm:ss); Start-Sleep -Seconds 1 }\r"),
+            (11200, "wto:2:1..2000 | ForEach-Object { 'BEAT-TWO-' + $_ + ' ' + (Get-Date -Format HH:mm:ss); Start-Sleep -Seconds 1 }\r"),
+        ];
+        let mut t = 14000u64;
+        while t <= 900000 {
+            v.push((t, "winstate:sleep"));
+            if t.is_multiple_of(5000) {
+                v.push((t + 100, "dumps:1:beat-one"));
+                v.push((t + 200, "inwin:2:dumps:2:beat-two"));
+            }
+            t += 1000;
+        }
+        v.push((901500, "quit"));
+        &*Box::leak(v.into_boxed_slice())
+    })
+}
+
 /// `--altmove`: a shell that is in the alternate screen (what a full-screen program uses) is detached into a window of its own.
 const ALT_MOVE: &[(u64, &str)] = &[
     (1500, "cdp-focus"),
@@ -1261,6 +1288,7 @@ fn build_inputtest() -> &'static [(u64, &'static str)] {
 
 fn scen() -> &'static [(u64, &'static str)] {
     match SCEN_SEL.load(Ordering::SeqCst) {
+        48 => build_sleeptest(),
         47 => ALT_MOVE,
         46 => build_monitortest(),
         45 => GAMEPOS,
@@ -1906,7 +1934,7 @@ const SCENARIO_FLAGS: &[&str] = &[
     "--autotest", "--keys", "--widthtest", "--probe", "--probe2", "--probe3", "--probe4", "--real",
     "--clickfocus", "--hideshow", "--clipboard", "--soak", "--scrolltest", "--ghosttest", "--attention",
     "--policytest", "--placetest", "--idletest", "--starttest", "--autostarttest", "--sessiontest", "--shellstest",
-    "--tabmodes", "--shellsfull", "--layouttest", "--layoutempty", "--layoutstart", "--layoutown", "--labeltest", "--inputtest", "--dpitest", "--texttest", "--reloadtest", "--sessionsave", "--sessionload", "--startfailtest", "--recovertest", "--windowstest", "--windowsnap", "--windowssave", "--windowsload", "--windowsmove", "--costwindows", "--tabsedit", "--tabsload", "--gamepos", "--monitortest", "--altmove",
+    "--tabmodes", "--shellsfull", "--layouttest", "--layoutempty", "--layoutstart", "--layoutown", "--labeltest", "--inputtest", "--dpitest", "--texttest", "--reloadtest", "--sessionsave", "--sessionload", "--startfailtest", "--recovertest", "--windowstest", "--windowsnap", "--windowssave", "--windowsload", "--windowsmove", "--costwindows", "--tabsedit", "--tabsload", "--gamepos", "--monitortest", "--altmove", "--sleeptest",
 ];
 
 pub(crate) fn is_test_mode() -> bool {
@@ -1979,7 +2007,7 @@ pub(crate) unsafe fn arm(hwnd: HWND) {
     if SCENARIO_FLAGS.iter().any(|f| any_scen(f)) {
         let args: Vec<String> = std::env::args().collect();
         SCEN_SEL.store(
-            if any_scen("--altmove") { 47 } else if any_scen("--monitortest") { 46 } else if any_scen("--gamepos") { 45 } else if any_scen("--tabsload") { 44 } else if any_scen("--tabsedit") { 43 } else if any_scen("--costwindows") { 42 } else if any_scen("--windowsmove") { 41 } else if any_scen("--windowsload") { 40 } else if any_scen("--windowssave") { 39 } else if any_scen("--windowsnap") { 38 } else if any_scen("--windowstest") { 37 } else if any_scen("--recovertest") { 36 } else if any_scen("--startfailtest") { 35 } else if any_scen("--sessionload") { 34 } else if any_scen("--sessionsave") { 33 } else if any_scen("--reloadtest") { 32 } else if any_scen("--texttest") { 31 } else if any_scen("--dpitest") { 30 } else if any_scen("--inputtest") { 29 } else if any_scen("--labeltest") { 28 } else if any_scen("--layoutown") { 27 } else if any_scen("--layoutstart") { 26 } else if any_scen("--layoutempty") { 25 } else if any_scen("--layouttest") { 24 } else if any_scen("--shellsfull") { 23 } else if any_scen("--tabmodes") { 22 } else if any_scen("--shellstest") { 21 } else if any_scen("--sessiontest") { 20 } else if any_scen("--autostarttest") { 19 } else if any_scen("--starttest") { 18 } else if any_scen("--idletest") { 17 } else if any_scen("--placetest") { 16 } else if any_scen("--policytest") { 15 } else if any_scen("--attention") { 14 } else if any_scen("--ghosttest") { 13 } else if any_scen("--scrolltest") { 12 } else if any_scen("--soak") { 11 } else if any_scen("--clipboard") { 10 } else if any_scen("--hideshow") { 9 } else if any_scen("--clickfocus") { 8 } else if any_scen("--real") { 7 } else if any_scen("--probe4") { 6 } else if any_scen("--probe3") { 5 } else if any_scen("--probe2") { 4 } else if any_scen("--probe") { 3 } else if any_scen("--widthtest") { 2 } else if any_scen("--keys") { 1 } else { 0 },
+            if any_scen("--sleeptest") { 48 } else if any_scen("--altmove") { 47 } else if any_scen("--monitortest") { 46 } else if any_scen("--gamepos") { 45 } else if any_scen("--tabsload") { 44 } else if any_scen("--tabsedit") { 43 } else if any_scen("--costwindows") { 42 } else if any_scen("--windowsmove") { 41 } else if any_scen("--windowsload") { 40 } else if any_scen("--windowssave") { 39 } else if any_scen("--windowsnap") { 38 } else if any_scen("--windowstest") { 37 } else if any_scen("--recovertest") { 36 } else if any_scen("--startfailtest") { 35 } else if any_scen("--sessionload") { 34 } else if any_scen("--sessionsave") { 33 } else if any_scen("--reloadtest") { 32 } else if any_scen("--texttest") { 31 } else if any_scen("--dpitest") { 30 } else if any_scen("--inputtest") { 29 } else if any_scen("--labeltest") { 28 } else if any_scen("--layoutown") { 27 } else if any_scen("--layoutstart") { 26 } else if any_scen("--layoutempty") { 25 } else if any_scen("--layouttest") { 24 } else if any_scen("--shellsfull") { 23 } else if any_scen("--tabmodes") { 22 } else if any_scen("--shellstest") { 21 } else if any_scen("--sessiontest") { 20 } else if any_scen("--autostarttest") { 19 } else if any_scen("--starttest") { 18 } else if any_scen("--idletest") { 17 } else if any_scen("--placetest") { 16 } else if any_scen("--policytest") { 15 } else if any_scen("--attention") { 14 } else if any_scen("--ghosttest") { 13 } else if any_scen("--scrolltest") { 12 } else if any_scen("--soak") { 11 } else if any_scen("--clipboard") { 10 } else if any_scen("--hideshow") { 9 } else if any_scen("--clickfocus") { 8 } else if any_scen("--real") { 7 } else if any_scen("--probe4") { 6 } else if any_scen("--probe3") { 5 } else if any_scen("--probe2") { 4 } else if any_scen("--probe") { 3 } else if any_scen("--widthtest") { 2 } else if any_scen("--keys") { 1 } else { 0 },
             Ordering::SeqCst,
         );
         let delay = args
@@ -2020,6 +2048,9 @@ pub(crate) fn override_config(mut c: config::Config) -> config::Config {
     }
     if args.iter().any(|a| a == "--game-positions") {
         c.game_positions = true;
+    }
+    if let Some(v) = opt("--maximize-area") {
+        c.maximize_area = v;
     }
     if args.iter().any(|a| a == "--no-edge-tiling") {
         c.edge_tiling = false;

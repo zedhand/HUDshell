@@ -1775,6 +1775,205 @@ function Suite-AltMove {
   Check 'altmove' 'no start failures logged and the run finished' ((@($r | Where-Object { $_ -match 'FAILED to start' }).Count -eq 0) -and (@($r | Where-Object { $_ -match 'AUTOTEST: finished' }).Count -eq 1))
 }
 
+# ---- the hardware session (MANUAL, not part of 'all') -------------------------------------------------------------------
+# One sitting that covers everything that needs a person or the computer's own state: the taskbar shown and on each edge, other display scalings,
+# a monitor unplugged and plugged back, and sleep and resume. HUDshell is never asked to change any of this: the person changes the taskbar and the
+# scaling in Windows' settings (the script says when, and notices by itself that it was done), and the script puts the computer to sleep only
+# when the person confirmed it can be. Anything not done within its time limit is skipped with a warning, never failed.
+
+# Tell the person what to do: console line, a short beep, and a notification balloon.
+function Say([string]$text) {
+  Write-Host ""
+  Write-Host ">>> ACTION NEEDED: $text"
+  try { [console]::Beep(880, 250); [console]::Beep(1175, 250) } catch { }
+  try {
+    Add-Type -AssemblyName System.Windows.Forms -ErrorAction Stop
+    $ni = New-Object System.Windows.Forms.NotifyIcon
+    $ni.Icon = [System.Drawing.SystemIcons]::Information; $ni.Visible = $true
+    $ni.ShowBalloonTip(15000, 'HUDshell test: action needed', $text, [System.Windows.Forms.ToolTipIcon]::Info)
+    Start-Sleep -Milliseconds 300; $ni.Dispose()
+  } catch { }
+}
+
+function Wait-Until([scriptblock]$cond, [int]$timeoutSec) {
+  for ($i = 0; $i -lt $timeoutSec; $i++) { if (& $cond) { return $true }; Start-Sleep 1 }
+  return [bool](& $cond)
+}
+
+# Where the taskbar is, judged from the primary monitor's work area: hidden / bottom / top / left / right.
+function Get-TaskbarEdge {
+  $m = @(Get-Monitors) | Where-Object { $_.Primary } | Select-Object -First 1
+  if (-not $m) { return 'unknown' }
+  if ($m.WB -lt $m.B) { return 'bottom' }
+  if ($m.WT -gt $m.T) { return 'top' }
+  if ($m.WL -gt $m.L) { return 'left' }
+  if ($m.WR -lt $m.R) { return 'right' }
+  return 'hidden'
+}
+
+# The text of the LAST dump with a label (a scenario may dump the same label again and again).
+function Get-LastDump($run, [string]$label) {
+  $i = -1
+  for ($k = $run.Count - 1; $k -ge 0; $k--) { if ($run[$k] -match ("DUMP label=" + [regex]::Escape($label) + '(\s|$)')) { $i = $k; break } }
+  if ($i -lt 0) { return @() }
+  $h = -1
+  for ($k = $i + 1; $k -lt $run.Count; $k++) { if ($run[$k] -match '^\d+ terminal dump:') { $h = $k; break } }
+  if ($h -lt 0) { return @() }
+  $out = New-Object System.Collections.Generic.List[string]
+  for ($j = $h + 1; $j -lt $run.Count; $j++) { if ($run[$j] -match '^\d+ terminal dump:') { break }; if ($run[$j] -match '^\d+   \| ?(.*)$') { $out.Add($Matches[1]) } }
+  return $out.ToArray()
+}
+
+function Get-PrimaryScale { $m = @(Get-Monitors) | Where-Object { $_.Primary } | Select-Object -First 1; if ($m) { [int]($m.Dpi * 100 / 96) } else { 0 } }
+
+# One state of the hardware session: wait (with a prompt) until the state is reached, let it settle, then run the tests that belong to it.
+function Hw-State([string]$tag, [string]$prompt, [scriptblock]$reached, [int]$timeoutSec, [scriptblock]$tests) {
+  Write-Host ""
+  Write-Host "----- hardware session: $tag -----"
+  if (-not (& $reached)) {
+    Say $prompt
+    if (-not (Wait-Until $reached $timeoutSec)) { Warn 'hardware' "$tag was not set up within $([int]($timeoutSec / 60)) minutes: its tests were skipped"; return }
+  }
+  Write-Host "reached: $tag (letting Windows settle for 8 s; keep your hands off the keyboard and mouse from here on)"
+  Start-Sleep 8
+  $script:CheckTag = " [$tag]"
+  try { & $tests } finally { $script:CheckTag = '' }
+}
+
+# The maximize and the half tiles with maximize_area = work: they must stop at the taskbar. Real mouse. Needs a taskbar that is visible on the primary monitor.
+function Suite-MaxWork {
+  Write-Host "=== maxwork: maximize_area = work with a visible taskbar (real mouse - do not touch mouse/keyboard) ==="
+  $m = @(Get-Monitors) | Where-Object { $_.Primary } | Select-Object -First 1
+  if (($m.WR - $m.WL) -eq ($m.R - $m.L) -and ($m.WB - $m.WT) -eq ($m.B - $m.T)) { Warn 'maxwork' 'the taskbar is hidden on the primary monitor: the work area equals the monitor, so work and monitor cannot be told apart'; return }
+  $dpr = $m.Dpi / 96.0
+  Stop-HUDshell
+  GTSave
+  $p = $null
+  try {
+    $n = LineCount $log
+    $at = "{0},{1}" -f ($m.WL + 200), ($m.WT + 150)
+    $p = Start-Process $dbg -ArgumentList @('--term', '--inputtest', '--interactive', '--maximize-area', 'work', '--size', '640,360', '--at', $at, '--delay', '2') -PassThru
+    $st = $null
+    for ($i = 0; $i -lt 40 -and -not $st; $i++) { Start-Sleep 1; $st = Last-State @(Cut $log $n) }
+    Check 'maxwork' 'the window started' ($null -ne $st)
+    if (-not $st) { return }
+    $gx = $st.L + [int](200 * $dpr); $gy = $st.T + [int](10 * $dpr)
+    Drag-Mouse $gx $gy $gx ($m.T)
+    $s2 = Last-State @(Cut $log $n)
+    Check 'maxwork' 'dragging to the top edge fills the WORK area (stops at the taskbar), not the whole monitor' (([Math]::Abs($s2.L - $m.WL) -le 1) -and ([Math]::Abs($s2.T - $m.WT) -le 1) -and ([Math]::Abs($s2.R - $m.WR) -le 1) -and ([Math]::Abs($s2.B - $m.WB) -le 1)) ("window {0},{1},{2},{3}; work {4},{5},{6},{7}; monitor {8},{9},{10},{11}" -f $s2.L, $s2.T, $s2.R, $s2.B, $m.WL, $m.WT, $m.WR, $m.WB, $m.L, $m.T, $m.R, $m.B)
+    Shot 'maxwork' $s2.L $s2.T $s2.R $s2.B
+    $gx = $s2.L + [int](($s2.R - $s2.L) / 2); $gy = $s2.T + [int](10 * $dpr)
+    Drag-Mouse $gx $gy $gx ($gy + [int](200 * $dpr))
+    $st = Last-State @(Cut $log $n)
+    # a half tile at the left / right edge of the work area (only where no other monitor continues)
+    foreach ($side in 'left', 'right') {
+      $ey = $m.T + [int](($m.B - $m.T) / 2)
+      $joined = @(Get-Monitors | Where-Object { (($side -eq 'left' -and $_.R -eq $m.L) -or ($side -eq 'right' -and $_.L -eq $m.R)) -and $_.T -le $ey -and $_.B -gt $ey }).Count -gt 0
+      if ($joined) { continue }
+      $st = Last-State @(Cut $log $n)
+      $gx = $st.L + [int](200 * $dpr); $gy = $st.T + [int](10 * $dpr)
+      $ex = if ($side -eq 'left') { $m.L } else { $m.R - 1 }
+      Drag-Mouse $gx $gy $ex $ey
+      $s3 = Last-State @(Cut $log $n)
+      $half = [int](($m.WR - $m.WL) / 2)
+      $ok = if ($side -eq 'left') { ([Math]::Abs($s3.L - $m.WL) -le 1) -and ([Math]::Abs($s3.R - ($m.WL + $half)) -le 2) } else { ([Math]::Abs($s3.R - $m.WR) -le 1) -and ([Math]::Abs($s3.L - ($m.WR - $half)) -le 2) }
+      Check 'maxwork' "the $side half tile is a half of the work area, top and bottom on the work area" ($ok -and ([Math]::Abs($s3.T - $m.WT) -le 1) -and ([Math]::Abs($s3.B - $m.WB) -le 1)) ("window {0},{1},{2},{3}" -f $s3.L, $s3.T, $s3.R, $s3.B)
+      $gx = $s3.L + [int](($s3.R - $s3.L) / 2); $gy = $s3.T + [int](10 * $dpr)
+      Drag-Mouse $gx $gy $gx ($gy + [int](200 * $dpr))
+    }
+  } finally { Stop-HUDshell; [GT]::RestoreCursor() }
+}
+
+# Sleep and resume. The script puts the computer to sleep (only after the person agreed: see Suite-Hardware) and sets a one-time wake timer; after the
+# computer is awake again the windows, the web views and the shells must all still work. The wake-up task it creates is removed at the end.
+function Suite-SleepResume {
+  Write-Host "=== sleepresume: the computer goes to sleep and wakes up while HUDshell runs ==="
+  Stop-HUDshell
+  $taskName = 'HUDshell-test-wake-' + [guid]::NewGuid().ToString('N').Substring(0, 6)
+  $p = $null
+  try {
+    $n = LineCount $log
+    $p = Start-Process $dbg -ArgumentList @('--term', '--sleeptest', '--delay', '2') -PassThru
+    $ready = Wait-Until { $w = Get-Windows @(Cut $log $n) 'sleep'; $w -and $w.N -eq 2 -and ((@(Get-LastDump @(Cut $log $n) 'beat-one') -join "`n") -match 'BEAT-ONE-([5-9]|\d\d)') } 120
+    Check 'sleepresume' 'two windows are open and both shells are printing their heartbeat' $ready
+    if (-not $ready) { return }
+    Start-Sleep 10
+    $before = @(Cut $log $n)
+    $lastBefore = [regex]::Matches((@(Get-LastDump $before 'beat-one') -join "`n"), 'BEAT-ONE-(\d+)') | ForEach-Object { [int]$_.Groups[1].Value } | Measure-Object -Maximum | Select-Object -ExpandProperty Maximum
+    # a one-time wake-up task 120 s from now (needs "allow wake timers", the default on mains power); without it the person presses a key
+    $wakeOk = $false
+    try {
+      $when = (Get-Date).AddSeconds(120)
+      $act = New-ScheduledTaskAction -Execute 'cmd.exe' -Argument '/c exit'
+      $trg = New-ScheduledTaskTrigger -Once -At $when
+      $set = New-ScheduledTaskSettingsSet -WakeToRun -StartWhenAvailable
+      Register-ScheduledTask -TaskName $taskName -Action $act -Trigger $trg -Settings $set -User $env:USERNAME -RunLevel Limited -Force -ErrorAction Stop | Out-Null
+      $wakeOk = $true
+    } catch { Write-Host "could not create the wake-up task: $_" }
+    Write-Host ""
+    Write-Host ">>> The computer goes to sleep in 15 seconds and should wake by itself in about 2 minutes$(if (-not $wakeOk) { ' (no wake-up timer could be set: press a key to wake it)' })."
+    Start-Sleep 15
+    $stampBefore = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
+    Add-Type -AssemblyName System.Windows.Forms
+    [void][System.Windows.Forms.Application]::SetSuspendState([System.Windows.Forms.PowerState]::Suspend, $false, $false)
+    # back here once the computer is awake (the script was suspended with everything else)
+    Start-Sleep 20
+    $gap = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() - $stampBefore
+    Check 'sleepresume' 'the computer really slept (the clock jumped by more than 40 s over a 20 s wait)' ($gap -gt 40000) ("{0} s" -f [int]($gap / 1000))
+    Start-Sleep 25
+    $after = @(Cut $log $n)
+    $w = Get-Windows $after 'sleep'
+    $mons = @(Get-Monitors)
+    $inside = { param($x) $cx = [int](($x.L + $x.R) / 2); $cy = [int](($x.T + $x.B) / 2); @($mons | Where-Object { $cx -ge $_.L -and $cx -lt $_.R -and $cy -ge $_.T -and $cy -lt $_.B }).Count -gt 0 }
+    Check 'sleepresume' 'HUDshell is still running after the resume' (-not $p.HasExited)
+    Check 'sleepresume' 'both windows are still open and on a screen' ($w -and $w.N -eq 2 -and @($w.Wins | Where-Object { -not (& $inside $_) }).Count -eq 0) $(if ($w) { ($w.Wins | ForEach-Object { "w$($_.Serial)@$($_.L),$($_.T)" }) -join ' ' } else { 'no state' })
+    $lastAfter = [regex]::Matches((@(Get-LastDump $after 'beat-one') -join "`n"), 'BEAT-ONE-(\d+)') | ForEach-Object { [int]$_.Groups[1].Value } | Measure-Object -Maximum | Select-Object -ExpandProperty Maximum
+    Check 'sleepresume' 'the shell in window 1 kept running through the sleep: its heartbeat continued after the resume' ($lastAfter -gt $lastBefore + 10) "beat $lastBefore -> $lastAfter"
+    $lastAfter2 = [regex]::Matches((@(Get-LastDump $after 'beat-two') -join "`n"), 'BEAT-TWO-(\d+)') | ForEach-Object { [int]$_.Groups[1].Value } | Measure-Object -Maximum | Select-Object -ExpandProperty Maximum
+    Check 'sleepresume' 'and the shell in window 2 too (its web view still shows new output)' ($lastAfter2 -gt $lastBefore + 10) "beat two: $lastAfter2"
+    Check 'sleepresume' 'no web view failure or start failure was logged' (@($after | Where-Object { $_ -match 'webview: a process failed|FAILED to start' }).Count -eq 0)
+  } finally {
+    try { Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue } catch { }
+    Stop-HUDshell
+  }
+}
+
+# The whole session, in the order that asks the least of the person. HUDSHELL_HW_SKIP="sleep,unplug,scaling,taskbar,edges" leaves parts out (edges = only the taskbar on the left and top).
+function Suite-Hardware {
+  Write-Host "=== hardware: one sitting for taskbar, scaling, monitor unplug and sleep ==="
+  $skip = @(($env:HUDSHELL_HW_SKIP -split ',') | ForEach-Object { $_.Trim().ToLower() } | Where-Object { $_ })
+  $mons = @(Get-Monitors)
+  $startEdge = Get-TaskbarEdge; $startScale = Get-PrimaryScale
+  Write-Host ("monitors: " + (($mons | ForEach-Object { "{0}x{1}@{2}%{3}" -f ($_.R - $_.L), ($_.B - $_.T), [int]($_.Dpi * 100 / 96), $(if ($_.Primary) { ' primary' } else { '' }) }) -join ', '))
+  Write-Host "taskbar now: $startEdge; primary scaling now: $startScale%"
+  Write-Host "Plan: 1 taskbar shown at the bottom, 2 on the left, 3 on the top; 4 primary scaling 125%, 5 200%, 6 back to 100%; 7 unplug a monitor and plug it back; 8 sleep and wake."
+  Write-Host "Each step names what to change in Windows' settings; do nothing else, and keep your hands off the mouse and keyboard while the tests run."
+  Write-Host "When it is over, put the taskbar and the scaling back the way you like them."
+  if ($skip -notcontains 'taskbar') {
+    Hw-State 'taskbar visible at the bottom' 'Make the taskbar visible at the bottom of the main screen (Settings > Personalization > Taskbar > Taskbar behaviors: turn OFF "Automatically hide the taskbar").' { (Get-TaskbarEdge) -eq 'bottom' } 300 { Suite-MaxWork; Suite-Place; Suite-Snap }
+    if ($skip -notcontains 'edges') {
+      Hw-State 'taskbar on the left' 'Move the taskbar to the LEFT edge of the main screen (not every Windows 11 version can do this: if yours cannot, stop and skip with HUDSHELL_HW_SKIP=edges).' { (Get-TaskbarEdge) -eq 'left' } 300 { Suite-MaxWork; Suite-Place; Suite-Snap }
+      Hw-State 'taskbar on the top' 'Move the taskbar to the TOP edge of the main screen.' { (Get-TaskbarEdge) -eq 'top' } 300 { Suite-MaxWork; Suite-Place; Suite-Snap }
+      Hw-State 'taskbar back at the bottom' 'Move the taskbar back to the BOTTOM of the main screen.' { (Get-TaskbarEdge) -in 'bottom', 'hidden' } 300 { }
+    }
+  }
+  if ($skip -notcontains 'scaling') {
+    Hw-State 'primary scaling 125%' 'Set the scaling of the MAIN screen to 125% (Settings > System > Display > Scale).' { (Get-PrimaryScale) -eq 125 } 300 { Suite-Dpi; Suite-Place; Suite-Input; Suite-Snap }
+    Hw-State 'primary scaling 200%' 'Set the scaling of the MAIN screen to 200%.' { (Get-PrimaryScale) -eq 200 } 300 { Suite-Dpi; Suite-Place; Suite-Input; Suite-Snap }
+    Hw-State 'primary scaling back at 100%' 'Set the scaling of the MAIN screen back to 100%.' { (Get-PrimaryScale) -eq 100 } 300 { }
+  }
+  if ($skip -notcontains 'unplug') {
+    Write-Host ""
+    Write-Host "----- hardware session: monitor unplug -----"
+    Suite-MonitorUnplug
+  }
+  if ($skip -notcontains 'sleep') {
+    Write-Host ""
+    Write-Host "----- hardware session: sleep and resume -----"
+    if ($env:HUDSHELL_HW_SLEEP_OK -eq '1') { Suite-SleepResume } else { Warn 'hardware' 'sleep and resume were not run: set HUDSHELL_HW_SLEEP_OK=1 to allow the script to put the computer to sleep' }
+  }
+}
+
 # MANUAL (not part of 'all'): a person unplugs a monitor while three HUDshell windows are open, and plugs it back in later. Nothing about the
 # display settings is changed by this script. Run it with: -Suite monitorunplug. HUDSHELL_UNPLUG="1920x1080" picks the monitor by the size of its work area.
 function Suite-MonitorUnplug {
@@ -2013,6 +2212,9 @@ foreach ($s in $want) {
     'gamepos' { Suite-GamePos }
     'altmove' { Suite-AltMove }
     'monitorunplug' { Suite-MonitorUnplug }
+    'maxwork' { Suite-MaxWork }
+    'sleepresume' { Suite-SleepResume }
+    'hardware' { Suite-Hardware }
     'tabsui' { Suite-TabsUi }
     'windowsnap' { Suite-WindowSnap }
     'input' { Suite-Input }
