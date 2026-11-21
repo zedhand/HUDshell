@@ -788,8 +788,8 @@ function Place-Once([string[]]$extra) {
   Check 'place' 'font hotkeys: 14 -> 16 -> 15' (($s['font-up'].font -eq '16') -and ($s['font-down'].font -eq '15')) ("up=" + $s['font-up'].font + " down=" + $s['font-down'].font)
   $fsB = Get-DumpField $run 'font-base' 'fs'; $fsU = Get-DumpField $run 'font-up' 'fs'; $fsD = Get-DumpField $run 'font-down' 'fs'
   Check 'place' 'the page applied the font size (14 -> 16 -> 15)' (($fsB -eq '14') -and ($fsU -eq '16') -and ($fsD -eq '15')) "$fsB,$fsU,$fsD"
-  $colsOf = { param($label) $h = Get-DumpField $run $label 'buffer'; $null; $i = -1; for ($k = 0; $k -lt $run.Count; $k++) { if ($run[$k] -match ("DUMP label=" + $label + '(\s|$)')) { $i = $k; break } }; for ($k = $i + 1; $k -lt $run.Count; $k++) { if ($run[$k] -match 'terminal dump: (\d+)x(\d+)') { return [int]$Matches[1] } } }
-  $cb = & $colsOf 'font-base'; $cu = & $colsOf 'font-up'
+  $colsOf = { param($label) $i = -1; for ($k = 0; $k -lt $run.Count; $k++) { if ($run[$k] -match ("DUMP label=" + $label + '(\s|$)')) { $i = $k; break } }; for ($k = $i + 1; $k -lt $run.Count; $k++) { if ($run[$k] -match 'terminal dump: (\d+)x(\d+)') { return [int]$Matches[1] } } }
+  $cb = [int](@(& $colsOf 'font-base' | Where-Object { $null -ne $_ })[-1]); $cu = [int](@(& $colsOf 'font-up' | Where-Object { $null -ne $_ })[-1])
   Check 'place' 'a bigger font gives fewer columns (the shell is told the new size)' ($cb -gt 0 -and $cu -gt 0 -and $cu -lt $cb) "$cb -> $cu columns"
   $mv = @($run | Where-Object { $_ -match 'MOVING in=' } | ForEach-Object { Strip $_ })
   Check 'place' 'dragging near the top-left corner snaps flush into it (no gap)' ($mv.Count -ge 1 -and $mv[0] -match "in=5,7 out=0,0,\d+,\d+ handled=1") ($mv[0])
@@ -1096,7 +1096,15 @@ function Input-Once([string[]]$extra) {
     $dx = ($s2.WL + [int](5 * $dpr)) - $s2.L
     Drag-To $gx $gy ($gx + $dx) $gy
     $s3 = Now-State
-    Check 'input' 'a real drag that ends 5 px from the left screen edge snaps the window to the margin (8 px)' ([Math]::Abs($s3.L - ($s3.WL + $margin)) -le 2 -and [Math]::Abs($s3.T - $s2.T) -le 3) ("left " + ($s3.L - $s3.WL) + " px from the work area, top moved " + ($s3.T - $s2.T))
+    # a window that is also near the top or bottom of the work area (within the corner zone: 3 x the snap distance plus the margin) is pulled flush into
+    # that corner; otherwise it keeps the margin along the left edge only
+    $zone = [int](16 * $dpr) * 3 + $margin
+    $nearV = ([Math]::Abs($s2.T - $s2.WT) -le $zone) -or ([Math]::Abs($s2.WB - $s2.B) -le $zone)
+    if ($nearV) {
+      Check 'input' 'a real drag that ends 5 px from the left screen edge, near the top or bottom, goes flush into that corner (no gap)' ([Math]::Abs($s3.L - $s3.WL) -le 2 -and (([Math]::Abs($s3.T - $s3.WT) -le 2) -or ([Math]::Abs($s3.WB - $s3.B) -le 2))) ("left " + ($s3.L - $s3.WL) + " px, top " + ($s3.T - $s3.WT) + " px, bottom " + ($s3.WB - $s3.B) + " px from the work area")
+    } else {
+      Check 'input' 'a real drag that ends 5 px from the left screen edge snaps the window to the margin (8 px)' ([Math]::Abs($s3.L - ($s3.WL + $margin)) -le 2 -and [Math]::Abs($s3.T - $s2.T) -le 3) ("left " + ($s3.L - $s3.WL) + " px from the work area, top moved " + ($s3.T - $s2.T))
+    }
     $gx = $s3.L + [int](300 * $dpr); $gy = $s3.T + [int](10 * $dpr)
     $dy = ($s3.WT + [int](4 * $dpr)) - $s3.T
     Drag-To $gx $gy $gx ($gy + $dy)
@@ -1276,10 +1284,12 @@ function Snap-Monitor($m, $others) {
       $ex = if ($side -eq 'left') { $m.L } else { $m.R - 1 }
       $ey = $m.T + [int](($m.B - $m.T) / 2)
       $joined = @(Get-Monitors | Where-Object { (($side -eq 'left' -and $_.R -eq $m.L) -or ($side -eq 'right' -and $_.L -eq $m.R)) -and $_.T -le $ey -and $_.B -gt $ey }).Count -gt 0
+      $tiledBefore = @(Cut $log $n | Where-Object { $_ -match 'tiled to the' }).Count
       Drag-Mouse $gx $gy $ex $ey
       $s9 = Last-State @(Cut $log $n)
       if ($joined) {
-        Check 'snap' "$name`: at the $side edge, where another monitor continues, the window is not tiled (the cursor just crosses over)" (([Math]::Abs(($s9.R - $s9.L) - $w0) -le 3) -and ([Math]::Abs(($s9.B - $s9.T) - $h0) -le 3)) ("window {0},{1},{2},{3}" -f $s9.L, $s9.T, $s9.R, $s9.B)
+        # (the window may land on the other monitor and take its scaling, so its size is not compared: what counts is that nothing was tiled)
+        Check 'snap' "$name`: at the $side edge, where another monitor continues, the window is not tiled (the cursor just crosses over)" (@(Cut $log $n | Where-Object { $_ -match 'tiled to the' }).Count -eq $tiledBefore) ("window {0},{1},{2},{3}" -f $s9.L, $s9.T, $s9.R, $s9.B)
         continue
       }
       $halfW = [int](($m.R - $m.L) / 2)
@@ -1995,7 +2005,7 @@ function Auto-Scale([int]$percent, [scriptblock]$tests) {
     Write-Host "reached: $percent% (letting Windows settle for 8 s)"
     Start-Sleep 8
     $script:CheckTag = " [main screen $percent%]"
-    try { & $tests } finally { $script:CheckTag = '' }
+    try { & $tests } catch { Write-Host "a test in this state stopped with an error: $_" } finally { $script:CheckTag = '' }
   } finally {
     [void](Set-DisplayScale $primary.L $primary.T $orig.Percent)
     Start-Sleep 5
@@ -2034,7 +2044,7 @@ function Auto-Taskbar([string]$tag, [int]$edge, [scriptblock]$tests) {
     Write-Host "reached: taskbar $tag (letting Windows settle for 8 s)"
     Start-Sleep 8
     $script:CheckTag = " [taskbar $tag]"
-    try { & $tests } finally { $script:CheckTag = '' }
+    try { & $tests } catch { Write-Host "a test in this state stopped with an error: $_" } finally { $script:CheckTag = '' }
   } finally {
     Set-ItemProperty -Path $k -Name Settings -Value $orig
     Stop-Process -Name explorer -Force -ErrorAction SilentlyContinue
@@ -2146,7 +2156,8 @@ function Suite-GameSession {
     Check 'gamesession' 'HUDshell is drawn over the game (its area looks different with it shown and hidden by Ctrl+Alt+V)' ($avg -gt 8) "mean difference $avg of 255 per colour"
     Shot 'game-overlay' $st.L $st.T $st.R $st.B
     Check 'gamesession' 'the show / hide hotkey worked while the game was in front, and the game kept the keyboard' ([GT]::ForegroundPid() -eq $gamePid)
-    # click-through: the window under HUDshell's own pixels is the game's
+    # click-through: the window under HUDshell's own pixels is the game's (the test window starts interactive, so click-through is switched on first)
+    [GT]::Hotkey(0x54); Start-Sleep -Milliseconds 1200
     Check 'gamesession' 'click-through is on: the window under HUDshell''s pixels is the game''s, so clicks reach the game' ([GT]::PidAt($cx, $cy) -eq $gamePid) ("process under the point: " + $(if ([GT]::PidAt($cx, $cy) -eq $gamePid) { 'the game' } else { 'something else' }))
     # grab and release: HUDshell takes the keyboard, then gives it back to the game
     [GT]::Hotkey(0x47); Start-Sleep -Milliseconds 1800
@@ -2161,7 +2172,8 @@ function Suite-GameSession {
     [GT]::Hotkey(0x54); Start-Sleep -Milliseconds 1200; [GT]::Hotkey(0x54); Start-Sleep -Milliseconds 1200
     Check 'gamesession' 'the click-through hotkey (Ctrl+Alt+T) works with the game in front, twice, and the game is still in front' ((@(Cut $log $nn | Where-Object { $_ -match 'click_through setting = ' }).Count -eq 2) -and ([GT]::ForegroundPid() -eq $gamePid))
     # frame times with and without HUDshell (PresentMon needs administrator rights: one prompt, which the person accepts)
-    if ($pm) {
+    if ($env:HUDSHELL_GAME_NOFT -eq '1') { Write-Host 'frame times left out (HUDSHELL_GAME_NOFT=1)' }
+    elseif ($pm) {
       Write-Host ""
       Say 'A Windows prompt will ask to allow PresentMon (frame-time tool). Accept it (Yes). Then keep your hands off while it measures: 3 x 60 seconds.'
       $csv = Join-Path $scratch 'presentmon.csv'
@@ -2190,9 +2202,10 @@ function Suite-GameSession {
         if ($rows.Count -gt 0) {
           $cols = $rows[0].PSObject.Properties.Name
           $ftCol = $cols | Where-Object { $_ -in 'MsBetweenPresents', 'FrameTime', 'msBetweenPresents' } | Select-Object -First 1
-          $tCol = $cols | Where-Object { $_ -in 'TimeInSeconds', 'CPUStartTime', 'Time' } | Select-Object -First 1
+          $tCol = $cols | Where-Object { $_ -in 'TimeInSeconds', 'TimeInMs', 'CPUStartTime', 'Time' } | Select-Object -First 1
+          $tScale = if ($tCol -eq 'TimeInMs') { 0.001 } else { 1.0 }
           if ($ftCol -and $tCol) {
-            $slice = { param($from, $to) $f = ($from - $capT0).TotalSeconds; $e = ($to - $capT0).TotalSeconds; @($rows | Where-Object { [double]$_.$tCol -ge $f -and [double]$_.$tCol -le $e } | ForEach-Object { [double]$_.$ftCol }) }
+            $slice = { param($from, $to) $f = ($from - $capT0).TotalSeconds; $e = ($to - $capT0).TotalSeconds; @($rows | Where-Object { ([double]$_.$tCol * $tScale) -ge $f -and ([double]$_.$tCol * $tScale) -le $e } | ForEach-Object { [double]$_.$ftCol }) }
             $A = Frame-Stats (& $slice $capT0.AddSeconds(8) $aEnd); $B = Frame-Stats (& $slice $bStart $bEnd); $C = Frame-Stats (& $slice $cStart $cEnd)
             $fmt = { param($x) if ($x) { "{0} fps mean, {1} fps 1% low, {2} ms mean ({3} frames)" -f $x.Fps, $x.Low1Fps, $x.MeanMs, $x.Frames } else { 'too few frames' } }
             Check 'gamesession' ('frame times without HUDshell: ' + (& $fmt $A)) ($null -ne $A)
@@ -2213,6 +2226,16 @@ function Suite-GameSession {
 # ---- everything that needs a person or the computer's own state, in one sitting (MANUAL) ------------------------------------------------------
 # Order: layouts and IME, scaling 200% once more, sleep and resume, a real game with frame times, then (with -Sandbox) the real prompts through Claude
 # Code and Codex. The monitor unplug and the taskbar states were done already (`hardware`). Nothing here changes a setting by itself.
+# Run the named suites in the current state, each on its own (one that stops with an error does not skip the others).
+# HUDSHELL_EV_ONLY="dpi,snap" runs only those (to repeat part of a state without the rest).
+function Run-State([string[]]$names) {
+  $only = @(($env:HUDSHELL_EV_ONLY -split ',') | ForEach-Object { $_.Trim().ToLower() } | Where-Object { $_ })
+  foreach ($n in $names) {
+    if ($only.Count -gt 0 -and $only -notcontains $n.ToLower()) { continue }
+    try { & ('Suite-' + $n) } catch { Write-Host "suite $n stopped with an error: $_" }
+  }
+}
+
 function Suite-Everything {
   Write-Host "=== everything: layouts and IME, scalings, taskbar edges, sleep and resume, a real game, real prompts ==="
   $skip = @(($env:HUDSHELL_HW_SKIP -split ',') | ForEach-Object { $_.Trim().ToLower() } | Where-Object { $_ })
@@ -2234,11 +2257,11 @@ function Suite-Everything {
     } finally { $script:ImeHkl = $null; if ($installed) { Remove-ImeAfterTest } }
   }
   if ($skip -notcontains 'scaling') {
-    foreach ($pct in 175, 200, 225) { Auto-Scale $pct { Suite-Place; Suite-Dpi } }
+    foreach ($pct in 175, 200, 225) { Auto-Scale $pct { Run-State 'Place', 'Dpi' } }
   }
   if ($skip -notcontains 'taskbar') {
-    Auto-Taskbar 'on the left' 0 { Suite-MaxWork; Suite-Place; Suite-Snap }
-    Auto-Taskbar 'on the top' 1 { Suite-MaxWork; Suite-Place; Suite-Snap }
+    Auto-Taskbar 'on the left' 0 { Run-State 'MaxWork', 'Place', 'Snap' }
+    Auto-Taskbar 'on the top' 1 { Run-State 'MaxWork', 'Place', 'Snap' }
   }
   if ($skip -notcontains 'sleep') {
     Write-Host ""
@@ -2319,7 +2342,7 @@ function Hw-State([string]$tag, [string]$prompt, [scriptblock]$reached, [int]$ti
   Write-Host "reached: $tag (letting Windows settle for 8 s; keep your hands off the keyboard and mouse from here on)"
   Start-Sleep 8
   $script:CheckTag = " [$tag]"
-  try { & $tests } finally { $script:CheckTag = '' }
+  try { & $tests } catch { Write-Host "a test in this state stopped with an error: $_" } finally { $script:CheckTag = '' }
 }
 
 # The maximize and the half tiles with maximize_area = work: they must stop at the taskbar. Real mouse. Needs a taskbar that is visible on the primary monitor.
@@ -2397,7 +2420,9 @@ function Suite-SleepResume {
     Start-Sleep 15
     $stampBefore = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
     Add-Type -AssemblyName System.Windows.Forms
-    [void][System.Windows.Forms.Application]::SetSuspendState([System.Windows.Forms.PowerState]::Suspend, $false, $false)
+    Add-Type -MemberDefinition '[DllImport("powrprof.dll", SetLastError = true)] public static extern bool SetSuspendState(bool hibernate, bool force, bool disableWakeEvent);' -Name Power -Namespace HudTest -ErrorAction SilentlyContinue
+    $slept = [HudTest.Power]::SetSuspendState($false, $true, $false)
+    Write-Host "SetSuspendState returned $slept"
     # back here once the computer is awake (the script was suspended with everything else)
     Start-Sleep 20
     $gap = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() - $stampBefore

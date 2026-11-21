@@ -11,6 +11,46 @@ suite had been run on it. CI (the `static` suite on GitHub's `windows-latest`) f
 wrong pane order. After the fix (00765f1) CI passed: **66 unit tests pass** and the release exe is 1.19 MB. That was **all** that had run for
 these features at the time; the desktop suites were run afterwards (see the latest full run below).
 
+## The rest of the manual tests (2026-11-21): layouts, IME, scalings, taskbar edges, a real game, sleep, real prompts
+
+**Final full run after all of it (`scripts/test-all.ps1`, no sandbox): 539 pass, 0 fail, 3 warnings** (the two intentional `autotest` skips and the AltGr+Q limit; 80 unit tests; clippy clean; the taskbar was
+visible at the bottom and the scaling 100% / 150% during the run). Per suite: static 16, keys 6, width 3, hideshow 3, clickfocus 3, clipboard 3, autotest 22, ui 33, scrollback 8, ghost 14, attention 10, policy 12,
+place 28, dpi 9, text 13, reload 9, restore 7, recover 6, windows 19, winrestore 9, winmove 11, wvbounds 3, altmove 3, gamepos 8, tabsedit 6, tabsui 4, tileoff 2, costwin 5, qol 16, sessions 12, shells 34, layout 35,
+input 26, snap 64, windowsnap 10, kbd 14, cost 5, release 20, config 24, soak 4.
+
+One sitting run by the script (`-Suite everything`): it set the display scaling and the taskbar edge, loaded keyboard layouts and installed the Japanese language feature
+itself, and put everything back (each restore was checked). The person only accepted Windows prompts and brought the game to the front.
+
+- **Keyboard layouts (`kbdany`).** Russian (the Cyrillic keys typed the characters Windows lists for them) and Swedish passed; so did the Japanese keyboard layout. The Chinese and Korean layouts could not be
+  switched on in the test window without changing settings (warnings). The layouts the test loaded were unloaded again.
+- **Japanese IME.** With the Japanese language feature installed through an elevated prompt, typing `nihongo` and converting arrived in the terminal as the three characters of the word for Japanese
+  (nihongo): real IME composition works in HUDshell. The language list was restored exactly (checked: en-CA before and after) and the feature removed through a second prompt (the removal itself was not
+  separately verified). Chinese and Korean input methods: not tested.
+- **Scalings set by the script (main screen at 175%, 200%, 225%; Windows offers nothing above 225% for it).** `place` passed (11 checks each, including the size hotkey that had failed at 200%) and `dpi` passed
+  (9 checks each). The main screen was put back at 100% and checked each time. (A first pass of `dpi` and `snap` did not run: see the script defect below.)
+- **Taskbar on the left and on the top (set through the registry; this Windows build honours it).** `maxwork` (3) and `place` (11) passed in both. `snap` passed 62 checks in each and failed 2 in each: a real
+  defect, below. The original taskbar setting was restored and checked (byte for byte) both times.
+- **A real game, borderless, found in front by itself (its name is not recorded).** Passed: HUDshell did not take the keyboard from the game when it appeared; it is drawn over the game (its area
+  differs from the same area with it hidden); the show / hide hotkey works with the game in front; Ctrl+Alt+G takes the keyboard (typing reaches the terminal) and the second press gives it back to the very same game
+  window; the click-through hotkey works twice with the game in front. One check failed because of my test (it started the window interactive, where click-through is off by design); it was fixed but **not re-run
+  against the game** (the person was away). **Frame times** (PresentMon 2.6.0, signed by Intel; the scene was capped at 30 fps): without HUDshell 1940 frames, mean 33.33 ms (30.0 fps), 1% low 27.2 fps; HUDshell shown
+  and idle 1740 frames, 33.33 ms, 1% low 27.1 fps; HUDshell shown with a shell printing flat out 1740 frames, 33.33 ms, 1% low 26.6 fps. No difference is visible, but a frame cap hides small costs.
+- **Sleep and resume: not proven.** The request returned success but Windows entered away mode instead of sleeping: `powercfg /requests` (read only, elevated) showed a streaming program holding display, system
+  and away-mode requests, and a USB audio stream in use. The shells and windows stayed healthy through that non-sleep (this says nothing about real sleep). The test now calls the power API with force; it needs
+  that program closed and no audio.
+- **Real prompts through Claude Code and Codex (`real`): 2 of 2 checks pass** (the run reached the end; no prompt was missing). The screen dumps were not re-read line by line.
+
+**Defects found by this sitting.**
+1. *Corner snapping pulled a window back when it was dragged past an edge to another screen (real, in HUDshell).* The corner zone was measured one-sidedly, so a window far beyond an edge (up and to the left of a monitor,
+   on its way to the monitor next to it) still counted as near that corner and was pulled flush into it; and the screen used for the snap was chosen from where the window was, not from where the drag was heading. Seen as
+   the window stuck in the top-left corner of the strip monitor when dragged from it to the primary monitor, with the taskbar visible at the bottom (the earlier runs with the taskbar hidden did not hit it). Fixed
+   (distances are absolute, the screen is picked from the unsnapped position; unit-tested); `snap` on every monitor and `input` pass after it (the two remaining failures were test faults, item 3).
+2. *A comparison in the `place` test aborted the rest of each scaling / taskbar state* (a script defect: it compared arrays at scalings other than 100%). That is why `dpi` and `snap` seemed to be missing in the first
+   pass; fixed, and every suite in a state now runs on its own.
+3. *Two test expectations were wrong:* the `input` check on the 150% monitor assumed the window keeps the 8 px margin at the left edge, but with the taskbar visible the window can be near the bottom and is then pulled into
+   the corner as designed (the check now accepts that); the `snap` check that a window dropped on an edge with another monitor beside it is not tiled compared sizes, but the window can land on the other monitor and take its
+   scaling (it now checks that nothing was tiled).
+
 ## Hardware session (2026-11-21): taskbar, scaling, real unplug; three defects found and fixed
 
 One manual sitting (`scripts	est-all.ps1 -Suite hardware`, the person changing the taskbar and scaling in Windows' settings and unplugging a cable; the

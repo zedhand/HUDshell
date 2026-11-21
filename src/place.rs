@@ -120,10 +120,11 @@ pub fn corner_snap(win: Rect, work: Rect, zone: i32) -> Option<Rect> {
         return None;
     }
     let (w, h) = (win.w(), win.h());
-    let left = win.l - work.l <= zone;
-    let right = work.r - win.r <= zone;
-    let top = win.t - work.t <= zone;
-    let bottom = work.b - win.b <= zone;
+    // near an edge means close to it on either side: a window far beyond an edge (on its way to another screen) is not near it
+    let left = (win.l - work.l).abs() <= zone;
+    let right = (work.r - win.r).abs() <= zone;
+    let top = (win.t - work.t).abs() <= zone;
+    let bottom = (work.b - win.b).abs() <= zone;
     if !(left || right) || !(top || bottom) {
         return None;
     }
@@ -243,6 +244,12 @@ impl SnapDrag {
         Self { virt: start, last: start }
     }
 
+    /// Where the window would be for this proposal without any snapping (used to pick the screen the drag is heading for).
+    pub fn peek(&self, proposed: Rect) -> Rect {
+        let (dx, dy) = (proposed.l - self.last.l, proposed.t - self.last.t);
+        Rect::new(self.virt.l + dx, self.virt.t + dy, self.virt.r + dx, self.virt.b + dy)
+    }
+
     /// The rectangle to apply for the proposed one. `others` are the other HUDshell windows the dragged one may snap to; a screen edge
     /// wins over a window on the same axis.
     pub fn step(&mut self, proposed: Rect, work: Rect, distance: i32, margin: i32, others: &[Rect]) -> Rect {
@@ -304,6 +311,17 @@ mod tests {
         assert_eq!((applied.r, applied.b), (1920, 1040), "flush into the corner, no margin: {applied:?}");
         assert_eq!((applied.w(), applied.h()), (640, 360), "the size never changes");
         assert!(touches_corner(applied, WORK));
+    }
+
+    #[test]
+    fn a_window_far_beyond_an_edge_is_not_pulled_into_that_corner() {
+        let work = Rect::new(2560, 913, 4480, 1345);
+        // up and to the left of the work area, on its way to another screen: not near its top-left corner
+        assert_eq!(corner_snap(Rect::new(1000, 400, 1640, 760), work, 56), None);
+        assert_eq!(corner_snap(Rect::new(2530, 880, 3170, 1240), work, 56), Some(Rect::new(2560, 913, 3200, 1273)), "a few pixels beyond the edge still snaps");
+        assert_eq!(corner_snap(Rect::new(2363, 849, 3003, 1209), work, 56), None, "200 pixels beyond it does not");
+        // below and to the right
+        assert_eq!(corner_snap(Rect::new(5200, 1500, 5840, 1860), work, 56), None);
     }
 
     #[test]

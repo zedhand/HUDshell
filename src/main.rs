@@ -818,6 +818,19 @@ unsafe fn work_area(hwnd: HWND) -> place::Rect {
     }
 }
 
+/// Work area of the monitor a rectangle is mostly on (the nearest one when it is on none).
+unsafe fn work_area_of(r: place::Rect) -> place::Rect {
+    use windows::Win32::Graphics::Gdi::{GetMonitorInfoW, MonitorFromRect, MONITORINFO, MONITOR_DEFAULTTONEAREST};
+    let rc = RECT { left: r.l, top: r.t, right: r.r, bottom: r.b };
+    let mon = unsafe { MonitorFromRect(&rc, MONITOR_DEFAULTTONEAREST) };
+    let mut mi = MONITORINFO { cbSize: std::mem::size_of::<MONITORINFO>() as u32, ..Default::default() };
+    if unsafe { GetMonitorInfoW(mon, &mut mi) }.as_bool() {
+        to_rect(&mi.rcWork)
+    } else {
+        place::Rect::new(0, 0, 1920, 1080)
+    }
+}
+
 /// Scale a 96-dpi pixel value to this window's monitor.
 unsafe fn scaled(hwnd: HWND, px: u32) -> i32 {
     let dpi = unsafe { GetDpiForWindow(hwnd) }.max(96);
@@ -976,8 +989,10 @@ unsafe fn snap_moving(hwnd: HWND, r: &mut RECT) -> bool {
         }
     }
     let c = cfg();
-    let work = unsafe { work_area(hwnd) };
     let proposed = to_rect(r);
+    // the screen the drag is heading for: the one the window would be on without snapping (not the one it was last put on)
+    let ahead = lock_or_recover(&SNAP_DRAG).as_ref().map(|d| d.peek(proposed)).unwrap_or(proposed);
+    let work = unsafe { work_area_of(ahead) };
     let (dist, margin) = unsafe { (scaled(hwnd, c.snap_distance), scaled(hwnd, c.snap_margin)) };
     let others = lock_or_recover(&DRAG_OTHERS).clone();
     let after = lock_or_recover(&SNAP_DRAG)

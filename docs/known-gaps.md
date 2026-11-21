@@ -7,22 +7,22 @@ Everything here is either untested or not implemented. Verified behaviour is in 
 | Item | What it takes |
 |---|---|
 | Pane frames and names drawn over the edge cells of a pane; the small-window fallback on a monitor that is not at 100% | by hand |
-| Scalings other than 100%, 125%, 150% and 200% (tested: 100% and 150% monitors side by side, and the main screen at 125% and 200%; the main screen at 200% before the size-hotkey fix below, which was then checked by a unit test only); dragging the window across the border between them with the real mouse (the scaling change happens during the drag; the tests move the window with a function call); the settings panel's real-mouse checks at 150% (they use pixel offsets for 100%); the third (100%, 480 px high) monitor | a display at 125% / 200%, and a hand drag across |
+| Scalings other than 100%, 125%, 150%, 175%, 200% and 225% (tested: 100% and 150% monitors side by side, and the main screen at 125%, 175%, 200% and 225%, which is all Windows offers for it); the third (100%, 480 px high) monitor at another scaling | a display that offers more scalings |
 | The size saved in `config.json` is in physical pixels: if the display scaling is changed between runs, the window comes back the same number of pixels, so a different logical size | change the scaling and restart |
-| Other games; exclusive-fullscreen games (overlays cannot draw over them); anti-cheat titles | try each under normal use; stop at any warning |
-| Frame-time / FPS impact next to a running game | capture frame times with and without HUDshell |
+| Other games (one borderless game was tried 2026-11-21: see test-results); exclusive-fullscreen games (overlays cannot draw over them); anti-cheat titles beyond that one | try each under normal use; stop at any warning |
+| Frame-time / FPS impact next to a running game (measured once with PresentMon in one scene that was capped at 30 fps, which hides small costs: no difference was visible) | a scene that is not frame-capped, and a heavier game |
 | Games that capture raw mouse or controller input when focus is grabbed | observe on grab / release |
-| IME composition (CJK) | a real IME; xterm.js has open IME issues |
-| Layouts beyond German and French (tested with real key presses: accented letters, dead keys, the default hotkeys still fire); IME composition; layouts that have no key for the punctuation hotkeys (` ; ' / , . - = [ ]) | another layout installed |
+| IME composition beyond Japanese: the Microsoft Japanese IME was tested (romaji to kanji arrives in the terminal); Chinese and Korean input methods were not (their layouts cannot be switched on in a test window without changing the user's settings) | those input methods |
+| Layouts: German, French, Russian, Swedish and the Japanese keyboard layout were tested with real key presses (the characters match what Windows says each key gives); Chinese and Korean layouts could not be switched in; layouts that have no key for the punctuation hotkeys (` ; ' / , . - = [ ]) | another layout installed |
 | Claude Code / Codex permission, trust, login and update dialogs | manual walkthrough |
 | Windows versions other than build 26300 | a Windows 10 22H2 or Windows 11 24H2 VM |
 | A machine without the WebView2 runtime, Node or PowerShell 7 | a clean VM; check messages |
 | User names with spaces or non-ASCII characters | a test user profile |
-| Sleep/resume (the test exists, `sleepresume`, but was not run: it was not allowed to put the computer to sleep), remote desktop | by hand |
+| Sleep/resume: the test exists (`sleepresume`) but Windows did not really sleep (it entered away mode because a streaming program and an audio stream asked it to stay awake), so nothing was proven; remote desktop | close the streaming program and stop audio, then run `-Suite sleepresume` |
 | Long, busy sessions at low opacity over a game (readability) | judgement over real use |
 | Whether Claude Code or Codex ring the terminal bell (the census does not count BEL; they sent no OSC 9 / OSC 777 in the real run) | count BEL in the census, or configure the CLIs' own notification setting (not done: it would edit their configuration) |
 | The permission prompt about pasting clipboard text seen once during a policy run | its source was not identified; no WebView2 permission request was logged and a search found no documented Windows prompt of that kind. If it recurs, note the exact wording and the step |
-| Corner docking, size presets, edge snapping and mouse resizing with the taskbar on the left or top edge (the taskbar visible at the bottom was tested 2026-11-21; this Windows cannot move it) | a Windows version or tool that can |
+| Corner docking, size presets, snapping and tiling with the taskbar on the left or top edge (tested 2026-11-21 by setting the registry value and restarting Explorer; the original setting was restored) and visible at the bottom: all pass after one corner-snap fix; a taskbar on the right edge is untested; the secondary monitors' taskbars were not moved | the right edge |
 | Tab strip while click-through is on (clicks pass through by design) | by hand |
 | A profile's start command timing (typed 0.9 s after the shell starts; a slow profile script could miss it) | try a heavy profile |
 | Clicking an OSC 8 link, the ghost tray menu item, the tray notification for attention requests, keyboard scrollback inside the CLIs | by hand |
