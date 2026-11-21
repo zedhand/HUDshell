@@ -65,7 +65,9 @@ impl Shells {
         self.order.iter().find(|e| e.id == id).map(|e| e.profile.as_str())
     }
 
-    /// Add a shell at the end. The first one becomes the active shell. `None` when the window is full.
+    /// Add a shell at the end with the next id of this list (the unit tests use it; the program gives ids that are unique across windows).
+    /// The first one becomes the active shell. `None` when the window is full.
+    #[allow(dead_code)]
     pub fn add(&mut self, profile: &str) -> Option<u32> {
         if self.order.len() >= MAX_SHELLS {
             return None;

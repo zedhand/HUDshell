@@ -48,7 +48,9 @@
 
   const termHost = document.getElementById('term');
   const views = new Map();   // session id -> view
-  let activeId = 1;
+  // The id of the shell this page starts with: 1 in the first window, the detached shell's id in a window made by detaching.
+  const firstId = Number(injected.first) || 1;
+  let activeId = firstId;
   const active = () => views.get(activeId);
   // Every shell-bound message names its session.
   const sendS = (id, o) => send(Object.assign({ s: id }, o));
@@ -422,7 +424,7 @@
   }
 
   // ---- shell list: tab strip, quick overlay, profile picker ---------------------------------------
-  const tabs = { list: [], active: 1, mode: 'auto', profiles: [] };
+  const tabs = { list: [], active: firstId, mode: 'auto', profiles: [] };
   const tabsEl = document.getElementById('tabs');
   const shellsEl = document.getElementById('shells');
   const pickerEl = document.getElementById('picker');
@@ -466,7 +468,8 @@
   }
   tabsEl.addEventListener('mousedown', (e) => {
     const t = e.target.closest('.tab');
-    if (t) send({ t: 'switch', s: Number(t.dataset.id) });
+    // Shift+click moves that shell into a window of its own; a plain click switches to it.
+    if (t) send({ t: e.shiftKey ? 'detach' : 'switch', s: Number(t.dataset.id) });
   });
   let overlayTimer;
   function listText() {
@@ -544,6 +547,7 @@
       case 'overlay': flashOverlay(''); break;
       case 'confirm': flashOverlay('press the close key again to close shell ' + m.n); break;
       case 'full': flashOverlay('a window holds at most 9 shells'); break;
+      case 'flash': flashOverlay(String(m.text || '')); break;
       case 'picker': openPicker(); break;
       case 'reset':
         // The last shell was closed: start a fresh one in the same tab.
@@ -786,8 +790,8 @@
   window.addEventListener('focus', () => { const a = active(); if (a) a.term.focus(); });
 
   // ---- start: session 1 exists from the beginning ------------------------------------------------
-  const first = createView(1);
-  showView(1);
+  const first = createView(firstId);
+  showView(firstId);
   first.lastSize = first.term.cols + 'x' + first.term.rows;
   // Report what was really applied (used by the tests to prove config values take effect).
   const t1 = first.term;
@@ -796,6 +800,6 @@
          copyOnSelect, rightClick, osc52: osc52Mode, linkHandler: !!t1.options.linkHandler,
          background: t1.options.theme && t1.options.theme.background,
          foreground: t1.options.theme && t1.options.theme.foreground });
-  sendS(1, { t: 'ready', cols: t1.cols, rows: t1.rows });
+  sendS(firstId, { t: 'ready', cols: t1.cols, rows: t1.rows });
   send({ t: 'tabsneeded' });
 })();

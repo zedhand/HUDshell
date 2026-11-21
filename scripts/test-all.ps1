@@ -33,7 +33,7 @@ New-Item -ItemType Directory -Force $scratch | Out-Null
 $env:HUDSHELL_TEST_DIR = $scratch
 if ($Sandbox) { $env:HUDSHELL_SANDBOX = $Sandbox } else { $env:HUDSHELL_SANDBOX = $scratch }
 $Suite = @($Suite | ForEach-Object { $_ -split ',' } | Where-Object { $_ })
-$want = if ($Suite -contains 'all') { @('static', 'keys', 'width', 'hideshow', 'clickfocus', 'clipboard', 'autotest', 'ui', 'scrollback', 'ghost', 'attention', 'policy', 'place', 'dpi', 'text', 'reload', 'restore', 'recover', 'qol', 'sessions', 'shells', 'layout', 'input', 'snap', 'kbd', 'cost', 'release', 'config', 'soak') + $(if ($Sandbox) { 'real' } else { @() }) } else { $Suite }
+$want = if ($Suite -contains 'all') { @('static', 'keys', 'width', 'hideshow', 'clickfocus', 'clipboard', 'autotest', 'ui', 'scrollback', 'ghost', 'attention', 'policy', 'place', 'dpi', 'text', 'reload', 'restore', 'recover', 'windows', 'winrestore', 'qol', 'sessions', 'shells', 'layout', 'input', 'snap', 'windowsnap', 'kbd', 'cost', 'release', 'config', 'soak') + $(if ($Sandbox) { 'real' } else { @() }) } else { $Suite }
 
 $script:R = New-Object System.Collections.Generic.List[object]
 # Appended to every check name while a suite runs a second time on another monitor.
@@ -1344,6 +1344,135 @@ function Suite-Recover {
   Check 'recover' 'HUDshell itself kept running until the script ended it' (@($r | Where-Object { $_ -match 'AUTOTEST: finished' }).Count -eq 1)
 }
 
+# The "WINDOWS label=<l> n=<count> ..." line of the log for a label: the number of windows and one entry per window.
+function Get-Windows($lines, [string]$label) {
+  $l = @($lines | Where-Object { $_ -match ('WINDOWS label=' + [regex]::Escape($label) + ' n=') }) | Select-Object -Last 1
+  if (-not $l) { return $null }
+  $n = [int]([regex]::Match($l, ' n=(\d+)').Groups[1].Value)
+  $wins = @()
+  foreach ($part in (($l -split ' \| ') | Select-Object -Skip 1)) {
+    $m = [regex]::Match($part, '^(\d+):rect=(-?\d+),(-?\d+),(-?\d+),(-?\d+):shells=([\d,]*):active=(\d+):visible=(\w+):ghost=(\w+)')
+    if ($m.Success) { $wins += [pscustomobject]@{ Serial = [int]$m.Groups[1].Value; L = [int]$m.Groups[2].Value; T = [int]$m.Groups[3].Value; R = [int]$m.Groups[4].Value; B = [int]$m.Groups[5].Value; Shells = $m.Groups[6].Value; Active = [int]$m.Groups[7].Value; Visible = ($m.Groups[8].Value -eq 'true'); Ghost = ($m.Groups[9].Value -eq 'true') } }
+  }
+  return [pscustomobject]@{ N = $n; Wins = $wins }
+}
+
+function Suite-Windows {
+  Write-Host "=== windows: a shell moved into a window of its own, several windows in one process (no OS input) ==="
+  $r = Run-Scenario @('--term', '--windowstest', '--delay', '2') 150000
+  $b = Get-Windows $r 'before'; $d = Get-Windows $r 'after-detach'; $nx = Get-Windows $r 'after-next'
+  $ro = Get-Windows $r 'refused-only-shell'; $ac = Get-Windows $r 'after-close'
+  $f4 = Get-Windows $r 'four-shells'; $w4 = Get-Windows $r 'four-windows'; $cr = Get-Windows $r 'cap-refused'
+  Check 'windows' 'before the detach: one window holding shells 1 and 2' ($b -and $b.N -eq 1 -and $b.Wins[0].Shells -eq '1,2') $(if ($b) { "n=$($b.N) shells=$($b.Wins[0].Shells)" } else { 'no state' })
+  Check 'windows' 'both shells ran in it before' ((Dump-Has $r 'w-before-1' 'AAA-ONE-BEFORE') -and (Dump-Has $r 'w-before-2' 'BBB-TWO-BEFORE'))
+  Check 'windows' 'detaching shell 2: two windows, window 1 keeps shell 1, window 2 holds shell 2' ($d -and $d.N -eq 2 -and $d.Wins.Count -eq 2 -and $d.Wins[0].Shells -eq '1' -and $d.Wins[1].Shells -eq '2') $(if ($d) { ($d.Wins | ForEach-Object { "w$($_.Serial)=[$($_.Shells)]" }) -join ' ' } else { 'no state' })
+  Check 'windows' 'the log says so' (@($r | Where-Object { $_ -match 'shell 2 detached into window 2' }).Count -eq 1)
+  Check 'windows' 'the two windows are two different rectangles on screen (the new one is offset from the old one)' ($d -and $d.Wins.Count -eq 2 -and (($d.Wins[0].L -ne $d.Wins[1].L) -or ($d.Wins[0].T -ne $d.Wins[1].T)) -and (($d.Wins[0].R - $d.Wins[0].L) -eq ($d.Wins[1].R - $d.Wins[1].L)))
+  Check 'windows' 'the moved shell kept running and was repainted in its new window (its earlier output is on screen there)' (Dump-Has $r 'w-moved' 'BBB-TWO-BEFORE')
+  Check 'windows' 'the old window still shows shell 1 and not the moved one' ((Dump-Has $r 'w-rest' 'AAA-ONE-BEFORE') -and -not (Dump-Has $r 'w-rest' 'BBB-TWO-BEFORE'))
+  Check 'windows' 'output reaches the right window: shell 2 prints in window 2, shell 1 in window 1, neither in the other' ((Dump-Has $r 'w-two-after' 'AFTER-DETACH-TWO') -and -not (Dump-Has $r 'w-two-after' 'AFTER-DETACH-ONE') -and (Dump-Has $r 'w-one-after' 'AFTER-DETACH-ONE') -and -not (Dump-Has $r 'w-one-after' 'AFTER-DETACH-TWO'))
+  Check 'windows' 'the next-window hotkey action makes window 2 the active one' (@($r | Where-Object { $_ -match 'active window -> ' }).Count -ge 1 -and $nx -and $nx.N -eq 2)
+  Check 'windows' "a window's only shell cannot be detached (nothing changes)" ((@($r | Where-Object { $_ -match "detach refused: a window's only shell stays where it is" }).Count -eq 1) -and $ro -and $ro.N -eq 2)
+  Check 'windows' 'closing the last shell of window 2 closes that window: one window is left, holding shell 1' ($ac -and $ac.N -eq 1 -and $ac.Wins[0].Shells -eq '1') $(if ($ac) { "n=$($ac.N) shells=$($ac.Wins[0].Shells)" } else { 'no state' })
+  Check 'windows' 'four shells in the first window, then three detached: four windows' (($f4 -and $f4.N -eq 1 -and ($f4.Wins[0].Shells -split ',').Count -eq 5) -and ($w4 -and $w4.N -eq 4)) $(if ($w4) { "n=$($w4.N)" } else { 'no state' })
+  Check 'windows' 'a fifth window is refused at the cap of four, and the shell stays where it was' ($cr -and $cr.N -eq 4 -and (@($r | Where-Object { $_ -match 'detach refused: at most 4 windows' }).Count -eq 1))
+  $pre = Get-Windows $r 'pre-hotkey'; $post = Get-Windows $r 'post-hotkey'
+  $cur = if ($pre) { [int]([regex]::Match(@($r | Where-Object { $_ -match 'WINDOWS label=pre-hotkey ' })[-1], 'current_window=(\d+)').Groups[1].Value) } else { 0 }
+  $grew = @(); $same = @()
+  if ($pre -and $post) { foreach ($w in $post.Wins) { $o = $pre.Wins | Where-Object { $_.Serial -eq $w.Serial }; if ($o) { if (($w.Shells -split ',').Count -eq (($o.Shells -split ',').Count + 1)) { $grew += $w.Serial } elseif ($w.Shells -eq $o.Shells) { $same += $w.Serial } } } }
+  Check 'windows' 'a hotkey acts on the active window, not on the first: the new-shell hotkey added a shell to the active window only' ($pre -and $post -and $grew.Count -eq 1 -and $grew[0] -eq $cur -and $same.Count -eq ($post.Wins.Count - 1)) "active window $cur, grew: $($grew -join ','), unchanged: $($same.Count)"
+  $gA = Get-Windows $r 'ghost-all'; $gO = Get-Windows $r 'ghost-off'
+  Check 'windows' 'the tray item "Ghost all windows" puts every window in ghost mode, and a second use takes them all out' ($gA -and $gA.N -eq 4 -and @($gA.Wins | Where-Object { -not $_.Ghost }).Count -eq 0 -and $gO -and @($gO.Wins | Where-Object { $_.Ghost }).Count -eq 0)
+  $hA = Get-Windows $r 'hidden-all'; $sA = Get-Windows $r 'shown-all'
+  Check 'windows' 'the tray item "Show / hide all windows" hides every window, and a second use shows them all' ($hA -and @($hA.Wins | Where-Object { $_.Visible }).Count -eq 0 -and $sA -and @($sA.Wins | Where-Object { -not $_.Visible }).Count -eq 0)
+  Check 'windows' 'no start failures logged and the run finished' ((@($r | Where-Object { $_ -match 'FAILED to start' }).Count -eq 0) -and (@($r | Where-Object { $_ -match 'AUTOTEST: finished' }).Count -eq 1))
+}
+
+# Several windows come back at the next start (restore_session = shells): their shells, layouts and where each window was.
+function Suite-WindowsRestore {
+  Write-Host "=== winrestore: three windows are saved and come back at the next start (no OS input) ==="
+  $file = Join-Path $scratch 'session-windows.json'
+  Remove-Item -LiteralPath $file -ErrorAction SilentlyContinue
+  $args2 = @('--test-profiles', '--restore-session', 'shells', '--session-file', $file, '--delay', '2')
+  $r1 = Run-Scenario (@('--term', '--windowssave') + $args2) 120000
+  $j = $null
+  if (Test-Path -LiteralPath $file) { try { $j = Get-Content -LiteralPath $file -Raw | ConvertFrom-Json } catch { } }
+  $s1 = Get-Windows $r1 'saved'
+  Check 'winrestore' 'the first run had three windows: shells 1,2 / 3,5 / 4' ($s1 -and $s1.N -eq 3 -and (($s1.Wins | ForEach-Object { $_.Shells }) -join ' / ') -eq '1,2 / 3,5 / 4') $(if ($s1) { ($s1.Wins | ForEach-Object { $_.Shells }) -join ' / ' } else { 'no state' })
+  $names = if ($j) { (@($j.shells) -join ',') + ' / ' + (@($j.windows | ForEach-Object { (@($_.shells) -join ',') }) -join ' / ') } else { 'no file' }
+  Check 'winrestore' 'the session file lists the first window (pwsh, pwsh) and the two others (work, cmd / cmd), each with a position and size' ($j -and $names -ceq 'pwsh,pwsh / work,cmd / cmd' -and @($j.windows).Count -eq 2 -and @($j.windows | Where-Object { @($_.rect).Count -eq 4 }).Count -eq 2) $names
+  $saved = if (Test-Path -LiteralPath $file) { Get-Content -LiteralPath $file -Raw } else { '' }
+  $r2 = Run-Scenario (@('--term', '--windowsload') + $args2) 120000
+  $s2 = Get-Windows $r2 'restored'
+  Check 'winrestore' 'the next start brings all three windows back, with 2, 2 and 1 shells' ($s2 -and $s2.N -eq 3 -and (($s2.Wins | ForEach-Object { ($_.Shells -split ',').Count }) -join ',') -eq '2,2,1') $(if ($s2) { "n=$($s2.N): " + (($s2.Wins | ForEach-Object { ($_.Shells -split ',').Count }) -join ',') } else { 'no state' })
+  $j2 = $null
+  if (Test-Path -LiteralPath $file) { try { $j2 = Get-Content -LiteralPath $file -Raw | ConvertFrom-Json } catch { } }
+  $names2 = if ($j2) { (@($j2.shells) -join ',') + ' / ' + (@($j2.windows | ForEach-Object { (@($_.shells) -join ',') }) -join ' / ') } else { 'no file' }
+  Check 'winrestore' 'the restored windows have the same profiles in the same order (read back from the file written when that run ended)' ($names2 -ceq $names) $names2
+  $placed = $true
+  if ($j -and $j2) { for ($i = 0; $i -lt 2; $i++) { for ($k = 0; $k -lt 4; $k++) { if ([Math]::Abs([int]$j.windows[$i].rect[$k] - [int]$j2.windows[$i].rect[$k]) -gt 2) { $placed = $false } } } } else { $placed = $false }
+  Check 'winrestore' 'and each restored window is where it was (position and size within 2 px)' $placed
+  Check 'winrestore' 'the log says each restored window got its shells back' (@($r2 | Where-Object { $_ -match 'session restored: 2 shell' }).Count -eq 2 -or @($r2 | Where-Object { $_ -match 'session restored: ' }).Count -ge 3)
+  $r3 = Run-Scenario @('--term', '--windowsload', '--test-profiles', '--session-file', $file, '--delay', '2') 120000
+  $s3 = Get-Windows $r3 'restored'
+  Check 'winrestore' 'restore_session off (the default): one window with one shell' ($s3 -and $s3.N -eq 1 -and $s3.Wins[0].Shells -eq '1')
+  Check 'winrestore' 'no start failures logged' ((@($r1 + $r2 + $r3) | Where-Object { $_ -match 'FAILED to start' }).Count -eq 0)
+}
+
+# Real mouse: two windows (the second made by detaching a shell) are dragged next to each other, and moved as a group.
+function Suite-WindowSnap {
+  Write-Host "=== windowsnap: real mouse drags of two windows: snapping to each other and moving together - do not touch mouse/keyboard ==="
+  $m = @(Get-Monitors) | Where-Object { $_.Primary } | Select-Object -First 1
+  $dpr = $m.Dpi / 96.0
+  Stop-HUDshell
+  GTSave
+  $p = $null
+  try {
+    $n = LineCount $log
+    $at = "{0},{1}" -f ($m.WL + 200), ($m.WT + 150)
+    $p = Start-Process $dbg -ArgumentList @('--term', '--windowsnap', '--interactive', '--size', '420,260', '--at', $at, '--delay', '2') -PassThru
+    $w = $null
+    for ($i = 0; $i -lt 50 -and -not ($w -and $w.N -eq 2 -and $w.Wins.Count -eq 2); $i++) { Start-Sleep 1; $w = Get-Windows @(Cut $log $n) 'snap' }
+    Check 'windowsnap' 'two windows are open (the second made by detaching a shell)' ($w -and $w.N -eq 2 -and $w.Wins.Count -eq 2) $(if ($w) { "n=$($w.N)" } else { 'no state' })
+    if (-not ($w -and $w.Wins.Count -eq 2)) { return }
+    $w1 = $w.Wins[0]; $w2 = $w.Wins[1]
+    # window 2 sits on top of window 1, offset by 36 px; drag its top strip so that its left edge ends 8 px to the right of window 1's right
+    # edge and its top 5 px below window 1's top: it must snap flush against it and line up with its top
+    $gx = $w2.L + [int](150 * $dpr); $gy = $w2.T + [int](10 * $dpr)
+    $tl = $w1.R + [int](8 * $dpr); $tt = $w1.T + [int](5 * $dpr)
+    Drag-Mouse $gx $gy ($gx + $tl - $w2.L) ($gy + $tt - $w2.T)
+    Start-Sleep 1
+    $w = Get-Windows @(Cut $log $n) 'snap'; $w1 = $w.Wins[0]; $w2 = $w.Wins[1]
+    Check 'windowsnap' 'dragging a window to 8 px from another snaps it flush against that window (left edge on its right edge) and lines up the tops' (([Math]::Abs($w2.L - $w1.R) -le 1) -and ([Math]::Abs($w2.T - $w1.T) -le 1)) ("window 2 at {0},{1}; window 1 right {2}, top {3}" -f $w2.L, $w2.T, $w1.R, $w1.T)
+    Check 'windowsnap' 'the size did not change' ((($w2.R - $w2.L) -eq ($w1.R - $w1.L)) -and (($w2.B - $w2.T) -eq ($w1.B - $w1.T)))
+    Shot 'windows-snapped' ([Math]::Min($w1.L, $w2.L)) ([Math]::Min($w1.T, $w2.T)) ([Math]::Max($w1.R, $w2.R)) ([Math]::Max($w1.B, $w2.B))
+    # dragging window 1 by its strip: window 2 touches it, so it moves by the same amount
+    $o1 = $w1; $o2 = $w2
+    $gx = $w1.L + [int](150 * $dpr); $gy = $w1.T + [int](10 * $dpr)
+    $dx = [int](120 * $dpr); $dy = [int](90 * $dpr)
+    Drag-Mouse $gx $gy ($gx + $dx) ($gy + $dy)
+    Start-Sleep 1
+    $w = Get-Windows @(Cut $log $n) 'snap'; $w1 = $w.Wins[0]; $w2 = $w.Wins[1]
+    $m1x = $w1.L - $o1.L; $m1y = $w1.T - $o1.T; $m2x = $w2.L - $o2.L; $m2y = $w2.T - $o2.T
+    Check 'windowsnap' 'dragging window 1 moves it by the drag distance' (([Math]::Abs($m1x - $dx) -le 3) -and ([Math]::Abs($m1y - $dy) -le 3)) "moved $m1x,$m1y for a drag of $dx,$dy"
+    Check 'windowsnap' 'and the window touching it moved with it, by the same amount' (([Math]::Abs($m2x - $m1x) -le 1) -and ([Math]::Abs($m2y - $m1y) -le 1)) "window 2 moved $m2x,$m2y"
+    Check 'windowsnap' 'they still touch after the move' ([Math]::Abs($w2.L - $w1.R) -le 1)
+    Check 'windowsnap' 'the log says a touching window moved along' (@(Cut $log $n | Where-Object { $_ -match 'drag: 1 touching window\(s\) move along' }).Count -ge 1)
+    # a drag of window 2 away from window 1 by more than the snap distance: group move again (they touch), so move window 1 and then pull
+    # window 2 out to the far side to prove an untouched window is left alone
+    $o1 = $w1; $o2 = $w2
+    $gx = $w2.L + [int](150 * $dpr); $gy = $w2.T + [int](10 * $dpr)
+    Drag-Mouse $gx $gy ($gx + [int](60 * $dpr)) ($gy + [int](260 * $dpr))
+    Start-Sleep 1
+    $w = Get-Windows @(Cut $log $n) 'snap'; $w1 = $w.Wins[0]; $w2 = $w.Wins[1]
+    Check 'windowsnap' 'with the pair touching, dragging window 2 moves both again (a group)' (([Math]::Abs(($w1.L - $o1.L) - ($w2.L - $o2.L)) -le 1) -and (($w1.L - $o1.L) -ne 0))
+    Check 'windowsnap' 'no start failures logged' (@(Cut $log $n | Where-Object { $_ -match 'FAILED to start' }).Count -eq 0)
+  } finally {
+    Stop-HUDshell
+    [GT]::RestoreCursor()
+  }
+}
+
 function Suite-Dpi {
   Write-Host "=== dpi: moving the window between monitors with different scaling (no OS input) ==="
   $alt = Alt-Monitor
@@ -1580,6 +1709,9 @@ foreach ($s in $want) {
     'reload' { Suite-Reload }
     'restore' { Suite-Restore }
     'recover' { Suite-Recover }
+    'windows' { Suite-Windows }
+    'winrestore' { Suite-WindowsRestore }
+    'windowsnap' { Suite-WindowSnap }
     'input' { Suite-Input }
     'snap' { Suite-Snap }
     'kbd' { Suite-Kbd }

@@ -919,6 +919,60 @@ const SESSION_LOAD: &[(u64, &str)] = &[
     (20500, "quit"),
 ];
 
+/// `--windowstest`: shells are moved into windows of their own (detach), the shells keep running there, a window closes with its last
+/// shell, the cap of four windows is enforced, and the windows snap to each other and move as a group. See Suite-Windows.
+const WINDOWS: &[(u64, &str)] = &[
+    (1500, "cdp-focus"),
+    (2000, "resize:700,420"),
+    (3000, "shell:new"),
+    (7000, "wto:1:echo AAA-ONE-BEFORE\r"),
+    (7200, "wto:2:echo BBB-TWO-BEFORE\r"),
+    (9000, "dumps:1:w-before-1"),
+    (9300, "dumps:2:w-before-2"),
+    (10000, "winstate:before"),
+    (10500, "window:detach:2"),
+    (17000, "winstate:after-detach"),
+    (17500, "inwin:2:dumps:2:w-moved"),
+    (18000, "dumps:1:w-rest"),
+    (19000, "wto:2:echo AFTER-DETACH-TWO\r"),
+    (19200, "wto:1:echo AFTER-DETACH-ONE\r"),
+    (21000, "inwin:2:dumps:2:w-two-after"),
+    (21500, "dumps:1:w-one-after"),
+    (22500, "window:next"),
+    (22800, "winstate:after-next"),
+    (23500, "window:detach:1"),
+    (24500, "winstate:refused-only-shell"),
+    (25000, "inwin:2:shell:close"),
+    (25600, "inwin:2:shell:close"),
+    (27000, "winstate:after-close"),
+    // the cap: three more windows are fine, the fifth is refused
+    (28000, "shell:new"),
+    (31000, "shell:new"),
+    (34000, "shell:new"),
+    (37000, "shell:new"),
+    (40000, "winstate:four-shells"),
+    // the first of the three goes the way a Shift+click on a tab does: a message from the page itself
+    (40500, "js:window.chrome.webview.postMessage(JSON.stringify({t:'detach',s:5}))"),
+    (46000, "window:detach:4"),
+    (52000, "window:detach:3"),
+    (58000, "winstate:four-windows"),
+    (58500, "window:detach:6"),
+    (59500, "winstate:cap-refused"),
+    // the hotkeys act on the active window (the newest one), the tray's "all windows" items on every window
+    (60000, "winstate:pre-hotkey"),
+    (60200, "hk:22"),
+    (63000, "winstate:post-hotkey"),
+    (63500, "ghost:all"),
+    (64000, "winstate:ghost-all"),
+    (64500, "ghost:all"),
+    (65000, "winstate:ghost-off"),
+    (65500, "showhide:all"),
+    (66000, "winstate:hidden-all"),
+    (66500, "showhide:all"),
+    (67000, "winstate:shown-all"),
+    (67500, "quit"),
+];
+
 /// `--recovertest`: two shells; the runner kills the web view's browser process after the first dump (see Suite-Recover). The shells must
 /// survive, and what is typed into them afterwards must show up in the new page.
 const RECOVER: &[(u64, &str)] = &[
@@ -1000,6 +1054,46 @@ fn build_dpitest() -> &'static [(u64, &'static str)] {
     })
 }
 
+/// `--windowssave` / `--windowsload` (run with `--test-profiles --restore-session shells --session-file <path>`): the first run builds three windows
+/// (two shells, two shells, one shell) and quits; the second starts again and must come back with the same windows. See Suite-WindowsRestore.
+const WINDOWS_SAVE: &[(u64, &str)] = &[
+    (1500, "cdp-focus"),
+    (2000, "resize:700,420"),
+    (3000, "shell:new"),
+    (7000, "shell:new:work"),
+    (11000, "shell:new:cmd"),
+    (15000, "window:detach:3"),
+    (22000, "window:detach:4"),
+    (29000, "inwin:2:shell:new:cmd"),
+    (34000, "winstate:saved"),
+    (34500, "quit"),
+];
+const WINDOWS_LOAD: &[(u64, &str)] = &[
+    (1500, "cdp-focus"),
+    (2000, "resize:700,420"),
+    (30000, "winstate:restored"),
+    (30500, "quit"),
+];
+
+/// `--windowsnap` (run with `--interactive --at X,Y`): two windows (the second made by detaching a shell), and every second the state of all
+/// windows is logged for the runner, which drags them with the real mouse (Suite-WindowSnap).
+fn build_windowsnap() -> &'static [(u64, &'static str)] {
+    static S: std::sync::OnceLock<&'static [(u64, &'static str)]> = std::sync::OnceLock::new();
+    S.get_or_init(|| {
+        let args: Vec<String> = std::env::args().collect();
+        let size = args.iter().position(|a| a == "--size").and_then(|i| args.get(i + 1)).cloned().unwrap_or_else(|| "420,260".into());
+        let resize: &'static str = Box::leak(format!("resize:{size}").into_boxed_str());
+        let mut v: Vec<(u64, &'static str)> = vec![(1500, "cdp-focus"), (2000, resize), (3000, "shell:new"), (6000, "window:detach:2")];
+        let mut t = 11000u64;
+        while t <= 100000 {
+            v.push((t, "winstate:snap"));
+            t += 1000;
+        }
+        v.push((101500, "quit"));
+        &*Box::leak(v.into_boxed_slice())
+    })
+}
+
 /// `--inputtest` (run with `--interactive --layout side-by-side --dividers --tabs always`): no script of its own. Every
 /// second it dumps the page (with the position of the tabs and dividers) and the window state, so the runner can aim
 /// real mouse and keyboard input at what is really on screen and read the result.
@@ -1024,6 +1118,10 @@ fn build_inputtest() -> &'static [(u64, &'static str)] {
 
 fn scen() -> &'static [(u64, &'static str)] {
     match SCEN_SEL.load(Ordering::SeqCst) {
+        40 => WINDOWS_LOAD,
+        39 => WINDOWS_SAVE,
+        38 => build_windowsnap(),
+        37 => WINDOWS,
         36 => RECOVER,
         35 => STARTFAIL,
         34 => SESSION_LOAD,
@@ -1292,6 +1390,49 @@ unsafe fn run_action(hwnd: HWND, act: &str) {
             VISIBLE.load(Ordering::SeqCst),
             cfg().opacity
         ));
+    } else if let Some(id) = act.strip_prefix("window:detach:") {
+        detach_shell(id.parse().unwrap_or(0));
+    } else if act == "window:next" {
+        next_window();
+    } else if let Some(id) = act.strip_prefix("hk:") {
+        // a hotkey as the first window receives it (what RegisterHotKey delivers), without pressing any key
+        let _ = unsafe { SendMessageW(hwnd, WM_HOTKEY, Some(WPARAM(id.parse().unwrap_or(0))), Some(LPARAM(0))) };
+    } else if act == "ghost:all" {
+        unsafe { ghost_all() };
+    } else if act == "showhide:all" {
+        unsafe { show_hide_all() };
+    } else if let Some(label) = act.strip_prefix("winstate:") {
+        // one line per window: serial, rectangle, shells, active shell, visible
+        let mut parts: Vec<String> = Vec::new();
+        for (serial, h) in perwin::all() {
+            let _w = perwin::enter(serial);
+            let mut wr = RECT::default();
+            let _ = unsafe { GetWindowRect(HWND(h as *mut std::ffi::c_void), &mut wr) };
+            let ids: Vec<String> = shells_lock().ids().iter().map(|i| i.to_string()).collect();
+            parts.push(format!(
+                "{serial}:rect={},{},{},{}:shells={}:active={}:visible={}:ghost={}",
+                wr.left, wr.top, wr.right, wr.bottom, ids.join(","), shells_lock().active(), VISIBLE.load(Ordering::SeqCst),
+                GHOST_ON.load(Ordering::SeqCst)
+            ));
+        }
+        log(&format!(
+            "WINDOWS label={label} n={} current_window={} | {}",
+            perwin::count(),
+            ACTIVE_WINDOW.load(Ordering::SeqCst),
+            parts.join(" | ")
+        ));
+    } else if let Some(rest) = act.strip_prefix("inwin:") {
+        // inwin:<window serial>:<action>: run an action as if it came from that window
+        match rest.split_once(':') {
+            Some((n, inner)) => match n.parse::<u32>().ok().and_then(|s| perwin::hwnd_of(s).map(|h| (s, h))) {
+                Some((serial, h)) => {
+                    let _w = perwin::enter(serial);
+                    unsafe { run_action(HWND(h as *mut std::ffi::c_void), inner) };
+                }
+                None => log(&format!("inwin: there is no window {n}")),
+            },
+            None => {}
+        }
     } else if act == "shell:new" {
         new_shell(None);
     } else if let Some(name) = act.strip_prefix("shell:new:") {
@@ -1518,7 +1659,10 @@ unsafe fn run_action(hwnd: HWND, act: &str) {
         }
     } else if act == "quit" {
         log("AUTOTEST: finished, closing");
-        let _ = unsafe { DestroyWindow(hwnd) };
+        if perwin::count() == 0 {
+            let _ = unsafe { DestroyWindow(hwnd) };
+        }
+        unsafe { quit_all() };
     }
 }
 
@@ -1563,7 +1707,7 @@ const SCENARIO_FLAGS: &[&str] = &[
     "--autotest", "--keys", "--widthtest", "--probe", "--probe2", "--probe3", "--probe4", "--real",
     "--clickfocus", "--hideshow", "--clipboard", "--soak", "--scrolltest", "--ghosttest", "--attention",
     "--policytest", "--placetest", "--idletest", "--starttest", "--autostarttest", "--sessiontest", "--shellstest",
-    "--tabmodes", "--shellsfull", "--layouttest", "--layoutempty", "--layoutstart", "--layoutown", "--labeltest", "--inputtest", "--dpitest", "--texttest", "--reloadtest", "--sessionsave", "--sessionload", "--startfailtest", "--recovertest",
+    "--tabmodes", "--shellsfull", "--layouttest", "--layoutempty", "--layoutstart", "--layoutown", "--labeltest", "--inputtest", "--dpitest", "--texttest", "--reloadtest", "--sessionsave", "--sessionload", "--startfailtest", "--recovertest", "--windowstest", "--windowsnap", "--windowssave", "--windowsload",
 ];
 
 pub(crate) fn is_test_mode() -> bool {
@@ -1636,7 +1780,7 @@ pub(crate) unsafe fn arm(hwnd: HWND) {
     if SCENARIO_FLAGS.iter().any(|f| any_scen(f)) {
         let args: Vec<String> = std::env::args().collect();
         SCEN_SEL.store(
-            if any_scen("--recovertest") { 36 } else if any_scen("--startfailtest") { 35 } else if any_scen("--sessionload") { 34 } else if any_scen("--sessionsave") { 33 } else if any_scen("--reloadtest") { 32 } else if any_scen("--texttest") { 31 } else if any_scen("--dpitest") { 30 } else if any_scen("--inputtest") { 29 } else if any_scen("--labeltest") { 28 } else if any_scen("--layoutown") { 27 } else if any_scen("--layoutstart") { 26 } else if any_scen("--layoutempty") { 25 } else if any_scen("--layouttest") { 24 } else if any_scen("--shellsfull") { 23 } else if any_scen("--tabmodes") { 22 } else if any_scen("--shellstest") { 21 } else if any_scen("--sessiontest") { 20 } else if any_scen("--autostarttest") { 19 } else if any_scen("--starttest") { 18 } else if any_scen("--idletest") { 17 } else if any_scen("--placetest") { 16 } else if any_scen("--policytest") { 15 } else if any_scen("--attention") { 14 } else if any_scen("--ghosttest") { 13 } else if any_scen("--scrolltest") { 12 } else if any_scen("--soak") { 11 } else if any_scen("--clipboard") { 10 } else if any_scen("--hideshow") { 9 } else if any_scen("--clickfocus") { 8 } else if any_scen("--real") { 7 } else if any_scen("--probe4") { 6 } else if any_scen("--probe3") { 5 } else if any_scen("--probe2") { 4 } else if any_scen("--probe") { 3 } else if any_scen("--widthtest") { 2 } else if any_scen("--keys") { 1 } else { 0 },
+            if any_scen("--windowsload") { 40 } else if any_scen("--windowssave") { 39 } else if any_scen("--windowsnap") { 38 } else if any_scen("--windowstest") { 37 } else if any_scen("--recovertest") { 36 } else if any_scen("--startfailtest") { 35 } else if any_scen("--sessionload") { 34 } else if any_scen("--sessionsave") { 33 } else if any_scen("--reloadtest") { 32 } else if any_scen("--texttest") { 31 } else if any_scen("--dpitest") { 30 } else if any_scen("--inputtest") { 29 } else if any_scen("--labeltest") { 28 } else if any_scen("--layoutown") { 27 } else if any_scen("--layoutstart") { 26 } else if any_scen("--layoutempty") { 25 } else if any_scen("--layouttest") { 24 } else if any_scen("--shellsfull") { 23 } else if any_scen("--tabmodes") { 22 } else if any_scen("--shellstest") { 21 } else if any_scen("--sessiontest") { 20 } else if any_scen("--autostarttest") { 19 } else if any_scen("--starttest") { 18 } else if any_scen("--idletest") { 17 } else if any_scen("--placetest") { 16 } else if any_scen("--policytest") { 15 } else if any_scen("--attention") { 14 } else if any_scen("--ghosttest") { 13 } else if any_scen("--scrolltest") { 12 } else if any_scen("--soak") { 11 } else if any_scen("--clipboard") { 10 } else if any_scen("--hideshow") { 9 } else if any_scen("--clickfocus") { 8 } else if any_scen("--real") { 7 } else if any_scen("--probe4") { 6 } else if any_scen("--probe3") { 5 } else if any_scen("--probe2") { 4 } else if any_scen("--probe") { 3 } else if any_scen("--widthtest") { 2 } else if any_scen("--keys") { 1 } else { 0 },
             Ordering::SeqCst,
         );
         let delay = args

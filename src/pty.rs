@@ -184,11 +184,26 @@ fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
 }
 
+/// The window that receives "output is waiting" and "shell ended" messages. With several windows it is one that is still open
+/// (the first); each message handler then looks at every window.
+static WAKE_HWND: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);
+
+pub fn set_wake_target(hwnd: isize) {
+    WAKE_HWND.store(hwnd, Ordering::SeqCst);
+}
+
+fn wake_target(spawned_for: isize) -> isize {
+    match WAKE_HWND.load(Ordering::SeqCst) {
+        0 => spawned_for,
+        h => h,
+    }
+}
+
 fn wake(hwnd: isize) {
     if !WAKE_PENDING.swap(true, Ordering::SeqCst) {
         unsafe {
             let _ = PostMessageW(
-                Some(HWND(hwnd as *mut c_void)),
+                Some(HWND(wake_target(hwnd) as *mut c_void)),
                 WM_APP_PTY,
                 WPARAM(0),
                 LPARAM(0),
@@ -201,10 +216,10 @@ pub fn clear_wake() {
     WAKE_PENDING.store(false, Ordering::SeqCst);
 }
 
-/// Pop one buffered output chunk from any session (UI thread), rotating between sessions.
-pub fn take_chunk() -> Option<(SessionId, Vec<u8>)> {
+/// Pop one buffered output chunk from one of the sessions `ids` (UI thread), rotating between them.
+pub fn take_chunk_for(ids: &[SessionId]) -> Option<(SessionId, Vec<u8>)> {
     let list: Vec<(SessionId, Arc<Shared>)> =
-        SESSIONS.lock().ok()?.iter().map(|s| (s.id, s.shared.clone())).collect();
+        SESSIONS.lock().ok()?.iter().filter(|s| ids.contains(&s.id)).map(|s| (s.id, s.shared.clone())).collect();
     if list.is_empty() {
         return None;
     }
@@ -230,7 +245,6 @@ pub fn has_session(id: SessionId) -> bool {
 }
 
 /// Ids of all sessions that exist (running or finished), in creation order.
-#[cfg(feature = "harness")]
 pub fn session_ids() -> Vec<SessionId> {
     SESSIONS.lock().map(|s| s.iter().map(|x| x.id).collect()).unwrap_or_default()
 }
@@ -469,7 +483,7 @@ unsafe fn spawn_inner(hwnd: isize, id: SessionId, cols: i16, rows: i16, opts: &S
             ex_shared.exited.store(true, Ordering::SeqCst);
             unsafe {
                 let _ = PostMessageW(
-                    Some(HWND(hwnd as *mut c_void)),
+                    Some(HWND(wake_target(hwnd) as *mut c_void)),
                     WM_APP_PTY_EXIT,
                     WPARAM(id as usize),
                     LPARAM(0),
@@ -521,6 +535,14 @@ pub fn write_to(id: SessionId, bytes: Vec<u8>) {
             let _ = s.tx.send(bytes);
         }
     }
+}
+
+/// Make the shell of session `id` repaint its screen: the pseudoconsole redraws when its size changes, so it is made one column narrower and
+/// then given `cols` x `rows` (used when a shell moves into a new window whose page has no history of it).
+pub fn redraw(id: SessionId, cols: i64, rows: i64) {
+    resize(id, (cols - 1).max(2), rows);
+    std::thread::sleep(Duration::from_millis(60));
+    resize(id, cols, rows);
 }
 
 pub fn resize(id: SessionId, cols: i64, rows: i64) {

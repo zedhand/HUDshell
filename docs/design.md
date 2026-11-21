@@ -140,26 +140,37 @@ Key decisions and why:
 - Only profiles are restored. A shell's current folder and the program running in it are not known to HUDshell, so they come back as the
   profile's start folder and start command say. A profile that no longer exists becomes the default profile.
 
-## Planned: several windows (not implemented)
+## Several windows
 
-Measured on 2026-11-20: `main.rs` holds 36 process-wide statics, `wv.rs` 8 (one WebView2 controller and one page bridge, thread-local) and `pty.rs` 7.
-Most of the `main.rs` ones are really state of *one window*: pointer and keyboard mode (`CLICK_THROUGH`, `TERMINAL_FOCUS`, `VISIBLE`, `GHOST_*`,
-`IDLE_DIM`, `SETTINGS_GRABBED`, `PICKER_GRABBED`), the drag and maximize state (`SNAP_DRAG`, `DRAG_START`, `MAXIMIZED`, `RESTORE_*`), and the shell list
-and layout (`SHELLS`, `SPAWN_PROFILES`, `LAYOUT`, `FONT_SIZES`, `PROGS_SENT`). The settings (`CFG`), notices, the config watcher and the session file are
-genuinely global. The pty sessions are global and have their own ids, which is the right shape: a window only needs to know which session ids it shows.
+One process can hold up to four windows (`perwin::MAX_WINDOWS`), each with its own web view, shells (up to 9), layout, pointer mode, opacity and
+drag state. The shells themselves (ConPTY sessions) are process-wide with ids that are unique across windows (`NEXT_SHELL_ID`); a window only knows
+which ids it shows.
 
-Plan, in an order that keeps the program working at every step:
-1. Put the per-window statics into one `Window` struct, kept in a table keyed by `HWND`, and make every handler look its window up from the `HWND` it
-   already receives (`wndproc` has it); nothing changes for a single window.
-2. Give `wv.rs` one controller and bridge per window (the thread-local becomes a map by window), and route page messages and pty output by the window
-   that shows the session (a table session id -> window).
-3. A "detach shell" action creates a second window, moves one session id to it and tells both pages (close in one, open in the other).
-4. Hotkeys act on the active window (the one that last had the keyboard or the pointer); tray actions get "all windows" variants (ghost, hide).
-5. Snapping to other HUDshell windows (extra rectangles in `place::snap_rect`) and moving a group of snapped windows together.
-6. Session restore saves a list of windows (position, size, shells, layout) instead of one.
-
-The riskiest part is step 1 (every handler touches these statics) and step 2 (output routing and acknowledgements per window); both need the full
-test suite after each step, so none of it was started while testing was paused.
+- **Per-window state without rewriting every call site.** `perwin.rs` keeps a table of windows (a serial number each, not the HWND, which Windows
+  may reuse) and a "current window". A `PerWin<T>` static holds one `T` per window and dereferences to the current window's, so
+  `CLICK_THROUGH.load(..)`, `shells_lock()`, `layout_lock()` and the rest kept their names. The current window is set on entry to the window procedure
+  and to each page message (`enter_hwnd`) and restored when the guard is dropped; everything runs on the UI thread. `wv.rs` keeps its controller,
+  web view and in-flight byte count in maps keyed by the same serial.
+- **Output routing.** The pty reader threads wake one window (`pty::set_wake_target`, moved to the first window if that one closes); the handler
+  pumps every window, each taking only the chunks of its own shells (`pty::take_chunk_for`). A session no window lists (a test script's) goes to
+  the first window. "Shell ended" goes to the window that holds the shell (`in_window_of`).
+- **Detaching.** `detach_shell` creates the new window first (`create_window`: placed 36 px off the old one, same pointer mode, page started with the
+  shell's id through `window.__hudshell.first`), then takes the shell out of the old window (`remove_shell_from_window`, the part of closing a shell
+  that is not killing it). The new page has no history of the shell, so the shell is made to repaint: `pty::redraw` resizes it one column narrower
+  and back. The scrollback of the old view is lost. At most four windows; a window's only shell cannot be detached; closing the last shell of a
+  window closes the window when another is open (with one window it still starts a fresh shell).
+- **Hotkeys and the tray.** The hotkeys and the tray icon belong to the first window; when it closes they move to the next (`window_gone`). A
+  hotkey acts on the active window (`ACTIVE_WINDOW`: the one that last had the keyboard, was clicked or dragged, or was made). The tray menu
+  acts on it too and adds "all windows" items for ghost and show / hide.
+- **Snapping and groups.** `place::snap_to_rects` puts a dragged window flush against another (a screen edge wins on its axis) and lines up the
+  matching edge; `place::group_of` finds the windows that touch the dragged one, directly or through each other, and they follow it by the same
+  amount (Shift held at the start moves only that window).
+- **Session.** The first window's session carries the others in `windows` (shells by profile, layout, and the window's place); an old file reads as
+  before. The other windows are opened from a posted message once the first page is ready, and each finishes its own session when its own page is.
+  Saving starts when the last one has; quitting saves once, with every window still open (`quit_all`).
+- **Lesson: a web view cannot be created from inside a web view's own message callback** (it waits for itself and the window stays a white
+  rectangle). Anything a page message opens a window for is therefore posted (`WM_APP_DETACH`, `WM_APP_RESTORE_WINDOWS`), like the recovery path
+  was already.
 
 ## When the web view fails
 

@@ -52,6 +52,10 @@ pub struct Hotkeys {
     pub pane_zoom: String,
     /// Move the keyboard focus to the next pane.
     pub pane_next: String,
+    /// Move the active shell into a window of its own.
+    pub window_detach: String,
+    /// Make the next HUDshell window the one the hotkeys act on.
+    pub window_next: String,
 }
 
 impl Default for Hotkeys {
@@ -83,6 +87,8 @@ impl Default for Hotkeys {
             layout_cycle: "Ctrl+Alt+'".into(),
             pane_zoom: "Ctrl+Alt+Z".into(),
             pane_next: "Ctrl+Alt+O".into(),
+            window_detach: "Ctrl+Alt+D".into(),
+            window_next: "Ctrl+Alt+Shift+W".into(),
         }
     }
 }
@@ -431,6 +437,8 @@ fn validate(cfg: &mut Config) {
         ("layout_cycle", &mut cfg.hotkeys.layout_cycle, def.layout_cycle),
         ("pane_zoom", &mut cfg.hotkeys.pane_zoom, def.pane_zoom),
         ("pane_next", &mut cfg.hotkeys.pane_next, def.pane_next),
+        ("window_detach", &mut cfg.hotkeys.window_detach, def.window_detach),
+        ("window_next", &mut cfg.hotkeys.window_next, def.window_next),
     ] {
         if parse_hotkey(hk).is_none() {
             crate::notice(&format!("Hotkey '{hk}' for {name} is not valid; using {fallback}"));
@@ -650,7 +658,7 @@ mod tests {
         let h = Hotkeys::default();
         let all = [&h.click_through, &h.grab_focus, &h.show_hide, &h.cycle_colours, &h.opacity_up, &h.opacity_down, &h.settings, &h.quit, &h.ghost, &h.corner_next, &h.corner_prev, &h.size_cycle, &h.font_bigger, &h.font_smaller, &h.font_reset,
             &h.shell_next, &h.shell_prev, &h.shell_new, &h.shell_close, &h.shell_list, &h.shell_picker, &h.shell_attention,
-            &h.layout_cycle, &h.pane_zoom, &h.pane_next];
+            &h.layout_cycle, &h.pane_zoom, &h.pane_next, &h.window_detach, &h.window_next];
         let mut seen = std::collections::HashSet::new();
         for s in all {
             let parsed = parse_hotkey(s).unwrap_or_else(|| panic!("default hotkey {s} must parse"));

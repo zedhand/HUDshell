@@ -11,7 +11,50 @@ suite had been run on it. CI (the `static` suite on GitHub's `windows-latest`) f
 wrong pane order. After the fix (00765f1) CI passed: **66 unit tests pass** and the release exe is 1.19 MB. That was **all** that had run for
 these features at the time; the desktop suites were run afterwards (see the latest full run below).
 
-## Latest full run (scripts/test-all.ps1, no sandbox, 2026-11-21, after the seven features, corner snapping and the maximize option): 406 pass, 0 fail, 6 warnings
+## Several windows (2026-11-21, built and tested step by step)
+
+Built in six steps; the full suite (`scripts/test-all.ps1`, no sandbox, real-prompt suite not run) was run after steps 1 and 2, and a final full run
+after step 6. The second display was at 150% for all of it, so mixed scaling was covered again.
+
+- **Step 1, per-window state (no visible change): 438 pass, 0 fail, 3 warnings.** Every per-window static in `main.rs` became a `PerWin` value
+  (see design.md). The three warnings are the two intentional `autotest` skips and the known AltGr+Q limit.
+- **Step 2, a web view per window and output routing: 434 pass, 4 fail.** The four were `sessions` checks: the test opens sessions that no window
+  lists, and the new routing sent a window only the output of shells it lists. Fixed (such sessions go to the first window as before); `sessions`
+  passes again.
+- **Steps 3-6 (detach, active window and tray, snapping and groups, restore of all windows), final full run: 468 pass, 4 fail, 3 warnings.**
+  Per suite: static 16 (72 unit tests), keys 6, width 3, hideshow 3, clickfocus 3, clipboard 3, autotest 22 (+2 skips), ui 28, scrollback 8, ghost 14,
+  attention 10, policy 12, place 24, dpi 8, text 13, reload 9, restore 7, recover 6, **windows 17, winrestore 8**, qol 16, sessions 12, shells 34,
+  layout 35, input 26, snap 52, **windowsnap 9**, kbd 11, cost 5, release 20, config 24, soak 4. The four failures:
+  - **kbd (3 checks)**: the person running the test accidentally switched keyboard focus to another window while `kbd` was typing, so the typed
+    characters went elsewhere. Re-run on its own with nothing touched: `kbd` passed in full (the keyboard layout was restored and checked).
+  - **ui (1 check, "Ctrl+Alt+W needs a second press")**: a real regression of mine. The close code was split so a shell can leave a window without
+    being killed, and the log line the test looks for (`shell 1 closed`) was reworded. It failed again on a clean re-run, so it was not interference.
+    Fixed by restoring the line; `ui`, `windows`, `shells` and `sessions` then passed together (92 checks).
+- **After a last change** (the colour theme, text and UI scale and reloaded settings are now sent to every window, not only the one they were made
+  in): unit tests 72/0, and `static`, `reload`, `text`, `windows`, `winrestore`, `sessions`, `ui`, `config` re-run: 128 pass, 0 fail. This is **not** a
+  fourth full run: the other suites were last run before that one change.
+
+What the new suites showed (all measured, none assumed):
+- **`windows` (17, no OS input):** detaching shell 2 gives two windows (shell 1 / shell 2); the moved shell keeps running and its earlier output is
+  on screen in the new window (repaint worked); each shell's new output appears in its own window only; the next-window action works; a window's only
+  shell cannot be detached; closing the last shell of window 2 closes it; with five shells four windows can be made and a fifth is refused; one of
+  those detaches is started by a message from the page itself (the path a Shift+click on a tab takes); the new-shell hotkey adds a shell to the
+  active window only; "ghost all" and "show / hide all" reach all four windows and undo.
+- **`windowsnap` (9, real mouse):** a window dragged to 8 px from another ends flush against it (its left edge on the other's right edge, tops equal,
+  size unchanged); dragging window 1 by 120,90 moves it by that amount and the touching window by the same amount (log: "1 touching window(s) move
+  along"); dragging window 2 afterwards moves both again.
+- **`winrestore` (8):** three windows (shells 1,2 / 3,5 / 4; profiles pwsh,pwsh / work,cmd / cmd) were saved with a position and size each, came back
+  at the next start with 2, 2 and 1 shells and the same profiles in the same order, each within 2 px of where it was; with `restore_session` off one
+  window with one shell starts.
+
+**A defect the owner found by watching:** during the first `winrestore` run one restored window stayed a blank white rectangle and the run found
+two windows instead of three. The log showed the window was created but its web view never finished starting: it was being created from inside
+the first page's own message callback, and WebView2 cannot create a web view there. Fixed by opening restored windows (and windows detached by a
+tab click) from a posted message; after that `winrestore` passed. Not tested: holding Shift while dragging to move a single window out of a group
+(the code path exists), a monitor that is gone at restore, theme or text-size changes reaching a second window (the code sends them to every
+window; only the one-window result was observed), and more than four windows.
+
+## Previous full run (scripts/test-all.ps1, no sandbox, 2026-11-21, after the seven features, corner snapping and the maximize option): 406 pass, 0 fail, 6 warnings
 
 Fresh release and harness builds, `scripts/test-all.ps1` without a sandbox; the real-prompt suite was **not** run. Per suite: static 16 (67 unit
 tests; release exe 1.19 MB), keys 6, width 3, hideshow 3, clickfocus 3, clipboard 3, autotest 22 (+2 skips), ui 29, scrollback 8, ghost 14,

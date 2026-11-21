@@ -2,7 +2,8 @@
 //! xterm.js page served from memory under a private host name, bridged to the ConPTY host with
 //! byte-safe base64 JSON messages.
 
-use std::cell::{Cell, RefCell};
+use std::cell::RefCell;
+use std::collections::HashMap;
 use std::sync::mpsc;
 
 use base64::Engine;
@@ -70,10 +71,33 @@ pub fn last_dump() -> String {
     LAST_DUMP.lock().map(|s| s.clone()).unwrap_or_default()
 }
 
+// One web view per window, keyed by the window's serial number (see perwin.rs); the functions below act on the current window's.
 thread_local! {
-    static CONTROLLER: RefCell<Option<ICoreWebView2Controller>> = const { RefCell::new(None) };
-    static WEBVIEW: RefCell<Option<ICoreWebView2>> = const { RefCell::new(None) };
-    static INFLIGHT: Cell<usize> = const { Cell::new(0) };
+    static CONTROLLER: RefCell<HashMap<u32, ICoreWebView2Controller>> = RefCell::new(HashMap::new());
+    static WEBVIEW: RefCell<HashMap<u32, ICoreWebView2>> = RefCell::new(HashMap::new());
+    static INFLIGHT: RefCell<HashMap<u32, usize>> = RefCell::new(HashMap::new());
+}
+
+fn webview() -> Option<ICoreWebView2> {
+    let me = crate::perwin::current();
+    WEBVIEW.with(|w| w.borrow().get(&me).cloned())
+}
+
+fn controller() -> Option<ICoreWebView2Controller> {
+    let me = crate::perwin::current();
+    CONTROLLER.with(|c| c.borrow().get(&me).cloned())
+}
+
+fn inflight() -> usize {
+    let me = crate::perwin::current();
+    INFLIGHT.with(|i| i.borrow().get(&me).copied().unwrap_or(0))
+}
+
+fn set_inflight(n: usize) {
+    let me = crate::perwin::current();
+    INFLIGHT.with(|i| {
+        i.borrow_mut().insert(me, n);
+    });
 }
 
 fn windows_build() -> u32 {
@@ -85,7 +109,8 @@ fn windows_build() -> u32 {
     if vi.dwBuildNumber == 0 { 26100 } else { vi.dwBuildNumber }
 }
 
-pub unsafe fn init(hwnd: HWND) -> Result<(), String> {
+/// Create the web view of the current window. `first` is the id of the shell the page starts with (shell 1 in the first window).
+pub unsafe fn init(hwnd: HWND, first: pty::SessionId) -> Result<(), String> {
     let data_dir =
         format!("{}\\HUDshell\\WebView2", std::env::var("LOCALAPPDATA").unwrap_or_else(|_| ".".into()));
     let data_dir_w = HSTRING::from(data_dir);
@@ -212,6 +237,7 @@ pub unsafe fn init(hwnd: HWND) -> Result<(), String> {
                     if unsafe { args.TryGetWebMessageAsString(&mut msg) }.is_err() {
                         return Ok(());
                     }
+                    let _window = crate::perwin::enter_hwnd(hwnd_i);
                     handle_term_message(hwnd_i, &take_pwstr(msg));
                     Ok(())
                 })),
@@ -331,7 +357,7 @@ pub unsafe fn init(hwnd: HWND) -> Result<(), String> {
             let extra = OPT_CONFIG.lock().map(|s| s.clone()).unwrap_or_default();
             let extra = if extra.is_empty() { "{}".to_string() } else { extra };
             let script = HSTRING::from(format!(
-                "window.__hudshell=Object.assign({{build:{build},unicode:\"{uni}\",shiftEnter:\"{se}\"}},{extra});"
+                "window.__hudshell=Object.assign({{build:{build},unicode:\"{uni}\",shiftEnter:\"{se}\",first:{first}}},{extra});"
             ));
             webview
                 .AddScriptToExecuteOnDocumentCreated(
@@ -347,8 +373,9 @@ pub unsafe fn init(hwnd: HWND) -> Result<(), String> {
         }
     }
 
-    WEBVIEW.with(|w| *w.borrow_mut() = Some(webview));
-    CONTROLLER.with(|c| *c.borrow_mut() = Some(controller));
+    let me = crate::perwin::current();
+    WEBVIEW.with(|w| w.borrow_mut().insert(me, webview));
+    CONTROLLER.with(|c| c.borrow_mut().insert(me, controller));
     Ok(())
 }
 
@@ -361,6 +388,10 @@ fn handle_term_message(hwnd: isize, m: &str) {
             let id = session_of(&v);
             let cols = v["cols"].as_i64().unwrap_or(100);
             let rows = v["rows"].as_i64().unwrap_or(30);
+            if pty::has_session(id) {
+                // a shell that moved into this window from another one: the new view is blank, so it repaints
+                crate::redraw_moved_shell(id, cols, rows);
+            }
             if !pty::has_session(id) {
                 log(&format!("bridge: session {id} {kind} at {cols}x{rows}, starting shell"));
                 match pty::spawn(hwnd, id, cols, rows, &crate::spawn_opts_for(id)) {
@@ -374,6 +405,11 @@ fn handle_term_message(hwnd: isize, m: &str) {
             }
         }
         Some("switch") => crate::switch_to(session_of(&v)),
+        // Shift+click on a tab: move that shell into a window of its own.
+        // (posted: a window cannot be created from inside this callback)
+        Some("detach") => {
+            let _ = unsafe { PostMessageW(Some(HWND(hwnd as *mut std::ffi::c_void)), crate::WM_APP_DETACH, WPARAM(session_of(&v) as usize), LPARAM(0)) };
+        }
         Some("newshell") => {
             crate::new_shell(v["profile"].as_str());
             crate::picker_closed(hwnd);
@@ -444,7 +480,7 @@ fn handle_term_message(hwnd: isize, m: &str) {
         }
         Some("ack") => {
             let n = v["n"].as_u64().unwrap_or(0) as usize;
-            INFLIGHT.with(|i| i.set(i.get().saturating_sub(n)));
+            set_inflight(inflight().saturating_sub(n));
             pump_output();
         }
         #[cfg(feature = "harness")]
@@ -477,11 +513,9 @@ fn handle_term_message(hwnd: isize, m: &str) {
 }
 
 pub fn post(json: &str) {
-    WEBVIEW.with(|w| {
-        if let Some(w) = w.borrow().as_ref() {
-            let _ = unsafe { w.PostWebMessageAsString(&HSTRING::from(json)) };
-        }
-    });
+    if let Some(w) = webview() {
+        let _ = unsafe { w.PostWebMessageAsString(&HSTRING::from(json)) };
+    }
 }
 
 /// A WebView2 process failed (message `WM_APP_WEBVIEW_FAILED`, `kind` = COREWEBVIEW2_PROCESS_FAILED_KIND). The shells keep running; only the page
@@ -491,20 +525,20 @@ pub unsafe fn on_process_failed(hwnd: HWND, kind: i32) -> bool {
     match kind {
         1..=3 => {
             log("webview: reloading the page after a render process failure");
-            INFLIGHT.with(|i| i.set(0));
-            WEBVIEW.with(|w| {
-                if let Some(w) = w.borrow().as_ref() {
-                    let _ = unsafe { w.Reload() };
-                }
-            });
+            set_inflight(0);
+            if let Some(w) = webview() {
+                let _ = unsafe { w.Reload() };
+            }
             true
         }
         0 => {
             log("webview: the browser process exited; creating the web view again");
-            WEBVIEW.with(|w| *w.borrow_mut() = None);
-            CONTROLLER.with(|c| *c.borrow_mut() = None);
-            INFLIGHT.with(|i| i.set(0)); // the old page will never acknowledge what was in flight
-            match unsafe { init(hwnd) } {
+            let me = crate::perwin::current();
+            WEBVIEW.with(|w| w.borrow_mut().remove(&me));
+            CONTROLLER.with(|c| c.borrow_mut().remove(&me));
+            set_inflight(0); // the old page will never acknowledge what was in flight
+            let first = crate::first_shell_of_window();
+            match unsafe { init(hwnd, first) } {
                 Ok(()) => {
                     log("webview: created again");
                     true
@@ -522,17 +556,22 @@ pub unsafe fn on_process_failed(hwnd: HWND, kind: i32) -> bool {
     }
 }
 
-/// Forward buffered pty output to the page while the in-flight byte budget allows.
-pub fn pump_output() {
+/// Forward buffered pty output of this window's shells to its page while the in-flight byte budget allows.
+/// Returns how many bytes were sent.
+pub fn pump_output() -> usize {
+    let mine = crate::window_shell_ids();
+    let mut sent = 0;
     loop {
-        if INFLIGHT.with(|i| i.get()) >= MAX_INFLIGHT {
+        if inflight() >= MAX_INFLIGHT {
             break;
         }
-        let Some((id, chunk)) = pty::take_chunk() else { break };
-        INFLIGHT.with(|i| i.set(i.get() + chunk.len()));
+        let Some((id, chunk)) = pty::take_chunk_for(&mine) else { break };
+        set_inflight(inflight() + chunk.len());
+        sent += chunk.len();
         let b64 = base64::engine::general_purpose::STANDARD.encode(&chunk);
         post(&format!("{{\"t\":\"out\",\"s\":{id},\"d\":\"{b64}\"}}"));
     }
+    sent
 }
 
 // ---- Test-only input path: Chrome DevTools Protocol key events (no OS focus needed). ----
@@ -541,14 +580,10 @@ pub fn pump_output() {
 
 #[cfg(feature = "harness")]
 pub fn cdp(method: &str, params: &str) {
-    WEBVIEW.with(|w| {
-        if let Some(w) = w.borrow().as_ref() {
-            let h = webview2_com::CallDevToolsProtocolMethodCompletedHandler::create(Box::new(|_, _| Ok(())));
-            let _ = unsafe {
-                w.CallDevToolsProtocolMethod(&HSTRING::from(method), &HSTRING::from(params), &h)
-            };
-        }
-    });
+    if let Some(w) = webview() {
+        let h = webview2_com::CallDevToolsProtocolMethodCompletedHandler::create(Box::new(|_, _| Ok(())));
+        let _ = unsafe { w.CallDevToolsProtocolMethod(&HSTRING::from(method), &HSTRING::from(params), &h) };
+    }
 }
 
 #[cfg(feature = "harness")]
@@ -632,8 +667,9 @@ pub fn paste_text(s: &str) {
     post(&serde_json::json!({ "t": "paste", "text": s }).to_string());
 }
 
+/// Tell the page that shows shell `id` (whichever window that is) that its shell ended.
 pub fn notify_exit(id: pty::SessionId) {
-    post(&format!("{{\"t\":\"exit\",\"s\":{id}}}"));
+    crate::in_window_of(id, || post(&format!("{{\"t\":\"exit\",\"s\":{id}}}")));
 }
 
 /// Session a page message belongs to (the page puts it in `s`; messages without one mean session 1).
@@ -642,22 +678,18 @@ fn session_of(v: &serde_json::Value) -> pty::SessionId {
 }
 
 pub unsafe fn resize(hwnd: HWND) {
-    CONTROLLER.with(|c| {
-        if let Some(ctrl) = c.borrow().as_ref() {
-            let mut rc = RECT::default();
-            let _ = unsafe { GetClientRect(hwnd, &mut rc) };
-            let _ = unsafe { ctrl.SetBounds(rc) };
-        }
-    });
+    if let Some(ctrl) = controller() {
+        let mut rc = RECT::default();
+        let _ = unsafe { GetClientRect(hwnd, &mut rc) };
+        let _ = unsafe { ctrl.SetBounds(rc) };
+    }
 }
 
 pub unsafe fn focus() {
-    CONTROLLER.with(|c| {
-        if let Some(ctrl) = c.borrow().as_ref() {
-            let r = unsafe { ctrl.MoveFocus(COREWEBVIEW2_MOVE_FOCUS_REASON_PROGRAMMATIC) };
-            log(&format!("webview: MoveFocus(programmatic) -> {:?}", r.is_ok()));
-        }
-    });
+    if let Some(ctrl) = controller() {
+        let r = unsafe { ctrl.MoveFocus(COREWEBVIEW2_MOVE_FOCUS_REASON_PROGRAMMATIC) };
+        log(&format!("webview: MoveFocus(programmatic) -> {:?}", r.is_ok()));
+    }
     post("{\"t\":\"focus\"}");
 }
 

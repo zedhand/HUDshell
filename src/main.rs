@@ -19,6 +19,7 @@ mod config;
 #[cfg(feature = "harness")]
 mod harness;
 mod layout;
+mod perwin;
 mod place;
 mod progs;
 mod pty;
@@ -30,6 +31,7 @@ use std::fs::OpenOptions;
 use std::io::Write;
 use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU32, AtomicU64, Ordering};
 use std::sync::Mutex;
+use perwin::PerWin;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use windows::core::{w, PCWSTR};
@@ -67,9 +69,16 @@ const HK_SHELL_CLOSE: i32 = 23;
 const HK_SHELL_LIST: i32 = 24;
 const HK_SHELL_PICKER: i32 = 25;
 const HK_SHELL_ATTN: i32 = 26;
+const HK_WINDOW_DETACH: i32 = 27;
+const HK_WINDOW_NEXT: i32 = 28;
 /// Jump hotkeys use ids 30..=38 for shells 1..=9.
 const HK_SHELL_JUMP: i32 = 30;
 const WM_TRAY: u32 = 0x8000 + 3;
+/// Posted to a window to open the windows of a saved session. A web view cannot be created from inside a web view's own message callback
+/// (it waits for itself), so everything that opens a window from a page message goes through a posted message like this.
+const WM_APP_RESTORE_WINDOWS: u32 = 0x8000 + 10;
+/// Posted to a window: move shell `wparam` of that window into a window of its own (the page asked, with Shift+click on its tab).
+pub const WM_APP_DETACH: u32 = 0x8000 + 11;
 /// Height of the slim drag strip along the top edge, in 96-dpi pixels (scaled per monitor).
 const DRAG_STRIP_PX: i32 = 22;
 /// Width of the invisible resize border on every edge, in 96-dpi pixels.
@@ -78,10 +87,10 @@ const RESIZE_BORDER_PX: i32 = 6;
 /// The user's pointer-mode setting. Default: click-through, so HUDshell never
 /// catches mouse input meant for the game. While the terminal holds keyboard focus the window is
 /// temporarily clickable regardless; see refresh_pointer_style.
-static CLICK_THROUGH: AtomicBool = AtomicBool::new(true);
-static TERMINAL_FOCUS: AtomicBool = AtomicBool::new(false);
-static VISIBLE: AtomicBool = AtomicBool::new(true);
-static PREV_FOREGROUND: AtomicIsize = AtomicIsize::new(0);
+static CLICK_THROUGH: PerWin<AtomicBool> = PerWin::new(|| AtomicBool::new(true));
+static TERMINAL_FOCUS: PerWin<AtomicBool> = PerWin::new(|| AtomicBool::new(false));
+static VISIBLE: PerWin<AtomicBool> = PerWin::new(|| AtomicBool::new(true));
+static PREV_FOREGROUND: PerWin<AtomicIsize> = PerWin::new(|| AtomicIsize::new(0));
 
 
 fn now_ms() -> u128 {
@@ -214,11 +223,11 @@ unsafe fn refresh_pointer_style(hwnd: HWND) {
 
 /// Ghost preset: click-through plus a dimmed window, restored on the second press. The dimmed value
 /// is never written to config.json: `cfg().opacity` keeps the user's real setting throughout.
-static GHOST_ON: AtomicBool = AtomicBool::new(false);
-static GHOST_PREV_CT: AtomicBool = AtomicBool::new(true);
+static GHOST_ON: PerWin<AtomicBool> = PerWin::new(|| AtomicBool::new(false));
+static GHOST_PREV_CT: PerWin<AtomicBool> = PerWin::new(|| AtomicBool::new(true));
 /// True while the window is dimmed because the shell has been silent for `idle_dim_seconds`.
-static IDLE_DIM: AtomicBool = AtomicBool::new(false);
-static LAST_OUTPUT_MS: AtomicU64 = AtomicU64::new(0);
+static IDLE_DIM: PerWin<AtomicBool> = PerWin::new(|| AtomicBool::new(false));
+static LAST_OUTPUT_MS: PerWin<AtomicU64> = PerWin::new(|| AtomicU64::new(0));
 
 /// The opacity the user chose for the current state: the active value while HUDshell holds the keyboard
 /// (when one is set), the normal value otherwise. Ghost and idle dimming are applied on top of this.
@@ -320,6 +329,7 @@ unsafe fn toggle_click_through(hwnd: HWND) {
 /// A click on the terminal while it is interactive (click-through off) but not focused requests
 /// keyboard focus first ("click to type"). Called from the page's mousedown message.
 fn on_page_click(hwnd_i: isize) {
+    note_active_window();
     if TERMINAL_FOCUS.load(Ordering::SeqCst) || CLICK_THROUGH.load(Ordering::SeqCst) {
         return;
     }
@@ -352,6 +362,7 @@ unsafe fn grab_focus(hwnd: HWND) {
         refresh_opacity(hwnd);
         refresh_pointer_style(hwnd);
         if success {
+            note_active_window();
             wv::focus();
         }
         if !success {
@@ -619,10 +630,18 @@ pub fn on_right_paste() {
     }
 }
 
-/// Tell the page the current colours (live change, no restart).
+/// Send a message to the page of every window (settings that are shared by all of them).
+fn post_all(json: &str) {
+    for (serial, _) in perwin::all() {
+        let _w = perwin::enter(serial);
+        wv::post(json);
+    }
+}
+
+/// Tell every page the current colours (live change, no restart).
 fn push_theme() {
     let c = cfg();
-    wv::post(&serde_json::json!({ "t": "theme", "name": c.theme, "theme": theme_json(&c) }).to_string());
+    post_all(&serde_json::json!({ "t": "theme", "name": c.theme, "theme": theme_json(&c) }).to_string());
 }
 
 fn cycle_theme() {
@@ -669,7 +688,7 @@ unsafe fn step_opacity(hwnd: HWND, delta: i32) {
 }
 
 /// True while the settings panel is open because *we* took the keyboard for it.
-static SETTINGS_GRABBED: AtomicBool = AtomicBool::new(false);
+static SETTINGS_GRABBED: PerWin<AtomicBool> = PerWin::new(|| AtomicBool::new(false));
 
 fn push_settings(open: bool) {
     let c = cfg();
@@ -715,7 +734,7 @@ pub fn on_settings_message(hwnd_i: isize, v: &serde_json::Value) {
                     let pct = (p as u32).clamp(50, 300);
                     cfg_update(|c| c.text_scale = pct);
                     log(&format!("text scale -> {pct}% (settings panel)"));
-                    wv::post(&serde_json::json!({ "t": "textscale", "pct": pct }).to_string());
+                    post_all(&serde_json::json!({ "t": "textscale", "pct": pct }).to_string());
                 }
             }
             Some("uiscale") => {
@@ -723,7 +742,7 @@ pub fn on_settings_message(hwnd_i: isize, v: &serde_json::Value) {
                     let pct = (p as u32).clamp(50, 300);
                     cfg_update(|c| c.ui_scale = pct);
                     log(&format!("ui scale -> {pct}% (settings panel)"));
-                    wv::post(&serde_json::json!({ "t": "uiscale", "pct": pct }).to_string());
+                    post_all(&serde_json::json!({ "t": "uiscale", "pct": pct }).to_string());
                 }
             }
             Some("close") => {
@@ -807,23 +826,28 @@ unsafe fn cycle_size(hwnd: HWND) {
 
 /// Drag-time state: the position the window would have without snapping (see place::SnapDrag), the rectangle it had
 /// before the drag, and whether the drag is a move (not a resize) started on the top strip.
-static SNAP_DRAG: Mutex<Option<place::SnapDrag>> = Mutex::new(None);
-static DRAG_START: Mutex<Option<RECT>> = Mutex::new(None);
-static DRAG_IS_MOVE: AtomicBool = AtomicBool::new(false);
+static SNAP_DRAG: PerWin<Mutex<Option<place::SnapDrag>>> = PerWin::new(|| Mutex::new(None));
+static DRAG_START: PerWin<Mutex<Option<RECT>>> = PerWin::new(|| Mutex::new(None));
+static DRAG_IS_MOVE: PerWin<AtomicBool> = PerWin::new(|| AtomicBool::new(false));
 /// The window really moved during this drag (a plain click on the strip must not maximize it at the top edge).
-static DRAG_MOVED: AtomicBool = AtomicBool::new(false);
+static DRAG_MOVED: PerWin<AtomicBool> = PerWin::new(|| AtomicBool::new(false));
+/// The windows that move along with the one being dragged (they touch it, directly or through each other) and where each started. Only one
+/// drag happens at a time, so this is not per window. Empty when Shift was held at the start, or the window was maximized.
+static DRAG_GROUP: Mutex<Vec<(isize, RECT)>> = Mutex::new(Vec::new());
+/// The other windows' rectangles that are not in the group, for snapping to them.
+static DRAG_OTHERS: Mutex<Vec<place::Rect>> = Mutex::new(Vec::new());
 /// The window fills the work area of a monitor (dragged to the top edge, or the top strip double-clicked); the rectangle and
 /// scaling it had before are kept to restore it.
-static MAXIMIZED: AtomicBool = AtomicBool::new(false);
-static RESTORE_RECT: Mutex<Option<RECT>> = Mutex::new(None);
-static RESTORE_DPI: AtomicU32 = AtomicU32::new(96);
+static MAXIMIZED: PerWin<AtomicBool> = PerWin::new(|| AtomicBool::new(false));
+static RESTORE_RECT: PerWin<Mutex<Option<RECT>>> = PerWin::new(|| Mutex::new(None));
+static RESTORE_DPI: PerWin<AtomicU32> = PerWin::new(|| AtomicU32::new(96));
 
 fn lock_or_recover<T>(m: &'static Mutex<T>) -> std::sync::MutexGuard<'static, T> {
     m.lock().unwrap_or_else(|p| p.into_inner())
 }
 
 /// Whether the window currently has square corners (Windows 11 rounds them by default).
-static CORNERS_SQUARE: AtomicBool = AtomicBool::new(false);
+static CORNERS_SQUARE: PerWin<AtomicBool> = PerWin::new(|| AtomicBool::new(false));
 
 /// Square corners while the window sits in a corner of the work area or fills it (maximized); rounded otherwise.
 /// Windows rounds all four corners or none, so "touches a corner" decides for the whole window.
@@ -845,6 +869,39 @@ unsafe fn update_corner_style(hwnd: HWND) {
         DwmSetWindowAttribute(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, &pref as *const i32 as *const std::ffi::c_void, std::mem::size_of::<i32>() as u32)
     };
     log(&format!("window corners: {}", if square { "square" } else { "rounded" }));
+}
+
+/// A drag of `hwnd` begins: find the windows that touch it (they will move along, unless Shift is held) and the rectangles of the others
+/// (the dragged window may snap to those).
+unsafe fn begin_group_drag(hwnd: HWND, wr: &RECT) {
+    use windows::Win32::UI::Input::KeyboardAndMouse::{GetKeyState, VK_SHIFT};
+    let me = hwnd.0 as isize;
+    let others: Vec<(isize, RECT)> = perwin::all()
+        .into_iter()
+        .filter(|(_, h)| *h != me)
+        .filter_map(|(_, h)| {
+            let w = HWND(h as *mut std::ffi::c_void);
+            let mut r = RECT::default();
+            (unsafe { IsWindowVisible(w) }.as_bool() && unsafe { GetWindowRect(w, &mut r) }.is_ok()).then_some((h, r))
+        })
+        .collect();
+    let shift = unsafe { GetKeyState(VK_SHIFT.0 as i32) } < 0;
+    let moving = DRAG_IS_MOVE.load(Ordering::SeqCst) && !MAXIMIZED.load(Ordering::SeqCst);
+    let mut group: Vec<(isize, RECT)> = Vec::new();
+    if moving && !shift && !others.is_empty() {
+        let mut rects = vec![to_rect(wr)];
+        rects.extend(others.iter().map(|(_, r)| to_rect(r)));
+        for i in place::group_of(&rects, 0, unsafe { scaled(hwnd, 2) }.max(2)) {
+            group.push(others[i - 1]);
+        }
+    }
+    let rest: Vec<place::Rect> =
+        if moving { others.iter().filter(|(h, _)| !group.iter().any(|(g, _)| g == h)).map(|(_, r)| to_rect(r)).collect() } else { Vec::new() };
+    if !group.is_empty() {
+        log(&format!("drag: {} touching window(s) move along", group.len()));
+    }
+    *lock_or_recover(&DRAG_GROUP) = group;
+    *lock_or_recover(&DRAG_OTHERS) = rest;
 }
 
 /// Magnetic edge snapping while the window is dragged (WM_MOVING). Returns true when the rectangle changed.
@@ -876,9 +933,19 @@ unsafe fn snap_moving(hwnd: HWND, r: &mut RECT) -> bool {
     let work = unsafe { work_area(hwnd) };
     let proposed = to_rect(r);
     let (dist, margin) = unsafe { (scaled(hwnd, c.snap_distance), scaled(hwnd, c.snap_margin)) };
+    let others = lock_or_recover(&DRAG_OTHERS).clone();
     let after = lock_or_recover(&SNAP_DRAG)
         .get_or_insert_with(|| place::SnapDrag::new(proposed))
-        .step(proposed, work, dist, margin);
+        .step(proposed, work, dist, margin, &others);
+    // the windows touching this one follow it by the same amount
+    if let Some(start) = *lock_or_recover(&DRAG_START) {
+        let (dx, dy) = (after.l - start.left, after.t - start.top);
+        for (h, r) in lock_or_recover(&DRAG_GROUP).iter() {
+            let _ = unsafe {
+                SetWindowPos(HWND(*h as *mut std::ffi::c_void), None, r.left + dx, r.top + dy, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE)
+            };
+        }
+    }
     #[cfg(feature = "harness")]
     {
         let mut pt = windows::Win32::Foundation::POINT::default();
@@ -1027,6 +1094,8 @@ unsafe fn register_hotkeys(hwnd: HWND, hk: &config::Hotkeys) -> Vec<String> {
             (HK_LAYOUT, &hk.layout_cycle, "next layout"),
             (HK_PANE_ZOOM, &hk.pane_zoom, "zoom pane"),
             (HK_PANE_NEXT, &hk.pane_next, "next pane"),
+            (HK_WINDOW_DETACH, &hk.window_detach, "detach shell into its own window"),
+            (HK_WINDOW_NEXT, &hk.window_next, "next window"),
         ] {
             match config::parse_hotkey(spec) {
                 Some((mods, vk)) => match RegisterHotKey(Some(hwnd), id, HOT_KEY_MODIFIERS(mods), vk) {
@@ -1067,7 +1136,7 @@ unsafe fn register_hotkeys(hwnd: HWND, hk: &config::Hotkeys) -> Vec<String> {
 
 /// Give back every hotkey id HUDshell uses (before registering a changed set).
 unsafe fn unregister_hotkeys(hwnd: HWND) {
-    for id in (1..=18).chain(20..=26).chain(30..=38) {
+    for id in (1..=18).chain(20..=28).chain(30..=38) {
         let _ = unsafe { UnregisterHotKey(Some(hwnd), id) };
     }
 }
@@ -1210,7 +1279,7 @@ unsafe fn apply_config_change(hwnd: HWND, new: &config::Config, changed: &[Strin
         "right_click", "osc52",
     ];
     if page_keys.iter().any(|k| has(k)) {
-        wv::post(
+        post_all(
             &serde_json::json!({
                 "t": "cfg", "fontSize": new.font_size, "fontFamily": new.font_family, "textScale": new.text_scale, "uiScale": new.ui_scale,
                 "lineHeight": new.line_height as f64 / 100.0, "letterSpacing": new.letter_spacing, "scrollback": new.scrollback,
@@ -1263,11 +1332,32 @@ fn save_session() {
     if !SESSION_LIVE.load(Ordering::SeqCst) || !session_enabled() {
         return;
     }
-    let (entries, active): (Vec<(u32, String)>, u32) = {
-        let sh = shells_lock();
-        (sh.entries().iter().map(|e| (e.id, e.profile.clone())).collect(), sh.active())
-    };
-    let s = session::Session::capture(&entries, active, &layout_lock());
+    let mut windows: Vec<session::Session> = Vec::new();
+    for (serial, h) in perwin::all() {
+        let _w = perwin::enter(serial);
+        let (entries, active): (Vec<(u32, String)>, u32) = {
+            let sh = shells_lock();
+            (sh.entries().iter().map(|e| (e.id, e.profile.clone())).collect(), sh.active())
+        };
+        let mut s = session::Session::capture(&entries, active, &layout_lock());
+        let mut r = RECT::default();
+        if unsafe { GetWindowRect(HWND(h as *mut std::ffi::c_void), &mut r) }.is_ok() {
+            if MAXIMIZED.load(Ordering::SeqCst) {
+                if let Some(rr) = *lock_or_recover(&RESTORE_RECT) {
+                    r = rr;
+                }
+            }
+            s.rect = Some([r.left, r.top, r.right - r.left, r.bottom - r.top]);
+        }
+        if !s.shells.is_empty() {
+            windows.push(s);
+        }
+    }
+    if windows.is_empty() {
+        return;
+    }
+    let mut s = windows.remove(0);
+    s.windows = windows;
     let p = session_path();
     let tmp = p.with_extension("json.tmp");
     let ok = serde_json::to_string_pretty(&s)
@@ -1299,7 +1389,7 @@ fn restore_session(sess: session::Session) {
 }
 
 /// Set while a new page after a WebView2 failure has not yet been told about the open shells.
-static WV_RECOVERING: AtomicBool = AtomicBool::new(false);
+static WV_RECOVERING: PerWin<AtomicBool> = PerWin::new(|| AtomicBool::new(false));
 
 /// The new page (after a WebView2 failure) starts with shell 1 only: open the others in it. Their programs kept running; what the old page had
 /// on screen is gone.
@@ -1353,7 +1443,7 @@ unsafe fn after_move_drag(hwnd: HWND) {
 }
 
 /// Text size (points) of each terminal that has its own, by session id, for this run. Others use `font_size`.
-static FONT_SIZES: Mutex<Vec<(u32, u32)>> = Mutex::new(Vec::new());
+static FONT_SIZES: PerWin<Mutex<Vec<(u32, u32)>>> = PerWin::new(|| Mutex::new(Vec::new()));
 /// `font_size` as it was at start: what the reset hotkey goes back to (in "all" mode `font_size` itself changes).
 static FONT_START: AtomicU32 = AtomicU32::new(14);
 
@@ -1442,18 +1532,18 @@ unsafe fn save_geometry(hwnd: HWND) {
 
 // ---- shells (tabs) ---------------------------------------------------------------------------
 
-static SHELLS: Mutex<shells::Shells> = Mutex::new(shells::Shells::new());
+static SHELLS: PerWin<Mutex<shells::Shells>> = PerWin::new(|| Mutex::new(shells::Shells::new()));
 /// The profile each live shell was started from (used again when a finished shell is restarted).
 static SPAWN_PROFILES: Mutex<Vec<(u32, config::Profile)>> = Mutex::new(Vec::new());
 /// True while the profile picker is open because we took the keyboard for it.
-static PICKER_GRABBED: AtomicBool = AtomicBool::new(false);
+static PICKER_GRABBED: PerWin<AtomicBool> = PerWin::new(|| AtomicBool::new(false));
 
 fn shells_lock() -> std::sync::MutexGuard<'static, shells::Shells> {
     SHELLS.lock().unwrap_or_else(|p| p.into_inner())
 }
 
 /// Split panes: which shell each pane shows, the focused pane, zoom (see layout.rs).
-static LAYOUT: Mutex<layout::Layout> = Mutex::new(layout::Layout::new());
+static LAYOUT: PerWin<Mutex<layout::Layout>> = PerWin::new(|| Mutex::new(layout::Layout::new()));
 
 fn layout_lock() -> std::sync::MutexGuard<'static, layout::Layout> {
     LAYOUT.lock().unwrap_or_else(|p| p.into_inner())
@@ -1603,17 +1693,69 @@ fn layout_cycle() {
     after_layout_change(empty, active);
 }
 
+/// The saved session of a window that a restore opened, until its page is ready.
+static WINDOW_PENDING: PerWin<Mutex<Option<session::Session>>> = PerWin::new(|| Mutex::new(None));
+/// How many restored windows have not yet got their shells back; saving starts when it reaches 0.
+static PENDING_RESTORES: AtomicU32 = AtomicU32::new(0);
+
+/// The saved sessions of the other windows, until the posted message opens them.
+static PENDING_WINDOW_SESSIONS: Mutex<Vec<session::Session>> = Mutex::new(Vec::new());
+
+/// One restored window is done (or could not be opened); when none is left, saving starts.
+fn finish_one_restore() {
+    if PENDING_RESTORES.fetch_sub(1, Ordering::SeqCst) == 1 {
+        SESSION_LIVE.store(true, Ordering::SeqCst);
+        save_session();
+    }
+}
+
+/// Open a window for a saved one (at its saved place, with its first shell). Its other shells and its layout follow when its page is ready.
+unsafe fn restore_extra_window(s: session::Session) -> bool {
+    let p = profile_named(&s.shells[0]);
+    let id = NEXT_SHELL_ID.fetch_add(1, Ordering::SeqCst);
+    if let Ok(mut l) = SPAWN_PROFILES.lock() {
+        l.push((id, p.clone()));
+    }
+    let at = s.rect.filter(|r| on_screen(&config::Geometry { x: r[0], y: r[1], w: r[2], h: r[3] }));
+    let Some(serial) = (unsafe { create_window(id, &p.name, at) }) else {
+        log("session: a saved window could not be opened");
+        finish_one_restore();
+        return false;
+    };
+    let _w = perwin::enter(serial);
+    *lock_or_recover(&WINDOW_PENDING) = Some(s);
+    true
+}
+
+/// Set once the page of a window has been told its start layout (a window made by detaching a shell never gets the configured one).
+static LAYOUT_STARTED: PerWin<AtomicBool> = PerWin::new(|| AtomicBool::new(false));
+
 /// Apply the configured start layout once the page is up (it needs the first shell's view).
 pub fn layout_page_ready() {
-    static DONE: AtomicBool = AtomicBool::new(false);
-    if DONE.swap(true, Ordering::SeqCst) {
+    if LAYOUT_STARTED.swap(true, Ordering::SeqCst) {
+        // a window opened by a restore: its page is up now, so its saved shells and layout come back
+        let pending = lock_or_recover(&WINDOW_PENDING).take();
+        if let Some(sess) = pending {
+            restore_session(sess);
+            finish_one_restore();
+        }
         return;
     }
     let pending = lock_or_recover(&SESSION_PENDING).take();
     if let Some(sess) = pending {
+        let others = sess.windows.clone();
         restore_session(sess);
-        SESSION_LIVE.store(true, Ordering::SeqCst);
-        save_session();
+        // the other saved windows are opened from a posted message (see WM_APP_RESTORE_WINDOWS); each finishes its session when its own
+        // page is ready, and saving starts when the last one has
+        if others.is_empty() {
+            SESSION_LIVE.store(true, Ordering::SeqCst);
+            save_session();
+        } else {
+            PENDING_RESTORES.store(others.len() as u32, Ordering::SeqCst);
+            *lock_or_recover(&PENDING_WINDOW_SESSIONS) = others;
+            let me = perwin::current_hwnd();
+            let _ = unsafe { PostMessageW(Some(HWND(me as *mut std::ffi::c_void)), WM_APP_RESTORE_WINDOWS, WPARAM(0), LPARAM(0)) };
+        }
         return; // the saved layout wins over the `layout` setting
     }
     if session_enabled() {
@@ -1667,7 +1809,7 @@ pub fn on_area(cols: u32, rows: u32) {
 }
 
 /// The program label of each shell (session id, name), as last sent to the page.
-static PROGS_SENT: Mutex<Vec<(u32, String)>> = Mutex::new(Vec::new());
+static PROGS_SENT: PerWin<Mutex<Vec<(u32, String)>>> = PerWin::new(|| Mutex::new(Vec::new()));
 
 /// Every couple of seconds: look at what runs below each shell and tell the page when a label changed.
 fn poll_programs() {
@@ -1776,13 +1918,75 @@ fn shell_jump(n: usize) {
     }
 }
 
+/// Shell (session) ids are unique across windows; shell 1 is the first window's first shell.
+static NEXT_SHELL_ID: AtomicU32 = AtomicU32::new(2);
+
+/// The ids of the shells the current window holds, plus (in the first window) sessions no window lists, such as the ones a test script
+/// opens by hand: their output goes to the first window's page as it always did.
+pub fn window_shell_ids() -> Vec<u32> {
+    let mut ids = shells_lock().ids();
+    if perwin::all().first().map(|(s, _)| *s) == Some(perwin::current()) {
+        let owned = all_listed_shells();
+        ids.extend(pty::session_ids().into_iter().filter(|i| !owned.contains(i)));
+    }
+    ids
+}
+
+/// Every shell id some window lists.
+fn all_listed_shells() -> Vec<u32> {
+    let mut v = Vec::new();
+    for (serial, _) in perwin::all() {
+        let _w = perwin::enter(serial);
+        v.extend(shells_lock().ids());
+    }
+    v
+}
+
+/// The shell a new page of the current window starts with (shell 1 in the first window).
+pub fn first_shell_of_window() -> u32 {
+    shells_lock().ids().first().copied().unwrap_or(1)
+}
+
+/// Run `f` with the window that holds shell `id` as the current one (nothing happens when no window holds it).
+pub fn in_window_of(id: u32, f: impl FnOnce()) {
+    for (serial, _) in perwin::all() {
+        let _w = perwin::enter(serial);
+        if shells_lock().position(id).is_some() {
+            f();
+            return;
+        }
+    }
+    // a session no window lists belongs to the first window's page
+    if let Some((serial, _)) = perwin::all().first().copied() {
+        let _w = perwin::enter(serial);
+        f();
+    }
+}
+
+/// Send the pending shell output to every window's page; returns the windows that received some or still hold some back.
+fn pump_all_windows() {
+    for (serial, hwnd) in perwin::all() {
+        let _w = perwin::enter(serial);
+        let sent = wv::pump_output();
+        if sent > 0 {
+            unsafe { note_output(HWND(hwnd as *mut std::ffi::c_void)) };
+        }
+    }
+}
+
 /// Start a new shell from a profile (the default one when `profile` is None) and show it.
 pub fn new_shell(profile: Option<&str>) {
     let p = match profile {
         Some(n) => profile_named(n),
         None => config::default_profile(&cfg()).clone(),
     };
-    let id = shells_lock().add(&p.name);
+    let id = if shells_lock().len() >= shells::MAX_SHELLS {
+        None
+    } else {
+        let id = NEXT_SHELL_ID.fetch_add(1, Ordering::SeqCst);
+        shells_lock().adopt(id, &p.name);
+        Some(id)
+    };
     let Some(id) = id else {
         log("new shell refused: the window already holds the most shells");
         wv::post("{\"t\":\"full\"}");
@@ -1825,6 +2029,16 @@ fn close_active_shell() {
 
 fn close_shell(id: u32) {
     if shells_lock().len() <= 1 {
+        if perwin::count() > 1 {
+            // Another window is open: closing the last shell of this one closes the window.
+            pty::close(id);
+            log(&format!("shell {id} was the last one of its window: closing the window"));
+            let hwnd = perwin::current_hwnd();
+            if hwnd != 0 {
+                let _ = unsafe { PostMessageW(Some(HWND(hwnd as *mut std::ffi::c_void)), WM_CLOSE, WPARAM(0), LPARAM(0)) };
+            }
+            return;
+        }
         // The last shell is never removed: it starts over (fresh shell, same tab).
         pty::close(id);
         log(&format!("shell {id} was the last one: starting it again"));
@@ -1832,6 +2046,13 @@ fn close_shell(id: u32) {
         return;
     }
     pty::close(id);
+    remove_shell_from_window(id);
+    log(&format!("shell {id} closed"));
+}
+
+/// Take shell `id` out of the current window (its tab, its pane and its page view). The shell itself is not touched: closing it is the
+/// caller's business, and detaching it leaves it running for another window.
+fn remove_shell_from_window(id: u32) {
     let next = shells_lock().remove(id);
     if let Ok(mut l) = SPAWN_PROFILES.lock() {
         l.retain(|(i, _)| *i != id);
@@ -1865,7 +2086,7 @@ fn close_shell(id: u32) {
         }
         next
     };
-    log(&format!("shell {id} closed"));
+    log(&format!("shell {id} left this window"));
     wv::post(&serde_json::json!({ "t": "close", "s": id }).to_string());
     if let Some(n) = next {
         pty::set_active(n);
@@ -1998,8 +2219,41 @@ unsafe fn remove_tray(hwnd: HWND) {
     let _ = unsafe { Shell_NotifyIconW(NIM_DELETE, &nid) };
 }
 
+/// Ghost mode for every window: all go ghost unless every one already is (then all leave it).
+unsafe fn ghost_all() {
+    let all = perwin::all();
+    let any_off = all.iter().any(|(s, _)| !GHOST_ON.of(*s).load(Ordering::SeqCst));
+    for (s, h) in all {
+        let _w = perwin::enter(s);
+        let h = HWND(h as *mut std::ffi::c_void);
+        if any_off {
+            unsafe { ghost_on(h) };
+        } else {
+            unsafe { ghost_off(h, true) };
+        }
+    }
+    log(&format!("ghost {} for all windows", if any_off { "on" } else { "off" }));
+}
+
+/// Show or hide every window: all hide when any is visible, otherwise all show.
+unsafe fn show_hide_all() {
+    let all = perwin::all();
+    let any_visible = all.iter().any(|(s, _)| VISIBLE.of(*s).load(Ordering::SeqCst));
+    for (s, h) in all {
+        let _w = perwin::enter(s);
+        if VISIBLE.load(Ordering::SeqCst) == any_visible {
+            unsafe { toggle_show(HWND(h as *mut std::ffi::c_void)) };
+        }
+    }
+    log(&format!("{} all windows", if any_visible { "hid" } else { "showed" }));
+}
+
 unsafe fn tray_menu(hwnd: HWND) {
     use windows::Win32::Foundation::POINT;
+    // The tray icon lives on the first window; the menu acts on the window that was last active (the "all windows" items on every one).
+    let (active, active_hwnd) = active_window(hwnd.0 as isize);
+    let _active = perwin::enter(active);
+    let ahwnd = HWND(active_hwnd as *mut std::ffi::c_void);
     let prev = unsafe { GetForegroundWindow() };
     let Ok(menu) = (unsafe { CreatePopupMenu() }) else { return };
     let checked = if CLICK_THROUGH.load(Ordering::SeqCst) { MF_CHECKED } else { MF_UNCHECKED };
@@ -2016,6 +2270,10 @@ unsafe fn tray_menu(hwnd: HWND) {
         let _ = AppendMenuW(menu, MF_STRING, 11, w!("Next layout (split panes)"));
         let zoom_chk = if layout_lock().zoomed() { MF_CHECKED } else { MF_UNCHECKED };
         let _ = AppendMenuW(menu, MF_STRING | zoom_chk, 12, w!("Zoom pane"));
+        let _ = AppendMenuW(menu, MF_STRING, 14, w!("Detach this shell into its own window"));
+        let _ = AppendMenuW(menu, MF_STRING, 15, w!("Next window"));
+        let _ = AppendMenuW(menu, MF_STRING, 16, w!("Ghost all windows"));
+        let _ = AppendMenuW(menu, MF_STRING, 17, w!("Show / hide all windows"));
         let _ = AppendMenuW(menu, MF_STRING, 13, w!("Reload settings (config.json)"));
         let _ = AppendMenuW(menu, MF_STRING, 6, w!("Settings (opacity, colours)..."));
         let _ = AppendMenuW(menu, MF_STRING | auto_chk, 8, w!("Start with Windows"));
@@ -2040,21 +2298,23 @@ unsafe fn tray_menu(hwnd: HWND) {
     }
     unsafe {
         match cmd.0 {
-            1 => toggle_show(hwnd),
-            2 => toggle_click_through(hwnd),
+            1 => toggle_show(ahwnd),
+            2 => toggle_click_through(ahwnd),
             3 => cycle_theme(),
             4 => {
                 if TERMINAL_FOCUS.load(Ordering::SeqCst) {
-                    release_focus(hwnd)
+                    release_focus(ahwnd)
                 } else {
-                    grab_focus(hwnd)
+                    grab_focus(ahwnd)
                 }
             }
-            5 => {
-                let _ = DestroyWindow(hwnd);
-            }
-            6 => open_settings(hwnd),
-            7 => toggle_ghost(hwnd),
+            5 => quit_all(),
+            6 => open_settings(ahwnd),
+            7 => toggle_ghost(ahwnd),
+            14 => detach_active_shell(),
+            15 => next_window(),
+            16 => ghost_all(),
+            17 => show_hide_all(),
             9 => new_shell(None),
             10 => shell_step(1),
             11 => layout_cycle(),
@@ -2069,7 +2329,7 @@ unsafe fn tray_menu(hwnd: HWND) {
             _ => {}
         }
         // Give the keyboard back to whatever had it, unless the user asked to grab it.
-        if cmd.0 != 4 && cmd.0 != 5 && cmd.0 != 6 && !TERMINAL_FOCUS.load(Ordering::SeqCst) && prev != hwnd
+        if cmd.0 != 4 && cmd.0 != 5 && cmd.0 != 6 && !TERMINAL_FOCUS.load(Ordering::SeqCst) && prev != hwnd && prev != ahwnd
             && IsWindow(Some(prev)).as_bool()
         {
             let _ = SetForegroundWindow(prev);
@@ -2077,7 +2337,242 @@ unsafe fn tray_menu(hwnd: HWND) {
     }
 }
 
+// ---- several windows -----------------------------------------------------------------------------
+
+/// The window the hotkeys and tray actions act on: the one that last had the keyboard, was clicked, or was made.
+static ACTIVE_WINDOW: AtomicU32 = AtomicU32::new(0);
+
+fn note_active_window() {
+    ACTIVE_WINDOW.store(perwin::current(), Ordering::SeqCst);
+}
+
+/// (serial, handle) of the window the hotkeys act on; the first window when the active one is gone.
+fn active_window(fallback: isize) -> (u32, isize) {
+    let want = ACTIVE_WINDOW.load(Ordering::SeqCst);
+    if let Some(h) = perwin::hwnd_of(want) {
+        return (want, h);
+    }
+    perwin::all().first().copied().unwrap_or((perwin::current(), fallback))
+}
+
+/// The look every window shares: no DWM border line, rounded corners (Windows 11; `update_corner_style` squares them in a corner).
+unsafe fn apply_window_look(hwnd: HWND) {
+    use windows::Win32::Graphics::Dwm::{DwmSetWindowAttribute, DWMWA_BORDER_COLOR, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND};
+    let none: u32 = 0xFFFF_FFFE; // DWMWA_COLOR_NONE
+    let round: i32 = DWMWCP_ROUND.0;
+    let _ = unsafe {
+        DwmSetWindowAttribute(hwnd, DWMWA_BORDER_COLOR, &none as *const u32 as *const std::ffi::c_void, std::mem::size_of::<u32>() as u32)
+    };
+    let _ = unsafe {
+        DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_WINDOW_CORNER_PREFERENCE,
+            &round as *const i32 as *const std::ffi::c_void,
+            std::mem::size_of::<i32>() as u32,
+        )
+    };
+}
+
+/// Open another window that starts with shell `id` (already running or about to be). It is placed next to the current one, takes over
+/// its pointer mode, and gets its own web view. Returns its serial number.
+unsafe fn create_window(id: u32, profile: &str, at: Option<[i32; 4]>) -> Option<u32> {
+    if perwin::count() >= perwin::MAX_WINDOWS {
+        return None;
+    }
+    let src = HWND(perwin::current_hwnd() as *mut std::ffi::c_void);
+    let mut r = RECT::default();
+    let _ = unsafe { GetWindowRect(src, &mut r) };
+    let off = unsafe { scaled(src, 36) };
+    let (w, h) = (r.right - r.left, r.bottom - r.top);
+    let work = unsafe { work_area(src) };
+    let x = (r.left + off).min((work.r - w).max(work.l)).max(work.l);
+    let y = (r.top + off).min((work.b - h).max(work.t)).max(work.t);
+    // a restored window goes where it was
+    let (x, y, w, h) = match at {
+        Some([ax, ay, aw, ah]) => (ax, ay, aw, ah),
+        None => (x, y, w, h),
+    };
+    let click_through = CLICK_THROUGH.load(Ordering::SeqCst);
+    let hinstance = unsafe { GetModuleHandleW(PCWSTR::null()) }.ok()?.into();
+    let hwnd = unsafe {
+        CreateWindowExW(
+            WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_LAYERED,
+            w!("HUDshell"),
+            w!("HUDshell"),
+            WS_POPUP | WS_THICKFRAME,
+            x,
+            y,
+            w,
+            h,
+            None,
+            None,
+            Some(hinstance),
+            None,
+        )
+    }
+    .ok()?;
+    let serial = perwin::register(hwnd.0 as isize);
+    let _w = perwin::enter(serial);
+    let c = cfg();
+    unsafe {
+        let _ = SetLayeredWindowAttributes(hwnd, COLORREF(0), 255, LWA_ALPHA);
+        apply_opacity(hwnd, c.opacity);
+        apply_window_look(hwnd);
+    }
+    CLICK_THROUGH.store(click_through, Ordering::SeqCst);
+    shells_lock().adopt(id, profile);
+    {
+        let mut l = layout_lock();
+        l.set_own(c.pane_shells == "own");
+        l.start(id);
+        l.set_min(c.pane_min[0], c.pane_min[1]);
+        l.set_split(c.split[0], c.split[1]);
+    }
+    LAYOUT_STARTED.store(true, Ordering::SeqCst); // the configured start layout belongs to the first window
+    LAST_OUTPUT_MS.store(now_ms() as u64, Ordering::SeqCst);
+    unsafe {
+        let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+        reassert_topmost(hwnd);
+        refresh_pointer_style(hwnd);
+        if c.idle_dim_seconds > 0 {
+            let _ = SetTimer(Some(hwnd), 4, 1000, None);
+        }
+        if c.tab_program != "off" {
+            let _ = SetTimer(Some(hwnd), 5, 2000, None);
+        }
+    }
+    match unsafe { wv::init(hwnd, id) } {
+        Ok(()) => log(&format!("window {serial} created (hwnd 0x{:X}) with shell {id}", hwnd.0 as usize)),
+        Err(e) => {
+            log(&format!("window {serial}: WebView2 init FAILED: {e}"));
+            let _ = unsafe { DestroyWindow(hwnd) };
+            return None;
+        }
+    }
+    unsafe { update_corner_style(hwnd) };
+    note_active_window();
+    Some(serial)
+}
+
+/// Move shell `id` of the current window into a window of its own. The shell keeps running; the new window starts with a blank view, so the
+/// shell is asked to repaint (see `pty::redraw`).
+pub fn detach_shell(id: u32) {
+    if shells_lock().len() <= 1 {
+        log("detach refused: a window's only shell stays where it is");
+        wv::post("{\"t\":\"flash\",\"text\":\"a window needs at least one shell\"}");
+        return;
+    }
+    if perwin::count() >= perwin::MAX_WINDOWS {
+        log(&format!("detach refused: at most {} windows", perwin::MAX_WINDOWS));
+        wv::post(&serde_json::json!({ "t": "flash", "text": format!("at most {} windows", perwin::MAX_WINDOWS) }).to_string());
+        return;
+    }
+    let Some(profile) = shells_lock().profile_of(id).map(|p| p.to_string()) else { return };
+    let size = font_size_of(id);
+    let had_own_size = FONT_SIZES.lock().map(|l| l.iter().any(|(i, _)| *i == id)).unwrap_or(false);
+    let from = perwin::current();
+    let Some(new_serial) = (unsafe { create_window(id, &profile, None) }) else {
+        log("detach failed: the new window could not be created");
+        return;
+    };
+    // the new window exists with the shell: now it leaves the old one
+    {
+        let _w = perwin::enter(from);
+        remove_shell_from_window(id);
+    }
+    {
+        let _w = perwin::enter(new_serial);
+        if had_own_size {
+            if let Ok(mut l) = FONT_SIZES.lock() {
+                l.push((id, size));
+            }
+        }
+        pty::set_active(id);
+    }
+    PENDING_REDRAW.lock().unwrap_or_else(|p| p.into_inner()).push(id);
+    log(&format!("shell {id} detached into window {new_serial}"));
+}
+
+/// Shells moved into a new window whose page has not yet asked for them: they are redrawn once it does.
+static PENDING_REDRAW: Mutex<Vec<u32>> = Mutex::new(Vec::new());
+
+/// The page of a window made by detaching is ready: have the moved shell repaint its screen into the new view.
+pub fn redraw_moved_shell(id: u32, cols: i64, rows: i64) {
+    let mut p = PENDING_REDRAW.lock().unwrap_or_else(|p| p.into_inner());
+    if let Some(i) = p.iter().position(|s| *s == id) {
+        p.remove(i);
+        drop(p);
+        pty::redraw(id, cols, rows);
+        log(&format!("shell {id}: asked to repaint in its new window ({cols}x{rows})"));
+    }
+}
+
+fn detach_active_shell() {
+    let id = shells_lock().active();
+    if id != 0 {
+        detach_shell(id);
+    }
+}
+
+/// Make the next window the one the hotkeys act on, and say which it is.
+fn next_window() {
+    let all = perwin::all();
+    if all.len() < 2 {
+        return;
+    }
+    let me = ACTIVE_WINDOW.load(Ordering::SeqCst);
+    let i = all.iter().position(|(s, _)| *s == me).unwrap_or(0);
+    let (serial, hwnd) = all[(i + 1) % all.len()];
+    ACTIVE_WINDOW.store(serial, Ordering::SeqCst);
+    log(&format!("active window -> {serial} (of {})", all.len()));
+    let _w = perwin::enter(serial);
+    wv::post("{\"t\":\"cue\"}");
+    unsafe { reassert_topmost(HWND(hwnd as *mut std::ffi::c_void)) };
+}
+
+/// Quit the program: the session is saved with every window still open, then all the windows go.
+unsafe fn quit_all() {
+    save_session();
+    SESSION_LIVE.store(false, Ordering::SeqCst); // what is left while they close must not overwrite it
+    for (_, h) in perwin::all() {
+        let _ = unsafe { DestroyWindow(HWND(h as *mut std::ffi::c_void)) };
+    }
+}
+
+/// A window was destroyed: forget it, hand the hotkeys, the tray icon and the wake target to the window that is first now, and end the
+/// program when it was the last one. Returns true when the program ends.
+unsafe fn window_gone(hwnd: HWND) -> bool {
+    let was_first = perwin::all().first().map(|(_, h)| *h) == Some(hwnd.0 as isize);
+    let ids = window_shell_ids();
+    for id in ids {
+        pty::close(id); // a window that goes takes its shells with it (a detached shell that was already moved is in its new window's list)
+    }
+    perwin::unregister(hwnd.0 as isize);
+    unsafe { remove_tray(hwnd) };
+    unsafe { unregister_hotkeys(hwnd) };
+    let rest = perwin::all();
+    let Some((serial, next)) = rest.first().copied() else { return true };
+    save_session(); // the window that went is no longer in the saved session (does nothing while quitting)
+    if was_first {
+        let next_hwnd = HWND(next as *mut std::ffi::c_void);
+        let c = cfg();
+        pty::set_wake_target(next);
+        let _w = perwin::enter(serial);
+        let registered = unsafe { register_hotkeys(next_hwnd, &c.hotkeys) };
+        log(&format!("window {serial} is now the first window: {} hotkeys registered there", registered.len()));
+        if !is_test_mode() {
+            unsafe { add_tray(next_hwnd) };
+            let _ = unsafe { SetTimer(Some(next_hwnd), 6, 1500, None) };
+        }
+    }
+    if ACTIVE_WINDOW.load(Ordering::SeqCst) == 0 || perwin::hwnd_of(ACTIVE_WINDOW.load(Ordering::SeqCst)).is_none() {
+        ACTIVE_WINDOW.store(rest[0].0, Ordering::SeqCst);
+    }
+    false
+}
+
 unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+    let _window = perwin::enter_hwnd(hwnd.0 as isize);
     unsafe {
         match msg {
             m if m != 0 && m == ACTIVATE_MSG.load(Ordering::SeqCst) => {
@@ -2085,6 +2580,10 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 LRESULT(0)
             }
             WM_HOTKEY => {
+                // The hotkeys are registered on the first window; they act on the window that was last active.
+                let (target, target_hwnd) = active_window(hwnd.0 as isize);
+                let _target = perwin::enter(target);
+                let hwnd = HWND(target_hwnd as *mut std::ffi::c_void);
                 match wparam.0 as i32 {
                     HK_CLICKTHROUGH => toggle_click_through(hwnd),
                     HK_FOCUS => {
@@ -2116,10 +2615,12 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                     HK_SHELL_LIST => wv::post("{\"t\":\"overlay\"}"),
                     HK_SHELL_PICKER => open_picker(hwnd),
                     HK_SHELL_ATTN => wv::post("{\"t\":\"attentionnext\"}"),
+                    HK_WINDOW_DETACH => detach_active_shell(),
+                    HK_WINDOW_NEXT => next_window(),
                     n if (HK_SHELL_JUMP..HK_SHELL_JUMP + 9).contains(&n) => shell_jump((n - HK_SHELL_JUMP + 1) as usize),
                     HK_QUIT => {
                         log("quit requested");
-                        let _ = DestroyWindow(hwnd);
+                        quit_all();
                     }
                     _ => {}
                 }
@@ -2224,6 +2725,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 LRESULT(0)
             }
             WM_NCLBUTTONDOWN => {
+                note_active_window();
                 DRAG_IS_MOVE.store(wparam.0 as u32 == HTCAPTION, Ordering::SeqCst);
                 log(&format!("WM_NCLBUTTONDOWN hit-test={} passive={}", wparam.0, !TERMINAL_FOCUS.load(Ordering::SeqCst)));
                 foreground_note("at non-client click");
@@ -2240,8 +2742,9 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             }
             pty::WM_APP_PTY => {
                 pty::clear_wake();
+                // The shell produced output: undo idle dimming even when the page is still busy with earlier output.
                 note_output(hwnd);
-                wv::pump_output();
+                pump_all_windows();
                 LRESULT(0)
             }
             wv::WM_APP_WEBVIEW_FAILED => {
@@ -2250,8 +2753,19 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 }
                 LRESULT(0)
             }
+            WM_APP_RESTORE_WINDOWS => {
+                let list = std::mem::take(&mut *lock_or_recover(&PENDING_WINDOW_SESSIONS));
+                for s in list {
+                    unsafe { restore_extra_window(s) };
+                }
+                LRESULT(0)
+            }
+            WM_APP_DETACH => {
+                detach_shell(wparam.0 as u32);
+                LRESULT(0)
+            }
             pty::WM_APP_PTY_EXIT => {
-                wv::pump_output();
+                pump_all_windows();
                 wv::notify_exit(wparam.0 as pty::SessionId);
                 LRESULT(0)
             }
@@ -2301,6 +2815,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 *lock_or_recover(&SNAP_DRAG) = Some(place::SnapDrag::new(to_rect(&wr)));
                 *lock_or_recover(&DRAG_START) = Some(wr);
                 DRAG_MOVED.store(false, Ordering::SeqCst);
+                begin_group_drag(hwnd, &wr);
                 foreground_note("at size/move start");
                 let _ = SetTimer(Some(hwnd), 2, 100, None);
                 DefWindowProcW(hwnd, msg, wparam, lparam)
@@ -2315,6 +2830,8 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 log("WM_EXITSIZEMOVE");
                 foreground_note("at size/move end");
                 *lock_or_recover(&SNAP_DRAG) = None;
+                lock_or_recover(&DRAG_GROUP).clear();
+                lock_or_recover(&DRAG_OTHERS).clear();
                 if DRAG_IS_MOVE.swap(false, Ordering::SeqCst) && DRAG_MOVED.load(Ordering::SeqCst) {
                     after_move_drag(hwnd);
                 }
@@ -2332,11 +2849,14 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 LRESULT(0)
             }
             WM_DESTROY => {
-                save_session();
+                if perwin::count() <= 1 && SESSION_LIVE.load(Ordering::SeqCst) {
+                    save_session();
+                }
                 save_geometry(hwnd);
-                remove_tray(hwnd);
-                pty::shutdown();
-                PostQuitMessage(0);
+                if window_gone(hwnd) {
+                    pty::shutdown();
+                    PostQuitMessage(0);
+                }
                 LRESULT(0)
             }
             _ => DefWindowProcW(hwnd, msg, wparam, lparam),
@@ -2420,6 +2940,7 @@ fn main() -> windows::core::Result<()> {
             Some(hinstance),
             None,
         )?;
+        perwin::register(hwnd.0 as isize);
         SetLayeredWindowAttributes(hwnd, COLORREF(0), 255, LWA_ALPHA)?;
         apply_opacity(hwnd, loaded.opacity);
 
@@ -2517,7 +3038,8 @@ fn main() -> windows::core::Result<()> {
                 windows::Win32::System::Com::COINIT_APARTMENTTHREADED,
             );
             log("initializing WebView2 (windowed hosting)");
-            match wv::init(hwnd) {
+            pty::set_wake_target(hwnd.0 as isize);
+            match wv::init(hwnd, 1) {
                 Ok(()) => {
                     log("WebView2 ready");
                     let _ = SetTimer(Some(hwnd), 3, 1500, None);

@@ -1,12 +1,16 @@
 //! Saving and restoring the open shells and the layout between runs (config `restore_session = "shells"`). Pure logic on
 //! shell ids and indexes, so it can be unit-tested without a window. What is saved is the profile of every shell (in tab order),
 //! the active shell and the layout; the shells themselves start again from their profiles (their folders and what was running
-//! in them are not restored).
+//! in them are not restored). With several windows the first window's session carries the others in `windows` (each with the position and
+//! size its window had); a file from before that has none, and restores exactly as it did.
 
 use serde::{Deserialize, Serialize};
 
 use crate::layout::{Layout, Preset};
 use crate::shells::MAX_SHELLS;
+
+/// Windows one saved session may describe: the first one and up to this many others.
+pub const MAX_EXTRA_WINDOWS: usize = 3;
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(default)]
@@ -24,11 +28,26 @@ pub struct Session {
     pub focus: usize,
     /// Own-lists mode only: the shells (indexes) of each pane.
     pub groups: Vec<Vec<usize>>,
+    /// Where the window was (x, y, width, height in physical pixels); `None` in files from before several windows.
+    pub rect: Option<[i32; 4]>,
+    /// The other windows (first window's session only): each one is a session of its own without further windows.
+    pub windows: Vec<Session>,
 }
 
 impl Default for Session {
     fn default() -> Self {
-        Self { version: 1, shells: Vec::new(), active: 0, layout: "single".into(), split: [50, 50], slots: vec![0], focus: 0, groups: Vec::new() }
+        Self {
+            version: 1,
+            shells: Vec::new(),
+            active: 0,
+            layout: "single".into(),
+            split: [50, 50],
+            slots: vec![0],
+            focus: 0,
+            groups: Vec::new(),
+            rect: None,
+            windows: Vec::new(),
+        }
     }
 }
 
@@ -62,27 +81,45 @@ impl Session {
             slots,
             focus: l.focus(),
             groups,
+            rect: None,
+            windows: Vec::new(),
         }
     }
 
     /// Read saved text; `None` unless it is a complete, consistent session (a damaged file is simply not restored).
     pub fn parse(text: &str) -> Option<Session> {
         let s: Session = serde_json::from_str(text.trim_start_matches('\u{feff}')).ok()?;
-        if s.version != 1 || s.shells.is_empty() || s.shells.len() > MAX_SHELLS {
+        if !s.consistent() || s.windows.len() > MAX_EXTRA_WINDOWS {
             return None;
         }
-        let preset = Preset::parse(&s.layout)?;
-        if s.slots.len() != preset.panes() || s.focus >= s.slots.len() || s.active >= s.shells.len() {
-            return None;
-        }
-        let n = s.shells.len() as i32;
-        if s.slots.iter().any(|&i| i < -1 || i >= n) {
-            return None;
-        }
-        if !s.groups.is_empty() && (s.groups.len() != s.slots.len() || s.groups.iter().flatten().any(|&i| i >= s.shells.len())) {
+        // every other window must be a complete session too, and none of them has windows of its own
+        if s.windows.iter().any(|w| !w.consistent() || !w.windows.is_empty()) {
             return None;
         }
         Some(s)
+    }
+
+    /// This one session (not the windows it lists) is complete and consistent.
+    fn consistent(&self) -> bool {
+        let s = self;
+        if s.version != 1 || s.shells.is_empty() || s.shells.len() > MAX_SHELLS {
+            return false;
+        }
+        let Some(preset) = Preset::parse(&s.layout) else { return false };
+        if s.slots.len() != preset.panes() || s.focus >= s.slots.len() || s.active >= s.shells.len() {
+            return false;
+        }
+        let n = s.shells.len() as i32;
+        if s.slots.iter().any(|&i| i < -1 || i >= n) {
+            return false;
+        }
+        if !s.groups.is_empty() && (s.groups.len() != s.slots.len() || s.groups.iter().flatten().any(|&i| i >= s.shells.len())) {
+            return false;
+        }
+        if s.rect.is_some_and(|r| r[2] < 50 || r[3] < 50) {
+            return false;
+        }
+        true
     }
 
     /// `ids[i]` is the id of the shell now running for saved shell `i`.
@@ -149,6 +186,35 @@ mod tests {
         assert_eq!(s.groups, vec![vec![0usize], vec![1, 2]]);
         let r = s.resolve(&[7, 8, 9]).unwrap();
         assert_eq!(r.groups, vec![vec![7u32], vec![8, 9]]);
+    }
+
+    #[test]
+    fn several_windows_round_trip_and_an_old_file_still_reads() {
+        let mut first = Session { shells: vec!["pwsh".into(), "work".into()], ..Session::default() };
+        first.rect = Some([100, 100, 700, 420]);
+        let second = Session { shells: vec!["cmd".into()], rect: Some([300, 200, 640, 360]), ..Session::default() };
+        first.windows = vec![second.clone()];
+        let text = serde_json::to_string_pretty(&first).unwrap();
+        let back = Session::parse(&text).expect("a session with two windows reads back");
+        assert_eq!(back.windows.len(), 1);
+        assert_eq!(back.windows[0], second);
+        // a file written before several windows existed has neither field
+        let old = r#"{"version":1,"shells":["a","b"],"active":1,"layout":"side-by-side","split":[50,50],"slots":[0,1],"focus":1}"#;
+        let s = Session::parse(old).unwrap();
+        assert!(s.windows.is_empty() && s.rect.is_none());
+        // a damaged second window spoils the file; windows do not nest; there is a limit
+        let mut bad = first.clone();
+        bad.windows[0].shells.clear();
+        assert!(Session::parse(&serde_json::to_string(&bad).unwrap()).is_none());
+        let mut nested = first.clone();
+        nested.windows[0].windows = vec![second.clone()];
+        assert!(Session::parse(&serde_json::to_string(&nested).unwrap()).is_none());
+        let mut many = first.clone();
+        many.windows = vec![second.clone(); MAX_EXTRA_WINDOWS + 1];
+        assert!(Session::parse(&serde_json::to_string(&many).unwrap()).is_none());
+        let mut tiny = first.clone();
+        tiny.rect = Some([0, 0, 10, 10]);
+        assert!(Session::parse(&serde_json::to_string(&tiny).unwrap()).is_none());
     }
 
     #[test]

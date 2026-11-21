@@ -125,6 +125,85 @@ pub fn touches_corner(win: Rect, work: Rect) -> bool {
     (win.l <= work.l + 1 || win.r >= work.r - 1) && (win.t <= work.t + 1 || win.b >= work.b - 1)
 }
 
+/// Snap a dragged window to the edges of other HUDshell windows: it goes flush against one (its left edge to the other's right edge, and so on)
+/// when within `distance` pixels and next to it along the other axis, and then lines up with that window's top / bottom or left / right edge
+/// when those are within `distance` too. The size never changes.
+pub fn snap_to_rects(win: Rect, others: &[Rect], distance: i32) -> Rect {
+    if distance <= 0 || others.is_empty() {
+        return win;
+    }
+    let (w, h) = (win.w(), win.h());
+    let near_v = |o: &Rect| win.t < o.b + distance && win.b > o.t - distance; // vertical ranges (nearly) overlap
+    let near_h = |o: &Rect| win.l < o.r + distance && win.r > o.l - distance;
+    // against a side: nearest candidate within distance (distance, new left, index of the window)
+    let mut x_adj: Option<(i32, i32, usize)> = None;
+    let mut y_adj: Option<(i32, i32, usize)> = None;
+    for (i, o) in others.iter().enumerate() {
+        if near_v(o) {
+            for (d, x) in [((win.l - o.r).abs(), o.r), ((win.r - o.l).abs(), o.l - w)] {
+                if d <= distance && x_adj.map_or(true, |(bd, _, _)| d < bd) {
+                    x_adj = Some((d, x, i));
+                }
+            }
+        }
+        if near_h(o) {
+            for (d, y) in [((win.t - o.b).abs(), o.b), ((win.b - o.t).abs(), o.t - h)] {
+                if d <= distance && y_adj.map_or(true, |(bd, _, _)| d < bd) {
+                    y_adj = Some((d, y, i));
+                }
+            }
+        }
+    }
+    let mut x = x_adj.map_or(win.l, |(_, x, _)| x);
+    let mut y = y_adj.map_or(win.t, |(_, y, _)| y);
+    // lined up with the window it was put against
+    if let Some((_, _, i)) = x_adj {
+        let o = &others[i];
+        if (win.t - o.t).abs() <= distance {
+            y = o.t;
+        } else if (win.b - o.b).abs() <= distance {
+            y = o.b - h;
+        }
+    }
+    if let Some((_, _, i)) = y_adj {
+        let o = &others[i];
+        if (win.l - o.l).abs() <= distance {
+            x = o.l;
+        } else if (win.r - o.r).abs() <= distance {
+            x = o.r - w;
+        }
+    }
+    Rect::new(x, y, x + w, y + h)
+}
+
+/// Two windows touch: an edge of one lies on the opposite edge of the other (within `tol` pixels) and they overlap along that edge.
+pub fn touching(a: Rect, b: Rect, tol: i32) -> bool {
+    let side = ((a.r - b.l).abs() <= tol || (a.l - b.r).abs() <= tol) && a.t < b.b && a.b > b.t;
+    let stack = ((a.b - b.t).abs() <= tol || (a.t - b.b).abs() <= tol) && a.l < b.r && a.r > b.l;
+    side || stack
+}
+
+/// The windows that move with window `start`: everything that touches it, directly or through other touching windows (not `start` itself).
+pub fn group_of(rects: &[Rect], start: usize, tol: i32) -> Vec<usize> {
+    let mut seen = vec![false; rects.len()];
+    let mut order = vec![start];
+    if start < seen.len() {
+        seen[start] = true;
+    }
+    let mut k = 0;
+    while k < order.len() {
+        let cur = order[k];
+        k += 1;
+        for j in 0..rects.len() {
+            if !seen[j] && touching(rects[cur], rects[j], tol) {
+                seen[j] = true;
+                order.push(j);
+            }
+        }
+    }
+    order.into_iter().filter(|&i| i != start).collect()
+}
+
 /// Snapping while a window is being dragged. Windows proposes every new rectangle relative to the one that was
 /// *last applied*, not to where the drag began. If the snapped rectangle were fed back as the new position, a window
 /// sitting on an edge could never be pulled away (each step is smaller than the snap distance and lands inside it
@@ -139,12 +218,20 @@ impl SnapDrag {
         Self { virt: start, last: start }
     }
 
-    /// The rectangle to apply for the proposed one.
-    pub fn step(&mut self, proposed: Rect, work: Rect, distance: i32, margin: i32) -> Rect {
+    /// The rectangle to apply for the proposed one. `others` are the other HUDshell windows the dragged one may snap to; a screen edge
+    /// wins over a window on the same axis.
+    pub fn step(&mut self, proposed: Rect, work: Rect, distance: i32, margin: i32, others: &[Rect]) -> Rect {
         let (dx, dy) = (proposed.l - self.last.l, proposed.t - self.last.t);
         self.virt = Rect::new(self.virt.l + dx, self.virt.t + dy, self.virt.r + dx, self.virt.b + dy);
         // a corner zone three times the snap distance (plus the margin) pulls the window flush into the corner
-        let out = corner_snap(self.virt, work, distance * 3 + margin).unwrap_or_else(|| snap_rect(self.virt, work, distance, margin));
+        let mut out = corner_snap(self.virt, work, distance * 3 + margin).unwrap_or_else(|| snap_rect(self.virt, work, distance, margin));
+        let win = snap_to_rects(self.virt, others, distance);
+        if out.l == self.virt.l && win.l != self.virt.l {
+            out = Rect::new(win.l, out.t, win.l + out.w(), out.b);
+        }
+        if out.t == self.virt.t && win.t != self.virt.t {
+            out = Rect::new(out.l, win.t, out.r, win.t + out.h());
+        }
         self.last = out;
         out
     }
@@ -164,7 +251,7 @@ mod tests {
         for _ in 0..6 {
             // what Windows proposes: the last applied rectangle moved by the cursor's step
             let proposed = Rect::new(applied.l, applied.t + 8, applied.r, applied.b + 8);
-            applied = d.step(proposed, WORK, 16, 8);
+            applied = d.step(proposed, WORK, 16, 8, &[]);
             tops.push(applied.t);
         }
         assert_eq!(tops[0], 8, "still held by the magnet after 8 px");
@@ -187,7 +274,7 @@ mod tests {
             prev = off;
             // what Windows proposes: the last applied rectangle moved by this step
             let proposed = Rect::new(applied.l + dx, applied.t + dy, applied.r + dx, applied.b + dy);
-            applied = d.step(proposed, WORK, 16, 8);
+            applied = d.step(proposed, WORK, 16, 8, &[]);
         }
         assert_eq!((applied.r, applied.b), (1920, 1040), "flush into the corner, no margin: {applied:?}");
         assert_eq!((applied.w(), applied.h()), (640, 360), "the size never changes");
@@ -205,6 +292,57 @@ mod tests {
         assert!(touches_corner(WORK, WORK), "a maximized window touches every corner");
         assert!(!touches_corner(Rect::new(8, 8, 648, 368), WORK), "a window inset by the margin keeps rounded corners");
         assert!(!touches_corner(Rect::new(0, 300, 640, 660), WORK), "on one edge only");
+    }
+
+    #[test]
+    fn a_window_snaps_flush_against_another_and_lines_up_with_it() {
+        let other = Rect::new(300, 300, 700, 560);
+        // 6 px to the right of it, 5 px lower: flush against its right edge, same top
+        let w = Rect::new(706, 305, 1106, 565);
+        assert_eq!(snap_to_rects(w, &[other], 16), Rect::new(700, 300, 1100, 560));
+        // 8 px under it, 4 px to the left: flush under it, same left edge
+        let w = Rect::new(296, 568, 696, 828);
+        assert_eq!(snap_to_rects(w, &[other], 16), Rect::new(300, 560, 700, 820));
+        // against its left side
+        let w = Rect::new(-110, 297, 290, 557);
+        assert_eq!(snap_to_rects(w, &[other], 16), Rect::new(-100, 300, 300, 560));
+        // too far, or not next to it at all
+        let far = Rect::new(760, 300, 1160, 560);
+        assert_eq!(snap_to_rects(far, &[other], 16), far);
+        let apart = Rect::new(706, 700, 1106, 960);
+        assert_eq!(snap_to_rects(apart, &[other], 16), apart, "beside it in x but a whole window lower: not snapped");
+        assert_eq!(snap_to_rects(w, &[], 16), w);
+        assert_eq!(snap_to_rects(w, &[other], 0), w, "distance 0 turns it off");
+    }
+
+    #[test]
+    fn a_drag_snaps_to_another_window_but_a_screen_edge_wins_on_its_axis() {
+        let other = Rect::new(500, 400, 900, 660);
+        let start = Rect::new(1000, 405, 1400, 665);
+        let mut d = SnapDrag::new(start);
+        // 6 px right of the other window's right edge: flush against it
+        let applied = d.step(Rect::new(906, 405, 1306, 665), WORK, 16, 8, &[other]);
+        assert_eq!((applied.l, applied.t), (900, 400));
+        // next to the left screen edge and the other window at once: the screen edge wins horizontally
+        let mut d = SnapDrag::new(Rect::new(200, 300, 400, 500));
+        let applied = d.step(Rect::new(10, 300, 210, 500), WORK, 16, 8, &[Rect::new(220, 300, 420, 500)]);
+        assert_eq!(applied.l, 8, "the screen margin wins over the window beside it");
+    }
+
+    #[test]
+    fn windows_that_touch_move_together() {
+        let a = Rect::new(0, 0, 400, 300);
+        let b = Rect::new(400, 0, 800, 300); // beside a
+        let c = Rect::new(400, 300, 800, 600); // under b
+        let far = Rect::new(1000, 0, 1400, 300);
+        let corner = Rect::new(800, 300, 1000, 500); // only touches c at a corner
+        assert!(touching(a, b, 1) && touching(b, c, 1));
+        assert!(!touching(a, c, 1), "a and c only meet at a point");
+        assert!(!touching(a, far, 1));
+        assert!(touching(c, corner, 1) && touching(corner, c, 1), "touching is symmetric");
+        assert_eq!(group_of(&[a, b, c, far], 0, 1), vec![1, 2], "through b to c");
+        assert_eq!(group_of(&[a, b, c, far], 3, 1), Vec::<usize>::new());
+        assert!(touching(Rect::new(0, 0, 400, 300), Rect::new(402, 10, 800, 300), 2), "within the tolerance");
     }
 
     #[test]

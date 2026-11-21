@@ -15,6 +15,7 @@ click-through by default, an explicit keyboard-focus toggle, and an adjustable o
 - **Grab / release keyboard focus** with a hotkey, or click the terminal while it is interactive.
 - **Opacity** from 20% to 100% (hotkeys, settings panel, or `config.json`).
 - **Several shells in one window** (up to 9): visible tabs, a compact overlay-only list, switch hotkeys that work while the game has the keyboard, tab names taken from each program's own window title (like a normal terminal tab), a label when a tab runs Claude Code, Codex or a similar tool, a mark on tabs with unseen output, and profiles (start folder, start command, accent colour).
+- **Several windows** (up to 4): move a shell into a window of its own (Shift+click on its tab, or a hotkey); the shell keeps running and is repainted there. Each window has its own shells (up to 9), layout, opacity and pointer mode. The hotkeys act on the window that was last active (a hotkey switches between windows), the tray menu has "all windows" items (ghost, show / hide), windows snap flush against each other and touching windows move together (hold Shift while dragging to move one alone), closing the last shell of a window closes it, and `restore_session` brings all windows back where they were.
 - **Split panes**: show two shells side by side or stacked, or four in a 2 x 2 grid, in the same window; a hotkey moves the keyboard between panes and another zooms one pane to the whole window. A window too small for the layout shows fewer panes. Equal halves by default; uneven splits, draggable dividers and a separate list of shells per pane are options.
 - **Text size**: each terminal keeps its own text size (bigger / smaller / reset hotkeys act on the focused one), plus a global percent scale, a scale for HUDshell's own text (tabs, pane names, overlays), line height and letter spacing; all optional settings, all off at their defaults.
 - **Moving**: drag the slim strip along the top edge (resize from any edge or corner); the window snaps magnetically to screen edges, **dropping it near a corner pulls it flush into the corner (corners square, no gap)**, **drag it to the top edge of a screen to maximize it** (over the taskbar by default; `maximize_area`), drag the strip of a maximized window to restore it, or double-click the strip to maximize / restore.
@@ -70,6 +71,8 @@ Or by hand: `npm install`, `npm run build`, `cargo build --release`.
 | Ctrl+Alt+' | next layout: single, side by side, stacked, 2 x 2 |
 | Ctrl+Alt+O | move the keyboard to the next pane |
 | Ctrl+Alt+Z | zoom the focused pane to the whole window, press again to go back |
+| Ctrl+Alt+D | move the active shell into a window of its own (Shift+click on a tab does the same for that tab) |
+| Ctrl+Alt+Shift+W | make the next HUDshell window the one the hotkeys act on |
 | Ctrl+Alt+Q | quit |
 
 On a keyboard layout with an **AltGr** key (right Alt, which Windows treats as Ctrl+Alt), a character typed with AltGr that sits on the same key as one of these hotkeys is taken by HUDshell instead (on a German layout AltGr+Q, `@`, is the quit hotkey). HUDshell warns you at start (a tray notification) which of its hotkeys clash on your current layout. Change those hotkeys in `config.json` if you need the characters.
@@ -99,7 +102,7 @@ values are range-checked, and an unreadable file is kept as `config.json.bad-N` 
 | `ui_scale` | `100` | percent, 50-300, for HUDshell's own text: tab names, pane names, overlays, the picker and the settings panel |
 | `scrollback` | `2000` | lines, 100-100000 |
 | `shell` | none | full path of a shell to use instead of PowerShell 7 |
-| `hotkeys` | see table above | `click_through`, `grab_focus`, `show_hide`, `cycle_colours`, `opacity_up`, `opacity_down`, `settings`, `ghost`, `quit`, `corner_next`, `corner_prev`, `size_cycle`, `font_bigger`, `font_smaller`, `font_reset`, `shell_next`, `shell_prev`, `shell_new`, `shell_close`, `shell_list`, `shell_picker`, `shell_attention`, `layout_cycle`, `pane_zoom`, `pane_next`, `shell_jump` (modifiers only; `Ctrl+Alt` means Ctrl+Alt+1..9); every chord needs at least one modifier |
+| `hotkeys` | see table above | `click_through`, `grab_focus`, `show_hide`, `cycle_colours`, `opacity_up`, `opacity_down`, `settings`, `ghost`, `quit`, `corner_next`, `corner_prev`, `size_cycle`, `font_bigger`, `font_smaller`, `font_reset`, `shell_next`, `shell_prev`, `shell_new`, `shell_close`, `shell_list`, `shell_picker`, `shell_attention`, `layout_cycle`, `pane_zoom`, `pane_next`, `window_detach`, `window_next`, `shell_jump` (modifiers only; `Ctrl+Alt` means Ctrl+Alt+1..9); every chord needs at least one modifier |
 | `ghost_opacity` | `40` | percent used by the ghost preset (20-100); never brightens a window that is already dimmer; never saved over `opacity` |
 | `copy_on_select` | `false` | copy the selection when the mouse button is released |
 | `right_click` | `"off"` | `"paste"`: right-click copies a selection, or pastes when nothing is selected |
