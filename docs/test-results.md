@@ -37,6 +37,10 @@ release 20, config 24, soak 4. Three displays, the second at 150%.
   bounding box of all monitors; tiling happened at an edge where another monitor continues; windows dragged along as a group stayed displaced when the
   drop became a tile. One finding was not acted on: the `ui` checks send US-layout key codes (as the older checks already do).
 - **Real prompts (`real`, run once after the full run, sandbox folder):** real prompts went through Claude Code and Codex CLI in HUDshell. The suite's own two checks passed (the run reached the end; it never aborted for a missing prompt). That run was started on the build with several windows, tiling and the new panel rows, so the two CLIs ran in a build with those features; the screen dumps were not re-read line by line this time, so only what the suite checks is claimed.
+- **What several windows cost (`costwin`, no OS input, 2026-11-21):** the same four shells in one window: the process tree (HUDshell, its web view
+  processes and the shells) holds **296 MB** (HUDshell itself 4.9 MB) and idle CPU is 1.4% of one core over 10 s; spread over four windows it
+  holds **392 MB** (HUDshell 5.1 MB) and 1.7%. That is about 32 MB per extra window (each has a web view of its own). One run on one machine, in
+  the test build; shells printing nothing. Frame-time impact next to a running game was not measured.
 - **A test fault found on the way:** the `--inputtest` scenario quit by itself after 80 s, in the middle of the longer `snap` run; it now runs for 200 s.
 
 ## Several windows (2026-11-21, built and tested step by step)

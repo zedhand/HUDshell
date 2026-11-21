@@ -33,7 +33,7 @@ New-Item -ItemType Directory -Force $scratch | Out-Null
 $env:HUDSHELL_TEST_DIR = $scratch
 if ($Sandbox) { $env:HUDSHELL_SANDBOX = $Sandbox } else { $env:HUDSHELL_SANDBOX = $scratch }
 $Suite = @($Suite | ForEach-Object { $_ -split ',' } | Where-Object { $_ })
-$want = if ($Suite -contains 'all') { @('static', 'keys', 'width', 'hideshow', 'clickfocus', 'clipboard', 'autotest', 'ui', 'scrollback', 'ghost', 'attention', 'policy', 'place', 'dpi', 'text', 'reload', 'restore', 'recover', 'windows', 'winrestore', 'winmove', 'qol', 'sessions', 'shells', 'layout', 'input', 'snap', 'windowsnap', 'kbd', 'cost', 'release', 'config', 'soak') + $(if ($Sandbox) { 'real' } else { @() }) } else { $Suite }
+$want = if ($Suite -contains 'all') { @('static', 'keys', 'width', 'hideshow', 'clickfocus', 'clipboard', 'autotest', 'ui', 'scrollback', 'ghost', 'attention', 'policy', 'place', 'dpi', 'text', 'reload', 'restore', 'recover', 'windows', 'winrestore', 'winmove', 'costwin', 'qol', 'sessions', 'shells', 'layout', 'input', 'snap', 'windowsnap', 'kbd', 'cost', 'release', 'config', 'soak') + $(if ($Sandbox) { 'real' } else { @() }) } else { $Suite }
 
 $script:R = New-Object System.Collections.Generic.List[object]
 # Appended to every check name while a suite runs a second time on another monitor.
@@ -1720,6 +1720,37 @@ function Suite-Cost {
   } finally { Stop-HUDshell }
 }
 
+# What several windows cost: the same four shells in one window and then in four windows (each window has a web view of its own). No OS input.
+function Suite-CostWindows {
+  Write-Host "=== costwin: memory and idle CPU of four shells in one window, then in four windows (no OS input) ==="
+  Stop-HUDshell
+  $p = $null
+  try {
+    $n = LineCount $log
+    $p = Start-Process $dbg -ArgumentList @('--term', '--costwindows', '--delay', '2') -PassThru
+    $waitFor = { param($label) for ($i = 0; $i -lt 150; $i++) { Start-Sleep 1; if ($p.HasExited) { return $false }; if (@(Cut $log $n | Where-Object { $_ -match ('WINDOWS label=' + $label + ' ') }).Count -ge 1) { return $true } }; return $false }
+    $sample = {
+      Start-Sleep 3
+      $mem = Tree-Memory $p.Id
+      $c0 = Tree-Cpu $p.Id; Start-Sleep 10; $c1 = Tree-Cpu $p.Id
+      return [pscustomobject]@{ HostMB = [Math]::Round($mem[0] / 1MB, 1); TreeMB = [Math]::Round($mem[1] / 1MB, 0); CpuPct = [Math]::Round((($c1 - $c0) / 10.0) * 100, 1) }
+    }
+    $okA = & $waitFor 'one-window'
+    $a = if ($okA) { & $sample } else { $null }
+    $okB = & $waitFor 'four-windows'
+    $w = Get-Windows @(Cut $log $n) 'four-windows'
+    $b = if ($okB) { & $sample } else { $null }
+    Check 'costwin' 'four shells in one window were running, then spread over four windows' ($okA -and $okB -and $w -and $w.N -eq 4) $(if ($w) { "windows: $($w.N)" } else { 'no state' })
+    if ($a -and $b) {
+      Check 'costwin' ("one window, 4 shells: tree " + $a.TreeMB + " MB (host " + $a.HostMB + " MB), idle CPU " + $a.CpuPct + "% of one core over 10 s") $true
+      Check 'costwin' ("four windows, the same 4 shells: tree " + $b.TreeMB + " MB (host " + $b.HostMB + " MB), idle CPU " + $b.CpuPct + "% of one core over 10 s") $true
+      $per = [Math]::Round(($b.TreeMB - $a.TreeMB) / 3.0, 0)
+      Check 'costwin' "each extra window costs about $per MB (a sanity bound of 300 MB)" ($per -lt 300) "1 -> 4 windows: $($a.TreeMB) -> $($b.TreeMB) MB"
+      Check 'costwin' 'four idle windows stay under 10% of one core' ($b.CpuPct -lt 10) "$($b.CpuPct)%"
+    }
+  } finally { Stop-HUDshell }
+}
+
 function Tree-Memory([int]$rootPid) {
   $all = Get-CimInstance Win32_Process -Property ProcessId, ParentProcessId, Name
   $ids = New-Object System.Collections.Generic.HashSet[int]; [void]$ids.Add($rootPid)
@@ -1787,6 +1818,7 @@ foreach ($s in $want) {
     'windows' { Suite-Windows }
     'winrestore' { Suite-WindowsRestore }
     'winmove' { Suite-WindowsMove }
+    'costwin' { Suite-CostWindows }
     'windowsnap' { Suite-WindowSnap }
     'input' { Suite-Input }
     'snap' { Suite-Snap }
