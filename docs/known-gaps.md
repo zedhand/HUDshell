@@ -7,12 +7,13 @@ Everything here is either untested or not implemented. Verified behaviour is in 
 | Item | What it takes |
 |---|---|
 | Pane frames and names drawn over the edge cells of a pane; the small-window fallback on a monitor that is not at 100% | by hand |
-| Mixed-DPI behaviour (all test displays were 100%) | a second display at 125-200% |
+| Scalings other than 100% and 150% (tested: one 100% and one 150% monitor, side by side); dragging the window across the border between them with the real mouse (the scaling change happens during the drag; the tests move the window with a function call); the settings panel's real-mouse checks at 150% (they use pixel offsets for 100%); the third (100%, 480 px high) monitor | a display at 125% / 200%, and a hand drag across |
+| The size saved in `config.json` is in physical pixels: if the display scaling is changed between runs, the window comes back the same number of pixels, so a different logical size | change the scaling and restart |
 | Other games; exclusive-fullscreen games (overlays cannot draw over them); anti-cheat titles | try each under normal use; stop at any warning |
 | Frame-time / FPS impact next to a running game | capture frame times with and without HUDshell |
 | Games that capture raw mouse or controller input when focus is grabbed | observe on grab / release |
 | IME composition (CJK) | a real IME; xterm.js has open IME issues |
-| Non-US layouts, AltGr, dead keys | another layout installed |
+| Layouts beyond German and French (tested with real key presses: accented letters, dead keys, the default hotkeys still fire); IME composition; layouts that have no key for the punctuation hotkeys (` ; ' / , . - = [ ]) | another layout installed |
 | Claude Code / Codex permission, trust, login and update dialogs | manual walkthrough |
 | Windows versions other than build 26300 | a Windows 10 22H2 or Windows 11 24H2 VM |
 | A machine without the WebView2 runtime, Node or PowerShell 7 | a clean VM; check messages |
@@ -21,7 +22,7 @@ Everything here is either untested or not implemented. Verified behaviour is in 
 | Long, busy sessions at low opacity over a game (readability) | judgement over real use |
 | Whether Claude Code or Codex ring the terminal bell (the census does not count BEL; they sent no OSC 9 / OSC 777 in the real run) | count BEL in the census, or configure the CLIs' own notification setting (not done: it would edit their configuration) |
 | The permission prompt about pasting clipboard text seen once during a policy run | its source was not identified; no WebView2 permission request was logged and a search found no documented Windows prompt of that kind. If it recurs, note the exact wording and the step |
-| Corner docking, size presets, edge snapping and mouse resizing on a second monitor with different scaling, and with the taskbar on another edge (tested on one monitor at 100%, with real mouse drags for snapping and resizing) | a second display at 125-200% |
+| Corner docking, size presets, edge snapping and mouse resizing with the taskbar on another edge or hidden (tested on a 100% and a 150% monitor with the taskbar at the bottom of the primary one) | move the taskbar |
 | Tab strip while click-through is on (clicks pass through by design) | by hand |
 | A profile's start command timing (typed 0.9 s after the shell starts; a slow profile script could miss it) | try a heavy profile |
 | Clicking an OSC 8 link, the ghost tray menu item, the tray notification for attention requests, keyboard scrollback inside the CLIs | by hand |
@@ -29,11 +30,14 @@ Everything here is either untested or not implemented. Verified behaviour is in 
 ## Not implemented
 
 - Full settings UI (the panel covers opacity and colour theme; font, hotkeys and shell are edited in `config.json`).
-- Live config reload (config is read at start); `WM_DPICHANGED` handling; WebView2 crash recovery.
+- Live config reload (config is read at start); WebView2 crash recovery.
+- **AltGr clash on layouts that have it.** AltGr (right Alt) is Ctrl+Alt on Windows, and every default hotkey is Ctrl+Alt+something, so a character typed with AltGr that shares a key with a hotkey is taken by HUDshell instead: on a German layout AltGr+Q (`@`) triggers the quit hotkey (observed: HUDshell quit); AltGr+E (`€`), AltGr+7 / 8 / 9 / 0 (`{ [ ] }`) and others will be taken the same way. Workaround: change those hotkeys in `config.json` to a chord that does not use Ctrl+Alt together. A friendlier default or a warning at start is not implemented.
 - A friendly error when the shell cannot start (it is logged only).
 - Several windows (detach, snap to each other, move as a group) and session restore (reopening the same shells, folders and panes at launch). Planned next.
 - Per-pane shell lists (`pane_shells = "own"`) have no per-pane close confirmation text, no drag of a shell from one pane to another, and the list hotkey shows only the focused pane's shells.
 - Program labels (`tab_program`) look at process names only: a tool started through `node` (for example an npm-installed Claude Code) shows as `node` in `all` mode and not at all in `known` mode; any program that happens to be called `claude` or `codex` gets the label. Detection of the real Claude Code (native `claude.exe`) and Codex (the native `codex.exe` its npm launcher starts) has **not** been tested: the tests use a renamed copy of cmd.exe as a stand-in. The label can lag by up to 2 s and a very short program may never be seen.
+- Text size: a terminal's own size is not saved (it lasts until HUDshell quits); `text_scale`, `ui_scale`, `line_height` and `letter_spacing` are read at start only and have no row in the settings panel yet (live reload and the panel rows are planned). The drag strip, the edge handles and the pane divider do not follow `ui_scale`. A fractional result of `text_scale` is rounded to a whole number of points.
+- Windows' own snapping is not used: dragging to the left or right edge does not make half-screen tiles and there are no snap-layout corners (only the top-edge maximize described in the README); Win+Arrow is not handled. The maximized state is not saved: HUDshell always starts at the normal size.
 - Free-form splitting: a window has at most four panes in the fixed presets (single, side by side, stacked, 2 x 2). `remember_layout` saves the preset and split only, not which shell is in which pane.
 - Tab drag-to-reorder, rename by hand, and a tab for a shell started outside HUDshell.
 - Win+Arrow (native Windows snapping) is not supported or tested; HUDshell snaps itself.

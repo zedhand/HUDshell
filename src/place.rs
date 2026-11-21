@@ -100,10 +100,72 @@ pub fn snap_rect(win: Rect, work: Rect, distance: i32, margin: i32) -> Rect {
     Rect::new(x, y, x + w, y + h)
 }
 
+/// Snapping while a window is being dragged. Windows proposes every new rectangle relative to the one that was
+/// *last applied*, not to where the drag began. If the snapped rectangle were fed back as the new position, a window
+/// sitting on an edge could never be pulled away (each step is smaller than the snap distance and lands inside it
+/// again). So this keeps the position the window would have without snapping, and snaps that.
+pub struct SnapDrag {
+    virt: Rect,
+    last: Rect,
+}
+
+impl SnapDrag {
+    pub fn new(start: Rect) -> Self {
+        Self { virt: start, last: start }
+    }
+
+    /// The rectangle to apply for the proposed one.
+    pub fn step(&mut self, proposed: Rect, work: Rect, distance: i32, margin: i32) -> Rect {
+        let (dx, dy) = (proposed.l - self.last.l, proposed.t - self.last.t);
+        self.virt = Rect::new(self.virt.l + dx, self.virt.t + dy, self.virt.r + dx, self.virt.b + dy);
+        let out = snap_rect(self.virt, work, distance, margin);
+        self.last = out;
+        out
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     const WORK: Rect = Rect { l: 0, t: 0, r: 1920, b: 1040 };
+
+    #[test]
+    fn a_slow_drag_gets_away_from_an_edge() {
+        // 8 px steps downwards from a window flush at the top margin; the snap distance is 16, so a naive snap would pin it forever.
+        let mut d = SnapDrag::new(Rect::new(100, 8, 740, 368));
+        let mut applied = Rect::new(100, 8, 740, 368);
+        let mut tops = vec![];
+        for _ in 0..6 {
+            // what Windows proposes: the last applied rectangle moved by the cursor's step
+            let proposed = Rect::new(applied.l, applied.t + 8, applied.r, applied.b + 8);
+            applied = d.step(proposed, WORK, 16, 8);
+            tops.push(applied.t);
+        }
+        assert_eq!(tops[0], 8, "still held by the magnet after 8 px");
+        assert_eq!(tops[1], 8, "and after 16 px");
+        assert!(tops[2] > 8, "released once past the distance: {tops:?}");
+        assert_eq!(*tops.last().unwrap(), 8 + 6 * 8, "and then it follows the cursor exactly: {tops:?}");
+    }
+
+    #[test]
+    fn a_drag_towards_a_corner_snaps_into_it_on_both_axes() {
+        let start = Rect::new(500, 500, 1140, 860);
+        let mut d = SnapDrag::new(start);
+        let mut applied = start;
+        // the cursor path ends 10 px short of the bottom-right margin line on each axis
+        let (gx, gy) = (1920 - 8 - 10 - 1140, 1040 - 8 - 10 - 860);
+        let mut prev = (0, 0);
+        for i in 1..=10 {
+            let off = (gx * i / 10, gy * i / 10);
+            let (dx, dy) = (off.0 - prev.0, off.1 - prev.1);
+            prev = off;
+            // what Windows proposes: the last applied rectangle moved by this step
+            let proposed = Rect::new(applied.l + dx, applied.t + dy, applied.r + dx, applied.b + dy);
+            applied = d.step(proposed, WORK, 16, 8);
+        }
+        assert_eq!((applied.r, applied.b), (1920 - 8, 1040 - 8), "flush on both axes with the margin: {applied:?}");
+        assert_eq!((applied.w(), applied.h()), (640, 360), "the size never changes");
+    }
 
     #[test]
     fn corners_are_detected_from_the_centre() {

@@ -1,7 +1,7 @@
 <#
 HUDshell full test runner (Windows PowerShell 5.1 or PowerShell 7).
 
-  scripts\test-all.ps1 [-Suite static,keys,width,hideshow,clickfocus,clipboard,autotest,ui,scrollback,ghost,attention,policy,place,qol,sessions,shells,layout,input,cost,release,config,soak,real | all]
+  scripts\test-all.ps1 [-Suite static,keys,width,hideshow,clickfocus,clipboard,autotest,ui,scrollback,ghost,attention,policy,place,dpi,text,qol,sessions,shells,layout,input,snap,kbd,cost,release,config,soak,real | all]
                        [-Sandbox <folder both Claude Code and Codex already trust>] [-SoakSeconds 300]
 
 What it touches (read before running):
@@ -33,10 +33,13 @@ New-Item -ItemType Directory -Force $scratch | Out-Null
 $env:HUDSHELL_TEST_DIR = $scratch
 if ($Sandbox) { $env:HUDSHELL_SANDBOX = $Sandbox } else { $env:HUDSHELL_SANDBOX = $scratch }
 $Suite = @($Suite | ForEach-Object { $_ -split ',' } | Where-Object { $_ })
-$want = if ($Suite -contains 'all') { @('static', 'keys', 'width', 'hideshow', 'clickfocus', 'clipboard', 'autotest', 'ui', 'scrollback', 'ghost', 'attention', 'policy', 'place', 'qol', 'sessions', 'shells', 'layout', 'input', 'cost', 'release', 'config', 'soak') + $(if ($Sandbox) { 'real' } else { @() }) } else { $Suite }
+$want = if ($Suite -contains 'all') { @('static', 'keys', 'width', 'hideshow', 'clickfocus', 'clipboard', 'autotest', 'ui', 'scrollback', 'ghost', 'attention', 'policy', 'place', 'dpi', 'text', 'qol', 'sessions', 'shells', 'layout', 'input', 'snap', 'kbd', 'cost', 'release', 'config', 'soak') + $(if ($Sandbox) { 'real' } else { @() }) } else { $Suite }
 
 $script:R = New-Object System.Collections.Generic.List[object]
+# Appended to every check name while a suite runs a second time on another monitor.
+$script:CheckTag = ''
 function Check([string]$suite, [string]$name, [bool]$ok, [string]$detail = '') {
+  $name = $name + $script:CheckTag
   $status = if ($ok) { 'PASS' } else { 'FAIL' }
   $script:R.Add([pscustomobject]@{ Suite = $suite; Check = $name; Status = $status; Detail = $detail })
   Write-Host ("[{0}] {1}: {2} {3}" -f $status, $suite, $name, $detail)
@@ -46,11 +49,21 @@ function Warn([string]$suite, [string]$name, [string]$detail = '') {
   Write-Host ("[WARN] {0}: {1} {2}" -f $suite, $name, $detail)
 }
 
+# Per-monitor aware, so the window rectangles and mouse positions this script uses are physical pixels on every monitor
+# (a no-op if the host process already is).
+Add-Type -MemberDefinition '[DllImport("user32.dll")] public static extern bool SetProcessDpiAwarenessContext(IntPtr v);' -Name DpiAware -Namespace GTW
+try { [void][GTW.DpiAware]::SetProcessDpiAwarenessContext([IntPtr](-4)) } catch { }
 $drawingRef = if ($PSVersionTable.PSEdition -eq 'Core') { 'System.Drawing.Primitives' } else { 'System.Drawing' }
 Add-Type -ReferencedAssemblies $drawingRef -TypeDefinition @'
 using System; using System.Runtime.InteropServices; using System.Text; using System.Drawing;
 public static class GT {
   [DllImport("user32.dll")] static extern void keybd_event(byte vk, byte sc, uint fl, UIntPtr ex);
+  [DllImport("user32.dll")] static extern IntPtr LoadKeyboardLayout(string klid, uint flags);
+  [DllImport("user32.dll")] static extern short VkKeyScanEx(char ch, IntPtr hkl);
+  [DllImport("user32.dll")] static extern bool PostMessage(IntPtr h, uint m, IntPtr w, IntPtr l);
+  [DllImport("user32.dll")] static extern IntPtr GetKeyboardLayout(uint tid);
+  [StructLayout(LayoutKind.Sequential)] public struct GTI { public int cb; public uint flags; public IntPtr active, focus, capture, menu, move, caret; public int cl, ct, cr, cb2; }
+  [DllImport("user32.dll")] static extern bool GetGUIThreadInfo(uint tid, ref GTI i);
   [DllImport("user32.dll")] static extern void mouse_event(uint f, int dx, int dy, uint d, UIntPtr e);
   [DllImport("user32.dll")] static extern bool SetCursorPos(int x, int y);
   [DllImport("user32.dll")] static extern bool GetCursorPos(out POINT p);
@@ -75,13 +88,90 @@ public static class GT {
   public static IntPtr Find(uint pid) { IntPtr found = IntPtr.Zero; EnumWindows((h,l)=>{ uint p; GetWindowThreadProcessId(h,out p); if(p==pid){ var sb=new StringBuilder(64); GetClassName(h,sb,64); if(sb.ToString().ToLower().Contains("hudshell")){found=h; return false;} } return true; }, IntPtr.Zero); return found; }
   public static int Alpha(IntPtr h) { uint k; byte a; uint f; GetLayeredWindowAttributes(h,out k,out a,out f); return a; }
   public static bool IsFg(IntPtr h) { return GetForegroundWindow() == h; }
+  // ---- keyboard layouts: loaded into HUDshell's own input threads only (never the user's language list) ----
+  public static IntPtr LoadLayout(string klid) { return LoadKeyboardLayout(klid, 0); }
+  public static IntPtr FocusHwnd() { var g = new GTI(); g.cb = Marshal.SizeOf(typeof(GTI)); GetGUIThreadInfo(0, ref g); return g.focus; }
+  public static long FocusLayout() { IntPtr f = FocusHwnd(); if (f == IntPtr.Zero) return 0; uint p; uint t = GetWindowThreadProcessId(f, out p); return GetKeyboardLayout(t).ToInt64() & 0xFFFFFFFF; }
+  // WM_INPUTLANGCHANGEREQUEST (0x50) to the window that has the keyboard focus, as the language bar would send it.
+  public static void RequestLayout(IntPtr hkl) { IntPtr f = FocusHwnd(); if (f != IntPtr.Zero) PostMessage(f, 0x50, IntPtr.Zero, hkl); }
+  public static int ScanKey(char c, IntPtr hkl) { return VkKeyScanEx(c, hkl); }
+  static void Down(byte vk, bool ext) { keybd_event(vk, 0, ext ? 1u : 0u, UIntPtr.Zero); }
+  static void Up(byte vk, bool ext) { keybd_event(vk, 0, (ext ? 1u : 0u) | 2u, UIntPtr.Zero); }
+  // Type one character with real key presses the way this layout needs it (Shift, or AltGr = Ctrl+right Alt). False if the layout has no key for it.
+  public static bool TypeChar(char c, IntPtr hkl) {
+    int r = VkKeyScanEx(c, hkl); if (r == -1) return false;
+    byte vk = (byte)(r & 0xFF); int st = (r >> 8) & 0xFF;
+    bool shift = (st & 1) != 0, altgr = (st & 6) == 6, ctrl = (st & 2) != 0 && !altgr, alt = (st & 4) != 0 && !altgr;
+    if (shift) Down(0x10, false); if (ctrl) Down(0x11, false); if (alt) Down(0x12, false); if (altgr) { Down(0xA2, false); Down(0xA5, true); }
+    Down(vk, false); Up(vk, false);
+    if (altgr) { Up(0xA5, true); Up(0xA2, false); } if (alt) Up(0x12, false); if (ctrl) Up(0x11, false); if (shift) Up(0x10, false);
+    return true;
+  }
+  public static bool NeedsAltGr(char c, IntPtr hkl) { int r = VkKeyScanEx(c, hkl); return r != -1 && (((r >> 8) & 6) == 6); }
+  public static void AltGrKey(byte vk) { Down(0xA2, false); Down(0xA5, true); Down(vk, false); Up(vk, false); Up(0xA5, true); Up(0xA2, false); }
+  // The layout the window that has the keyboard uses now (Windows normally shares one layout between all windows).
+  public static long ForegroundLayout() { uint p; uint t = GetWindowThreadProcessId(GetForegroundWindow(), out p); return GetKeyboardLayout(t).ToInt64() & 0xFFFFFFFF; }
+  public static void RestoreSystemLayout(long hkl) {
+    var g = new GTI(); g.cb = Marshal.SizeOf(typeof(GTI)); GetGUIThreadInfo(0, ref g);
+    IntPtr l = new IntPtr(hkl);
+    if (g.focus != IntPtr.Zero) PostMessage(g.focus, 0x50, IntPtr.Zero, l);
+    IntPtr fg = GetForegroundWindow(); if (fg != IntPtr.Zero && fg != g.focus) PostMessage(fg, 0x50, IntPtr.Zero, l);
+  }
   public static void HotkeyShift(byte vk) { keybd_event(0x11,0,0,UIntPtr.Zero); keybd_event(0x12,0,0,UIntPtr.Zero); keybd_event(0x10,0,0,UIntPtr.Zero); keybd_event(vk,0,0,UIntPtr.Zero); keybd_event(vk,0,2,UIntPtr.Zero); keybd_event(0x10,0,2,UIntPtr.Zero); keybd_event(0x12,0,2,UIntPtr.Zero); keybd_event(0x11,0,2,UIntPtr.Zero); }
   public static void Move(int x, int y) { SetCursorPos(x, y); mouse_event(0x1,0,0,0,UIntPtr.Zero); }
 }
 '@
 
+Add-Type -TypeDefinition @'
+using System; using System.Collections.Generic; using System.Runtime.InteropServices;
+public static class MON {
+  [StructLayout(LayoutKind.Sequential)] public struct RECT { public int L, T, R, B; }
+  [StructLayout(LayoutKind.Sequential)] public struct MI { public int cb; public RECT mon; public RECT work; public uint flags; }
+  delegate bool Proc(IntPtr m, IntPtr dc, ref RECT r, IntPtr d);
+  [DllImport("user32.dll")] static extern bool EnumDisplayMonitors(IntPtr dc, IntPtr clip, Proc p, IntPtr d);
+  [DllImport("user32.dll")] static extern bool GetMonitorInfo(IntPtr m, ref MI mi);
+  [DllImport("shcore.dll")] static extern int GetDpiForMonitor(IntPtr m, int type, out uint x, out uint y);
+  public static List<string> All() {
+    var l = new List<string>();
+    EnumDisplayMonitors(IntPtr.Zero, IntPtr.Zero, (IntPtr m, IntPtr dc, ref RECT r, IntPtr d) => {
+      var mi = new MI(); mi.cb = Marshal.SizeOf(typeof(MI)); GetMonitorInfo(m, ref mi);
+      uint x, y; GetDpiForMonitor(m, 0, out x, out y);
+      l.Add(string.Format("{0},{1},{2},{3},{4},{5},{6},{7},{8},{9}", mi.mon.L, mi.mon.T, mi.mon.R, mi.mon.B, mi.work.L, mi.work.T, mi.work.R, mi.work.B, x, (mi.flags & 1) != 0 ? 1 : 0));
+      return true; }, IntPtr.Zero);
+    return l;
+  }
+}
+'@
+# Monitors as objects: physical pixels, work area (WL..WB), scaling in dpi (96 = 100%), Primary.
+function Get-Monitors {
+  foreach ($s in [MON]::All()) {
+    $v = $s -split ','
+    [pscustomobject]@{ L = [int]$v[0]; T = [int]$v[1]; R = [int]$v[2]; B = [int]$v[3]; WL = [int]$v[4]; WT = [int]$v[5]; WR = [int]$v[6]; WB = [int]$v[7]; Dpi = [int]$v[8]; Primary = ($v[9] -eq '1') }
+  }
+}
+# A monitor with a different scaling from the primary one (and big enough to test on), or $null.
+function Alt-Monitor {
+  $m = @(Get-Monitors)
+  $p = $m | Where-Object { $_.Primary } | Select-Object -First 1
+  if (-not $p) { return $null }
+  return ($m | Where-Object { -not $_.Primary -and $_.Dpi -ne $p.Dpi -and ($_.WR - $_.WL) -ge 1000 -and ($_.WB - $_.WT) -ge 600 } | Select-Object -First 1)
+}
+
 function Stop-HUDshell { Get-Process hudshell -ErrorAction SilentlyContinue | Stop-Process -Force; Start-Sleep -Milliseconds 400 }
-function Read-Lines([string]$p) { if (Test-Path -LiteralPath $p) { [IO.File]::ReadAllLines($p, [Text.Encoding]::UTF8) } else { @() } }
+function Read-Lines([string]$p) {
+  if (-not (Test-Path -LiteralPath $p)) { return @() }
+  # The app may be appending to the log right now: open it shared, and try again if it is locked for a moment.
+  for ($try = 0; $try -lt 20; $try++) {
+    try {
+      $fs = New-Object IO.FileStream($p, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite)
+      try { $t = (New-Object IO.StreamReader($fs, [Text.Encoding]::UTF8)).ReadToEnd() } finally { $fs.Dispose() }
+      $a = @($t -split "`r?`n")
+      if ($a.Count -gt 0 -and $a[$a.Count - 1] -eq '') { $a = @($a | Select-Object -SkipLast 1) }
+      return $a
+    } catch { Start-Sleep -Milliseconds 100 }
+  }
+  return @()
+}
 function Cut([string]$p, [int]$from) { $a = Read-Lines $p; if ($a.Count -le $from) { return @() }; return $a[$from..($a.Count - 1)] }
 function LineCount([string]$p) { (Read-Lines $p).Count }
 function Strip($l) { $l -replace '^\d+ ', '' }
@@ -497,6 +587,14 @@ function Suite-Config {
     [GT]::Hotkey(0xDE); Start-Sleep -Milliseconds 3000
     Quit-Rel $p
     Check 'config' 'remember_layout on: the chosen layout is saved' ((Get-Content -LiteralPath $cfgPath -Raw) -match '"layout":\s*"side-by-side"')
+    # 10. Text scaling settings: out-of-range values are clamped, an unknown hotkey scope falls back to focused.
+    Fresh
+    [IO.File]::WriteAllText($cfgPath, '{"text_scale": 5, "ui_scale": 999, "line_height": 10, "letter_spacing": 99, "text_scale_hotkeys": "x"}')
+    $p = Start-Rel
+    Check 'config' 'bad text values: app starts and no .bad file is made' ((-not $p.HasExited) -and -not (Test-Path (Join-Path $cfgDir 'config.json.bad-1')))
+    Quit-Rel $p
+    $saved = Get-Content -LiteralPath $cfgPath -Raw
+    Check 'config' 'bad text values were clamped (text 50, UI 300, line height 100, spacing 10) and the hotkey scope fell back to focused' (($saved -match '"text_scale":\s*50\b') -and ($saved -match '"ui_scale":\s*300\b') -and ($saved -match '"line_height":\s*100\b') -and ($saved -match '"letter_spacing":\s*10\b') -and ($saved -match '"text_scale_hotkeys":\s*"focused"'))
   } finally { Restore-Config }
   if ($script:hadCfg) { Check 'config' 'your config.json was restored byte-for-byte' ((Get-FileHash $cfgPath).Hash -eq $script:cfgHash) } else { Check 'config' 'test config files removed (none existed before)' (@(Get-ChildItem $cfgDir -Force -ErrorAction SilentlyContinue | Where-Object { $_.Name -like 'config.json*' }).Count -eq 0) }
 }
@@ -618,7 +716,16 @@ function Suite-Policy {
 
 function Suite-Place {
   Write-Host "=== place: corner docking, size presets, font size, magnetic snap (host functions, no OS input) ==="
-  $run = Run-Scenario @('--term', '--placetest', '--delay', '2') 60000
+  Place-Once @()
+  $alt = Alt-Monitor
+  if ($alt) {
+    $script:CheckTag = " [on the " + [int]($alt.Dpi * 100 / 96) + "% monitor]"
+    try { Place-Once @('--at', ("{0},{1}" -f ($alt.WL + 200), ($alt.WT + 150))) } finally { $script:CheckTag = '' }
+  } else { Warn 'place' 'no monitor with a different scaling found: placement on another scaling was not tested' }
+}
+
+function Place-Once([string[]]$extra) {
+  $run = Run-Scenario (@('--term', '--placetest', '--delay', '2') + $extra) 60000
   $s = Get-States $run
   function Rc($k) { $v = (($s[$k].rect) -split ','); $w = (($s[$k].work) -split ','); @{ l = [int]$v[0]; t = [int]$v[1]; r = [int]$v[2]; b = [int]$v[3]; wl = [int]$w[0]; wt = [int]$w[1]; wr = [int]$w[2]; wb = [int]$w[3]; dpi = [int]$s[$k].dpi } }
   foreach ($k in 'c1', 'c2', 'c3', 'c4', 'back', 'size1', 'size2', 'size3') { if (-not $s.ContainsKey($k)) { Check 'place' "state $k logged" $false; return } }
@@ -631,8 +738,12 @@ function Suite-Place {
   $c1 = Rc 'c1'; $c3 = Rc 'c3'
   Check 'place' 'docking keeps the window size' ((($c1.r - $c1.l) -eq ($c3.r - $c3.l)) -and (($c1.b - $c1.t) -eq ($c3.b - $c3.t)))
   $d = [double](Rc 'size1').dpi / 96
-  $a = Rc 'size1'; Check 'place' 'size hotkey: 900x520 -> 1280x720 (scaled), bottom-right anchored' ((($a.r - $a.l) -eq [int](1280 * $d)) -and (($a.b - $a.t) -eq [int](720 * $d)) -and ($a.wr - $a.r) -eq $m -and ($a.wb - $a.b) -eq $m) ("{0}x{1}" -f ($a.r - $a.l), ($a.b - $a.t))
-  $a = Rc 'size2'; Check 'place' 'size hotkey wraps to the smallest preset (640x360)' ((($a.r - $a.l) -eq [int](640 * $d)) -and (($a.b - $a.t) -eq [int](360 * $d)) -and ($a.wr - $a.r) -eq $m) ("{0}x{1}" -f ($a.r - $a.l), ($a.b - $a.t))
+  # A preset is never bigger than the work area; one that fills it leaves no margin, and then the next corner anchor has none either.
+  $a = Rc 'size1'; $ww = $a.wr - $a.wl; $wh = $a.wb - $a.wt
+  $ew = [Math]::Min([int](1280 * $d), $ww); $eh = [Math]::Min([int](720 * $d), $wh)
+  $full = ($ew -eq $ww) -or ($eh -eq $wh)
+  Check 'place' 'size hotkey: 900x520 -> 1280x720 (scaled, at most the work area), bottom-right anchored' ((($a.r - $a.l) -eq $ew) -and (($a.b - $a.t) -eq $eh) -and ((($a.wr - $a.r) -eq $m) -or ($ew -eq $ww)) -and ((($a.wb - $a.b) -eq $m) -or ($eh -eq $wh))) ("{0}x{1}" -f ($a.r - $a.l), ($a.b - $a.t))
+  $a = Rc 'size2'; Check 'place' 'size hotkey wraps to the smallest preset (640x360)' ((($a.r - $a.l) -eq [int](640 * $d)) -and (($a.b - $a.t) -eq [int](360 * $d)) -and ((($a.wr - $a.r) -eq $m) -or $full)) ("{0}x{1}" -f ($a.r - $a.l), ($a.b - $a.t))
   $a = Rc 'size3'; Check 'place' 'and on to 900x520 again' ((($a.r - $a.l) -eq [int](900 * $d)) -and (($a.b - $a.t) -eq [int](520 * $d)))
   Check 'place' 'font hotkeys: 14 -> 16 -> 15' (($s['font-up'].font -eq '16') -and ($s['font-down'].font -eq '15')) ("up=" + $s['font-up'].font + " down=" + $s['font-down'].font)
   $fsB = Get-DumpField $run 'font-base' 'fs'; $fsU = Get-DumpField $run 'font-up' 'fs'; $fsD = Get-DumpField $run 'font-down' 'fs'
@@ -859,13 +970,22 @@ function Last-State([string[]]$lines) {
 }
 
 function Suite-Input {
-  Write-Host "=== input: real picker hotkey, real mouse (tab click, divider drag, window drag, edge snap) - do not touch mouse/keyboard ==="
+  Write-Host "=== input: real picker hotkey, real mouse (tab click, divider drag, window drag, edge snap, resize) - do not touch mouse/keyboard ==="
+  Input-Once @()
+  $alt = Alt-Monitor
+  if ($alt) {
+    $script:CheckTag = " [on the " + [int]($alt.Dpi * 100 / 96) + "% monitor]"
+    try { Input-Once @('--at', ("{0},{1}" -f ($alt.WL + 200), ($alt.WT + 150))) } finally { $script:CheckTag = '' }
+  } else { Warn 'input' 'no monitor with a different scaling found: the real mouse was not tested on another scaling' }
+}
+
+function Input-Once([string[]]$extra) {
   Stop-HUDshell
   GTSave
   $p = $null
   try {
     $n = LineCount $log
-    $p = Start-Process $dbg -ArgumentList @('--term', '--inputtest', '--interactive', '--layout', 'side-by-side', '--dividers', '--tabs', 'always', '--delay', '2') -PassThru
+    $p = Start-Process $dbg -ArgumentList (@('--term', '--inputtest', '--interactive', '--layout', 'side-by-side', '--dividers', '--tabs', 'always', '--delay', '2') + $extra) -PassThru
     $ready = $null
     for ($i = 0; $i -lt 60 -and -not $ready; $i++) {
       Start-Sleep 1
@@ -949,6 +1069,279 @@ function Suite-Input {
   } finally {
     Stop-HUDshell
     [GT]::RestoreCursor()
+  }
+}
+
+# "cols,rows" of the page dump that follows "DUMP label=<label>".
+function Dump-Dim($run, [string]$label) {
+  $i = -1
+  for ($k = 0; $k -lt $run.Count; $k++) { if ($run[$k] -match ("DUMP label=" + [regex]::Escape($label) + '(\s|$)')) { $i = $k; break } }
+  if ($i -lt 0) { return $null }
+  for ($k = $i + 1; $k -lt $run.Count; $k++) { if ($run[$k] -match 'terminal dump: (\d+)x(\d+)') { return @([int]$Matches[1], [int]$Matches[2]) } }
+  return $null
+}
+
+function Suite-Text {
+  Write-Host "=== text: per-terminal text size, hotkey scope, reset, text scale, line and letter spacing, UI scale (no OS input) ==="
+  $f = { param($run, $lab) $u = Get-Ui $run $lab; if ($u) { $u.fonts } else { '?' } }
+  # 1. defaults: every terminal has its own size
+  $r = Run-Scenario @('--term', '--texttest', '--delay', '2') 90000
+  Check 'text' 'one terminal at the starting size (14 points)' ((& $f $r 't-base') -ceq '1:14/14') (& $f $r 't-base')
+  Check 'text' 'the hotkeys change only the focused terminal: shell 2 up by 2 -> 16, shell 1 stays 14' ((& $f $r 't-two-big') -ceq '1:14/14,2:16/16') (& $f $r 't-two-big')
+  Check 'text' 'back on shell 1 the smaller-text hotkey changes only shell 1 (13); shell 2 keeps 16' ((& $f $r 't-one-small') -ceq '1:13/13,2:16/16') (& $f $r 't-one-small')
+  Check 'text' 'each terminal still has its own size when you switch back to it' ((& $f $r 't-two-kept') -ceq '1:13/13,2:16/16') (& $f $r 't-two-kept')
+  Check 'text' 'reset puts only the focused terminal back to the starting size' ((& $f $r 't-reset') -ceq '1:13/13,2:14/14') (& $f $r 't-reset')
+  $u = Get-Ui $r 't-two-big'
+  Check 'text' 'defaults leave HUDshell''s own text and the spacing as they were (ui 1, tab strip 20 px at 12 px, line height 1, spacing 0, scale 100)' ($u -and $u.text.ui -ceq '1' -and $u.text.tabh -eq 20 -and $u.text.tabfs -ceq '12px' -and $u.text.lh -eq 1 -and $u.text.ls -eq 0 -and $u.text.scale -eq 100) ("ui " + $u.text.ui + ", strip " + $u.text.tabh + " px / " + $u.text.tabfs)
+  $baseDim = Dump-Dim $r 't-base'
+  # 2. text_scale_hotkeys = all: today's behaviour
+  $r = Run-Scenario @('--term', '--texttest', '--text-hotkeys', 'all', '--delay', '2') 90000
+  $all = (& $f $r 't-two-big') + ' | ' + (& $f $r 't-one-small') + ' | ' + (& $f $r 't-reset')
+  Check 'text' 'text_scale_hotkeys=all: both terminals change together (16/16, then 15/15, then reset 14/14)' (((& $f $r 't-two-big') -ceq '1:16/16,2:16/16') -and ((& $f $r 't-one-small') -ceq '1:15/15,2:15/15') -and ((& $f $r 't-reset') -ceq '1:14/14,2:14/14')) $all
+  # 3. text_scale = 150
+  $r = Run-Scenario @('--term', '--texttest', '--text-scale', '150', '--delay', '2') 90000
+  Check 'text' 'text_scale=150: 14 points show as 21, and a terminal at 16 shows as 24' (((& $f $r 't-base') -ceq '1:21/14') -and ((& $f $r 't-two-big') -ceq '1:21/14,2:24/16')) ((& $f $r 't-base') + ' | ' + (& $f $r 't-two-big'))
+  $scDim = Dump-Dim $r 't-base'
+  Check 'text' 'a bigger text scale gives fewer columns and rows in the same window' ($baseDim -and $scDim -and $scDim[0] -lt $baseDim[0] -and $scDim[1] -lt $baseDim[1]) ("{0}x{1} -> {2}x{3}" -f $baseDim[0], $baseDim[1], $scDim[0], $scDim[1])
+  # 4. line height and letter spacing
+  $r = Run-Scenario @('--term', '--texttest', '--line-height', '150', '--letter-spacing', '3', '--delay', '2') 90000
+  $u = Get-Ui $r 't-base'; $spDim = Dump-Dim $r 't-base'
+  Check 'text' 'line_height=150 and letter_spacing=3 reach the terminals' ($u -and $u.text.lh -eq 1.5 -and $u.text.ls -eq 3) ("lh " + $u.text.lh + ", ls " + $u.text.ls)
+  Check 'text' 'taller lines and wider letters give fewer rows and columns' ($baseDim -and $spDim -and $spDim[0] -lt $baseDim[0] -and $spDim[1] -lt $baseDim[1]) ("{0}x{1} -> {2}x{3}" -f $baseDim[0], $baseDim[1], $spDim[0], $spDim[1])
+  # 5. UI scale
+  $r = Run-Scenario @('--term', '--texttest', '--ui-scale', '150', '--delay', '2') 90000
+  $u = Get-Ui $r 't-two-big'
+  Check 'text' 'ui_scale=150: the tab strip is 30 px high with 18 px text, and the terminal starts lower to make room' ($u -and $u.text.ui -ceq '1.5' -and $u.text.tabh -eq 30 -and $u.text.tabfs -ceq '18px' -and $u.text.termtop -eq 52) ("ui " + $u.text.ui + ", strip " + $u.text.tabh + " px / " + $u.text.tabfs + ", terminal top " + $u.text.termtop)
+  Check 'text' 'no start failures logged' (@($r | Where-Object { $_ -match 'FAILED to start' }).Count -eq 0)
+}
+
+function Drag-Mouse($x0, $y0, $x1, $y1) {
+  [GT]::Move($x0, $y0); Start-Sleep -Milliseconds 300; [GT]::MouseDown(); Start-Sleep -Milliseconds 250
+  for ($i = 1; $i -le 14; $i++) { [GT]::Move([int]($x0 + ($x1 - $x0) * $i / 14), [int]($y0 + ($y1 - $y0) * $i / 14)); Start-Sleep -Milliseconds 70 }
+  Start-Sleep -Milliseconds 250; [GT]::MouseUp(); Start-Sleep -Milliseconds 2500
+}
+
+# One monitor: the window (640x360 at 96 dpi) starts on it; real drags put its corners 6 px (96-dpi) from each corner of the work area.
+# When $crossTo is given, the window is then dragged onto each of those monitors and snapped into the bottom-right corner there.
+function Snap-Monitor($m, $others) {
+  $dpr = $m.Dpi / 96.0
+  $name = "monitor " + ($m.WR - $m.WL) + "x" + ($m.WB - $m.WT) + " at " + [int]($m.Dpi * 100 / 96) + "%"
+  Stop-HUDshell
+  GTSave
+  $p = $null
+  try {
+    $n = LineCount $log
+    $at = "{0},{1}" -f ($m.WL + 150), ($m.WT + 100)
+    $p = Start-Process $dbg -ArgumentList @('--term', '--inputtest', '--interactive', '--size', '640,360', '--at', $at, '--delay', '2') -PassThru
+    $st = $null
+    for ($i = 0; $i -lt 40 -and -not $st; $i++) {
+      Start-Sleep 1
+      if ($p.HasExited) { break }
+      $st = Last-State @(Cut $log $n)
+      if ($st -and ($st.R - $st.L) -lt [int](500 * $dpr)) { $st = $null }
+    }
+    Check 'snap' "$name`: window started on it at 640x360 (96 dpi)" ($null -ne $st) $(if ($st) { "{0}x{1}" -f ($st.R - $st.L), ($st.B - $st.T) } else { 'no state' })
+    if (-not $st) { return }
+    $mg = [int]($m.Dpi * 8 / 96)
+    $ins = [int](6 * $dpr)
+    foreach ($c in 'top-left', 'top-right', 'bottom-right', 'bottom-left') {
+      $st = Last-State @(Cut $log $n); $w = $st.R - $st.L; $h = $st.B - $st.T
+      switch ($c) {
+        'top-left'     { $nl = $m.WL + $ins;            $nt = $m.WT + $ins }
+        'top-right'    { $nl = $m.WR - $ins - $w;       $nt = $m.WT + $ins }
+        'bottom-right' { $nl = $m.WR - $ins - $w;       $nt = $m.WB - $ins - $h }
+        'bottom-left'  { $nl = $m.WL + $ins;            $nt = $m.WB - $ins - $h }
+      }
+      $gx = $st.L + [int](200 * $dpr); $gy = $st.T + [int](10 * $dpr)
+      Drag-Mouse $gx $gy ($gx + $nl - $st.L) ($gy + $nt - $st.T)
+      $s2 = Last-State @(Cut $log $n)
+      $okx = if ($c -match 'left') { [Math]::Abs($s2.L - ($m.WL + $mg)) -le 1 } else { [Math]::Abs(($m.WR - $s2.R) - $mg) -le 1 }
+      $oky = if ($c -match 'top') { [Math]::Abs($s2.T - ($m.WT + $mg)) -le 1 } else { [Math]::Abs(($m.WB - $s2.B) - $mg) -le 1 }
+      Check 'snap' "$name`: a real drag that ends 6 px from the $c corner snaps flush into it (margin $mg px on both sides)" ($okx -and $oky) ("window {0},{1},{2},{3} in work {4},{5},{6},{7}" -f $s2.L, $s2.T, $s2.R, $s2.B, $m.WL, $m.WT, $m.WR, $m.WB)
+    }
+    # Dragging to the top edge of the screen maximizes (fills the work area), like any normal window; dragging the strip of a
+    # maximized window down restores it; double-clicking the strip toggles.
+    $st = Last-State @(Cut $log $n); $w0 = $st.R - $st.L; $h0 = $st.B - $st.T
+    $gx = $st.L + [int](200 * $dpr); $gy = $st.T + [int](10 * $dpr)
+    [GT]::Move($gx, $gy); Start-Sleep -Milliseconds 300; [GT]::MouseDown(); Start-Sleep -Milliseconds 250
+    for ($i = 1; $i -le 14; $i++) { [GT]::Move($gx, [int]($gy + ($m.T - $gy) * $i / 14)); Start-Sleep -Milliseconds 70 }
+    Start-Sleep -Milliseconds 900; [GT]::MouseUp(); Start-Sleep -Milliseconds 2500
+    $s5 = Last-State @(Cut $log $n)
+    $isMax = ([Math]::Abs($s5.L - $m.WL) -le 1) -and ([Math]::Abs($s5.T - $m.WT) -le 1) -and ([Math]::Abs($s5.R - $m.WR) -le 1) -and ([Math]::Abs($s5.B - $m.WB) -le 1)
+    Check 'snap' "$name`: dragging the window to the top edge of the screen maximizes it to the work area" $isMax ("window {0},{1},{2},{3} in work {4},{5},{6},{7}" -f $s5.L, $s5.T, $s5.R, $s5.B, $m.WL, $m.WT, $m.WR, $m.WB)
+    if ($isMax) {
+      $gx = $s5.L + [int](($s5.R - $s5.L) / 2); $gy = $s5.T + [int](10 * $dpr)
+      Drag-Mouse $gx $gy $gx ($gy + [int](200 * $dpr))
+      $s6 = Last-State @(Cut $log $n)
+      Check 'snap' "$name`: dragging the maximized window down by its top strip restores its earlier size (${w0}x${h0}) and it follows the cursor" (([Math]::Abs(($s6.R - $s6.L) - $w0) -le 3) -and ([Math]::Abs(($s6.B - $s6.T) - $h0) -le 3) -and ($s6.T -gt $m.WT + [int](100 * $dpr)) -and ($s6.L -lt $gx) -and ($s6.R -gt $gx)) ("window {0},{1},{2},{3}" -f $s6.L, $s6.T, $s6.R, $s6.B)
+    }
+    $st = Last-State @(Cut $log $n)
+    $gx = $st.L + [int](200 * $dpr); $gy = $st.T + [int](10 * $dpr)
+    [GT]::Move($gx, $gy); Start-Sleep -Milliseconds 300
+    [GT]::MouseDown(); Start-Sleep -Milliseconds 100; [GT]::MouseUp(); Start-Sleep -Milliseconds 150
+    [GT]::MouseDown(); Start-Sleep -Milliseconds 100; [GT]::MouseUp(); Start-Sleep -Milliseconds 2500
+    $s7 = Last-State @(Cut $log $n)
+    $dbl = ([Math]::Abs($s7.L - $m.WL) -le 1) -and ([Math]::Abs($s7.T - $m.WT) -le 1) -and ([Math]::Abs($s7.R - $m.WR) -le 1) -and ([Math]::Abs($s7.B - $m.WB) -le 1)
+    Check 'snap' "$name`: a double click on the top strip maximizes" $dbl ("window {0},{1},{2},{3}" -f $s7.L, $s7.T, $s7.R, $s7.B)
+    $gx = $s7.L + [int](200 * $dpr); $gy = $s7.T + [int](10 * $dpr)
+    [GT]::Move($gx, $gy); Start-Sleep -Milliseconds 300
+    [GT]::MouseDown(); Start-Sleep -Milliseconds 100; [GT]::MouseUp(); Start-Sleep -Milliseconds 150
+    [GT]::MouseDown(); Start-Sleep -Milliseconds 100; [GT]::MouseUp(); Start-Sleep -Milliseconds 2500
+    $s8 = Last-State @(Cut $log $n)
+    Check 'snap' "$name`: a second double click restores it (${w0}x${h0})" (([Math]::Abs(($s8.R - $s8.L) - $w0) -le 3) -and ([Math]::Abs(($s8.B - $s8.T) - $h0) -le 3)) ("window {0},{1},{2},{3}" -f $s8.L, $s8.T, $s8.R, $s8.B)
+    foreach ($o in @($others)) {
+      $odpr = $o.Dpi / 96.0
+      $oname = "monitor " + ($o.WR - $o.WL) + "x" + ($o.WB - $o.WT) + " at " + [int]($o.Dpi * 100 / 96) + "%"
+      $st = Last-State @(Cut $log $n); $w0 = $st.R - $st.L
+      $gx = $st.L + [int](200 * $dpr); $gy = $st.T + [int](10 * $dpr)
+      Drag-Mouse $gx $gy ($o.WL + [int](($o.WR - $o.WL) / 2)) ($o.WT + [int](100 * $odpr))
+      $s3 = Last-State @(Cut $log $n)
+      $u = Last-Ui @(Cut $log $n)
+      $inside = ($s3.L -ge $o.L -and $s3.R -le $o.R -and $s3.T -ge $o.T -and $s3.B -le $o.B)
+      Check 'snap' "$name -> $oname`: dragging the window across the border puts it wholly on the other monitor, at that monitor's scaling" ($inside -and $u -and [Math]::Abs($u.rects.dpr - $odpr) -lt 0.01 -and [Math]::Abs(($s3.R - $s3.L) - $w0 * $o.Dpi / $m.Dpi) -le 3) ("window {0},{1},{2},{3}; width {4} -> {5}; page ratio {6}" -f $s3.L, $s3.T, $s3.R, $s3.B, $w0, ($s3.R - $s3.L), $u.rects.dpr)
+      $omg = [int]($o.Dpi * 8 / 96)
+      $w = $s3.R - $s3.L; $h = $s3.B - $s3.T
+      $nl = $o.WR - [int](6 * $odpr) - $w; $nt = $o.WB - [int](6 * $odpr) - $h
+      $gx = $s3.L + [int](200 * $odpr); $gy = $s3.T + [int](10 * $odpr)
+      Drag-Mouse $gx $gy ($gx + $nl - $s3.L) ($gy + $nt - $s3.T)
+      $s4 = Last-State @(Cut $log $n)
+      Check 'snap' "$name -> $oname`: and a drag from there into its bottom-right corner snaps flush (margin $omg px)" (([Math]::Abs(($o.WR - $s4.R) - $omg) -le 1) -and ([Math]::Abs(($o.WB - $s4.B) - $omg) -le 1)) ("window {0},{1},{2},{3} in work {4},{5},{6},{7}" -f $s4.L, $s4.T, $s4.R, $s4.B, $o.WL, $o.WT, $o.WR, $o.WB)
+      # back to this monitor for the next one
+      $gx = $s4.L + [int](200 * $odpr); $gy = $s4.T + [int](10 * $odpr)
+      Drag-Mouse $gx $gy ($m.WL + [int](($m.WR - $m.WL) / 2)) ($m.WT + [int](100 * $dpr))
+    }
+    Check 'snap' "$name`: no start failures logged" (@(Cut $log $n | Where-Object { $_ -match 'FAILED to start' }).Count -eq 0)
+  } finally {
+    Stop-HUDshell
+    [GT]::RestoreCursor()
+  }
+}
+
+function Suite-Snap {
+  Write-Host "=== snap: real mouse drags into the four corners of every monitor, and across the borders between monitors - do not touch mouse/keyboard ==="
+  $mons = @(Get-Monitors)
+  $prim = $mons | Where-Object { $_.Primary } | Select-Object -First 1
+  # HUDSHELL_SNAP_ONLY="1920x480" runs just the monitor with that work-area size (for investigating one monitor).
+  foreach ($m in $mons) {
+    if ($env:HUDSHELL_SNAP_ONLY -and ((($m.WR - $m.WL).ToString() + 'x' + ($m.WB - $m.WT).ToString()) -ne $env:HUDSHELL_SNAP_ONLY)) { continue }
+    $others = @()
+    if ($m.Primary) { $others = @($mons | Where-Object { -not $_.Primary }) }
+    Snap-Monitor $m $others
+  }
+}
+
+function Suite-Dpi {
+  Write-Host "=== dpi: moving the window between monitors with different scaling (no OS input) ==="
+  $alt = Alt-Monitor
+  $prim = @(Get-Monitors) | Where-Object { $_.Primary } | Select-Object -First 1
+  if (-not $alt -or -not $prim) { Warn 'dpi' 'no monitor with a different scaling found: moving between scalings was not tested'; return }
+  $ap = [int]($alt.Dpi * 100 / 96); $pp = [int]($prim.Dpi * 100 / 96)
+  $start = "{0},{1}" -f ($prim.WL + 200), ($prim.WT + 200)
+  $cross = "{0},{1}" -f ($alt.WL + 300), ($alt.WT + 200)
+  $run = Run-Scenario @('--term', '--dpitest', '--at', $start, '--cross', $cross, '--delay', '2') 60000
+  $s = Get-States $run
+  foreach ($k in 'a', 'b', 'c', 'd') { if (-not $s.ContainsKey($k)) { Check 'dpi' "state $k logged" $false; return } }
+  function Rc2($k) { $v = (($s[$k].rect) -split ','); $w = (($s[$k].work) -split ','); @{ l = [int]$v[0]; t = [int]$v[1]; r = [int]$v[2]; b = [int]$v[3]; wl = [int]$w[0]; wt = [int]$w[1]; wr = [int]$w[2]; wb = [int]$w[3]; dpi = [int]$s[$k].dpi } }
+  $a = Rc2 'a'; $b = Rc2 'b'; $c = Rc2 'c'; $d = Rc2 'd'
+  $ua = Get-Ui $run 'a'; $ub = Get-Ui $run 'b'; $ud = Get-Ui $run 'd'
+  Check 'dpi' "starts on the $pp% monitor: the window and the page both use $pp%" ($a.dpi -eq $prim.Dpi -and $ua -and [Math]::Abs($ua.rects.dpr - $prim.Dpi / 96.0) -lt 0.01) ("window dpi " + $a.dpi + ", page ratio " + $ua.rects.dpr)
+  Check 'dpi' "moved to the $ap% monitor: the window and the page both switch to $ap%" ($b.dpi -eq $alt.Dpi -and $ub -and [Math]::Abs($ub.rects.dpr - $alt.Dpi / 96.0) -lt 0.01) ("window dpi " + $b.dpi + ", page ratio " + $ub.rects.dpr)
+  Check 'dpi' 'the host was told about the change (WM_DPICHANGED handled)' (@($run | Where-Object { $_ -match 'dpi changed to ' + $alt.Dpi }).Count -ge 1)
+  $wa = $a.r - $a.l; $ha = $a.b - $a.t; $wb = $b.r - $b.l; $hb = $b.b - $b.t
+  Check 'dpi' "the window keeps its logical size: ${wa}x${ha} px at $pp% becomes about $([int]($wa * $alt.Dpi / $prim.Dpi))x$([int]($ha * $alt.Dpi / $prim.Dpi)) px at $ap%" (([Math]::Abs($wb - $wa * $alt.Dpi / $prim.Dpi) -le 3) -and ([Math]::Abs($hb - $ha * $alt.Dpi / $prim.Dpi) -le 3)) ("${wb}x${hb}")
+  Check 'dpi' 'the window sits wholly on the second monitor' ($b.l -ge $alt.L -and $b.r -le $alt.R -and $b.t -ge $alt.T -and $b.b -le $alt.B) ("{0},{1},{2},{3}" -f $b.l, $b.t, $b.r, $b.b)
+  $mg = [int][math]::Round(8 * $c.dpi / 96.0)
+  Check 'dpi' "the corner hotkey docks in a corner of that monitor with the scaled margin ($mg px)" ((($c.l - $c.wl) -eq $mg -or ($c.wr - $c.r) -eq $mg) -and (($c.t - $c.wt) -eq $mg -or ($c.wb - $c.b) -eq $mg)) ("{0},{1},{2},{3} in work {4},{5},{6},{7}" -f $c.l, $c.t, $c.r, $c.b, $c.wl, $c.wt, $c.wr, $c.wb)
+  $wd = $d.r - $d.l; $hd = $d.b - $d.t
+  Check 'dpi' "back on the $pp% monitor: dpi $pp% again, the page follows, and the size is back to ${wa}x${ha}" ($d.dpi -eq $prim.Dpi -and $ud -and [Math]::Abs($ud.rects.dpr - $prim.Dpi / 96.0) -lt 0.01 -and [Math]::Abs($wd - $wa) -le 3 -and [Math]::Abs($hd - $ha) -le 3) ("{0}x{1}, page ratio {2}" -f $wd, $hd, $ud.rects.dpr)
+  Check 'dpi' 'no start failures logged and the run finished' ((@($run | Where-Object { $_ -match 'FAILED to start' }).Count -eq 0) -and (@($run | Where-Object { $_ -match 'AUTOTEST: finished' }).Count -eq 1))
+}
+
+# The terminal text of the latest page dump in a slice of the log.
+function Last-Screen([string[]]$lines) {
+  $h = -1
+  for ($k = $lines.Count - 1; $k -ge 0; $k--) { if ($lines[$k] -match 'terminal dump:') { $h = $k; break } }
+  if ($h -lt 0) { return '' }
+  $out = New-Object System.Collections.Generic.List[string]
+  for ($j = $h + 1; $j -lt $lines.Count; $j++) {
+    if ($lines[$j] -match '^\d+ terminal dump:') { break }
+    if ($lines[$j] -match '^\d+   \| ?(.*)$') { $out.Add($Matches[1]) }
+  }
+  return ($out -join "`n")
+}
+
+function Suite-Kbd {
+  Write-Host "=== kbd: German and French layouts switched on while it runs (Windows shares the layout between all windows) and switched back at the end: real key presses, dead keys, hotkeys, AltGr - do not touch keyboard/mouse ==="
+  Stop-HUDshell
+  GTSave
+  $origLayout = [GT]::ForegroundLayout()
+  $p = $null
+  $us = [GT]::LoadLayout('00000409')
+  try {
+    $n = LineCount $log
+    $p = Start-Process $dbg -ArgumentList @('--term', '--inputtest', '--interactive', '--delay', '2') -PassThru
+    $h = [IntPtr]::Zero
+    for ($i = 0; $i -lt 40 -and $h -eq [IntPtr]::Zero; $i++) { Start-Sleep 1; if ($p.HasExited) { break }; $h = [GT]::Find([uint32]$p.Id) }
+    Start-Sleep 8
+    Check 'kbd' 'window found' ($h -ne [IntPtr]::Zero)
+    if ($h -eq [IntPtr]::Zero) { return }
+    function Screen { Last-Screen @(Cut $log $n) }
+    function Grab { if (-not [GT]::IsFg($h)) { [GT]::Hotkey(0x47); Start-Sleep -Milliseconds 1500 } }
+    Grab
+    Check 'kbd' 'the terminal holds the keyboard (Ctrl+Alt+G)' ([GT]::IsFg($h))
+    $startLayout = [GT]::FocusLayout()
+    $cases = @(
+      @{ Name = 'German'; Klid = '00000407'; Lang = 0x0407; Plain = ([string]::Concat([char]0xE4, [char]0xF6, [char]0xFC, [char]0xDF, 'zy')); Dead = @(0xDC, 'a', ([string][char]0xE2)) },
+      @{ Name = 'French'; Klid = '0000040C'; Lang = 0x040C; Plain = ([string]::Concat([char]0xE9, [char]0xE8, [char]0xE0, [char]0xF9, [char]0xE7, 'aq')); Dead = @(0xDD, 'e', ([string][char]0xEA)) }
+    )
+    foreach ($c in $cases) {
+      $hkl = [GT]::LoadLayout($c.Klid)
+      [GT]::RequestLayout($hkl); Start-Sleep -Milliseconds 1500
+      $now = [GT]::FocusLayout()
+      $switched = (($now -band 0xFFFF) -eq $c.Lang)
+      Check 'kbd' ($c.Name + ': the layout was switched in HUDshell only (the window now uses it)') $switched ("layout " + ('{0:X8}' -f $now))
+      if (-not $switched) { Warn 'kbd' ($c.Name + ': could not switch the layout without changing your settings; typing not tested'); continue }
+      # plain characters of this layout, typed with real key presses (no AltGr)
+      $mark = 'K' + $c.Name.Substring(0, 2).ToUpper()
+      foreach ($ch in ('echo ' + $mark + '-').ToCharArray()) { [void][GT]::TypeChar($ch, $hkl); Start-Sleep -Milliseconds 40 }
+      foreach ($ch in $c.Plain.ToCharArray()) { [void][GT]::TypeChar($ch, $hkl); Start-Sleep -Milliseconds 40 }
+      [GT]::Key(0x0D); Start-Sleep -Milliseconds 2500
+      $screen = Screen
+      Check 'kbd' ($c.Name + ': real key presses give this layout''s characters in the terminal (' + $c.Plain + ')') ($screen.Contains($mark + '-' + $c.Plain)) ('wanted ' + $mark + '-' + $c.Plain)
+      # a dead key then a letter makes an accented letter
+      foreach ($ch in ('echo ' + $mark + 'D-').ToCharArray()) { [void][GT]::TypeChar($ch, $hkl); Start-Sleep -Milliseconds 40 }
+      [GT]::Key([byte]$c.Dead[0]); Start-Sleep -Milliseconds 150
+      [void][GT]::TypeChar([char]$c.Dead[1], $hkl); Start-Sleep -Milliseconds 300
+      [GT]::Key(0x0D); Start-Sleep -Milliseconds 2500
+      $screen = Screen
+      Check 'kbd' ($c.Name + ': a dead key followed by a letter gives ' + $c.Dead[2]) ($screen.Contains($mark + 'D-' + $c.Dead[2])) ('wanted ' + $mark + 'D-' + $c.Dead[2])
+      # the default hotkeys are matched by key code, so they still fire
+      $nn = LineCount $log
+      [GT]::Hotkey(0x4E); Start-Sleep -Milliseconds 3000
+      Check 'kbd' ($c.Name + ': Ctrl+Alt+N (new shell) still works') (@(Cut $log $nn | Where-Object { $_ -match 'new shell \d+ from profile' }).Count -eq 1)
+      Grab
+    }
+    # restore: HUDshell's window goes back to the layout it had
+    [GT]::RequestLayout([IntPtr][int64]$startLayout); Start-Sleep -Milliseconds 1200
+    Check 'kbd' 'HUDshell''s window is back on the layout it started with' (([GT]::FocusLayout() -band 0xFFFF) -eq ($startLayout -band 0xFFFF)) ('{0:X8}' -f [GT]::FocusLayout())
+    # AltGr (right Alt = Ctrl+Alt) against HUDshell's Ctrl+Alt hotkeys, on the German layout
+    $hkl = [GT]::LoadLayout('00000407')
+    [GT]::RequestLayout($hkl); Start-Sleep -Milliseconds 1500
+    Grab
+    $at = [GT]::NeedsAltGr('@', $hkl)
+    $nq = LineCount $log
+    [GT]::AltGrKey(0x51); Start-Sleep -Milliseconds 2500
+    $gone = $p.HasExited
+    if ($at -and $gone) { Warn 'kbd' 'German: AltGr+Q (which types @) is also HUDshell''s quit hotkey Ctrl+Alt+Q: the hotkey wins, so @ cannot be typed while HUDshell runs and HUDshell quits' 'known limit of Ctrl+Alt hotkeys on layouts with AltGr' }
+    else { Check 'kbd' 'German: AltGr+Q does not trigger the quit hotkey' (-not $gone) ("needs AltGr: $at, HUDshell exited: $gone") }
+  } finally {
+    Stop-HUDshell
+    [GT]::RestoreCursor()
+    # Put the keyboard layout back to what it was, whatever happened above, and say so only if it really is.
+    Start-Sleep -Milliseconds 800
+    for ($try = 0; $try -lt 3 -and [GT]::ForegroundLayout() -ne $origLayout; $try++) { [GT]::RestoreSystemLayout($origLayout); Start-Sleep -Milliseconds 1500 }
+    $nowLayout = [GT]::ForegroundLayout()
+    Check 'kbd' 'your keyboard layout is back to what it was before the test' ($nowLayout -eq $origLayout) ('was {0:X8}, now {1:X8}' -f $origLayout, $nowLayout)
   }
 }
 
@@ -1052,7 +1445,11 @@ foreach ($s in $want) {
     'sessions' { Suite-Sessions }
     'shells' { Suite-Shells }
     'layout' { Suite-Layout }
+    'dpi' { Suite-Dpi }
+    'text' { Suite-Text }
     'input' { Suite-Input }
+    'snap' { Suite-Snap }
+    'kbd' { Suite-Kbd }
     'cost' { Suite-Cost }
     'ghost' { Suite-Ghost }
     'attention' { Suite-Attention }

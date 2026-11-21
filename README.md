@@ -16,6 +16,8 @@ click-through by default, an explicit keyboard-focus toggle, and an adjustable o
 - **Opacity** from 20% to 100% (hotkeys, settings panel, or `config.json`).
 - **Several shells in one window** (up to 9): visible tabs, a compact overlay-only list, switch hotkeys that work while the game has the keyboard, tab names taken from each program's own window title (like a normal terminal tab), a label when a tab runs Claude Code, Codex or a similar tool, a mark on tabs with unseen output, and profiles (start folder, start command, accent colour).
 - **Split panes**: show two shells side by side or stacked, or four in a 2 x 2 grid, in the same window; a hotkey moves the keyboard between panes and another zooms one pane to the whole window. A window too small for the layout shows fewer panes. Equal halves by default; uneven splits, draggable dividers and a separate list of shells per pane are options.
+- **Text size**: each terminal keeps its own text size (bigger / smaller / reset hotkeys act on the focused one), plus a global percent scale, a scale for HUDshell's own text (tabs, pane names, overlays), line height and letter spacing; all optional settings, all off at their defaults.
+- **Moving**: drag the slim strip along the top edge (resize from any edge or corner); the window snaps magnetically to screen edges and corners, **drag it to the top edge of a screen to maximize it**, drag the strip of a maximized window to restore it, or double-click the strip to maximize / restore.
 - **Corners and sizes**: a hotkey docks the window in the next screen corner, another cycles size presets, and dragging near a screen edge snaps to it.
 - **Opacity that follows you**: a separate opacity while you are typing, and an optional dim after the shell has been quiet for a while.
 - **Start options**: start hidden or ghosted; a second launch brings the running window forward; "Start with Windows" in the tray menu.
@@ -56,7 +58,8 @@ Or by hand: `npm install`, `npm run build`, `cargo build --release`.
 | Ctrl+Alt+X | ghost: click-through plus dim, press again to restore |
 | Ctrl+Alt+. / Ctrl+Alt+, | dock in the next / previous screen corner |
 | Ctrl+Alt+/ | cycle size presets |
-| Ctrl+Alt+= / Ctrl+Alt+- | bigger / smaller font |
+| Ctrl+Alt+= / Ctrl+Alt+- | bigger / smaller text in the focused terminal (`text_scale_hotkeys = "all"`: in every terminal) |
+| Ctrl+Alt+0 | text size back to the starting size (`font_size`) |
 | Ctrl+Alt+N | new shell (default profile) |
 | Ctrl+Alt+Shift+N | profile picker (takes the keyboard; press a number, Esc cancels) |
 | Ctrl+Alt+PageDown / PageUp | next / previous shell |
@@ -68,6 +71,8 @@ Or by hand: `npm install`, `npm run build`, `cargo build --release`.
 | Ctrl+Alt+O | move the keyboard to the next pane |
 | Ctrl+Alt+Z | zoom the focused pane to the whole window, press again to go back |
 | Ctrl+Alt+Q | quit |
+
+On a keyboard layout with an **AltGr** key (right Alt, which Windows treats as Ctrl+Alt), a character typed with AltGr that sits on the same key as one of these hotkeys is taken by HUDshell instead (on a German layout AltGr+Q, `@`, is the quit hotkey). Change those hotkeys in `config.json` if you use such a layout.
 
 Inside the terminal: **Shift+Enter** inserts a newline in Claude Code and Codex; **Ctrl+Shift+C** or
 **Ctrl+Insert** copies the selection; **Ctrl+V** pastes. Plain Ctrl+C is the interrupt key.
@@ -85,10 +90,14 @@ values are range-checked, and an unreadable file is kept as `config.json.bad-N` 
 | `opacity` | `100` | percent, 20-100 |
 | `theme` | `"midnight"` | preset name or `"custom"` |
 | `custom_colours` | none | `{background, foreground, cursor, selection}` as `#rrggbb` |
-| `font_family` / `font_size` | Cascadia Mono, Consolas / 14 | size 8-48 |
+| `font_family` / `font_size` | Cascadia Mono, Consolas / 14 | size 8-48; the starting size of every terminal |
+| `text_scale` | `100` | percent, 50-300, multiplies every terminal's size (150 = half as big again) |
+| `text_scale_hotkeys` | `"focused"` | `"focused"`: the bigger / smaller / reset hotkeys change only the terminal that has the keyboard (each terminal keeps its own size until HUDshell quits); `"all"`: every terminal together, and `font_size` is saved |
+| `line_height` / `letter_spacing` | `100` / `0` | line height in percent of the font's (100-200); extra pixels between characters (0-10); both apply to every terminal |
+| `ui_scale` | `100` | percent, 50-300, for HUDshell's own text: tab names, pane names, overlays, the picker and the settings panel |
 | `scrollback` | `2000` | lines, 100-100000 |
 | `shell` | none | full path of a shell to use instead of PowerShell 7 |
-| `hotkeys` | see table above | `click_through`, `grab_focus`, `show_hide`, `cycle_colours`, `opacity_up`, `opacity_down`, `settings`, `ghost`, `quit`, `corner_next`, `corner_prev`, `size_cycle`, `font_bigger`, `font_smaller`, `shell_next`, `shell_prev`, `shell_new`, `shell_close`, `shell_list`, `shell_picker`, `shell_attention`, `layout_cycle`, `pane_zoom`, `pane_next`, `shell_jump` (modifiers only; `Ctrl+Alt` means Ctrl+Alt+1..9); every chord needs at least one modifier |
+| `hotkeys` | see table above | `click_through`, `grab_focus`, `show_hide`, `cycle_colours`, `opacity_up`, `opacity_down`, `settings`, `ghost`, `quit`, `corner_next`, `corner_prev`, `size_cycle`, `font_bigger`, `font_smaller`, `font_reset`, `shell_next`, `shell_prev`, `shell_new`, `shell_close`, `shell_list`, `shell_picker`, `shell_attention`, `layout_cycle`, `pane_zoom`, `pane_next`, `shell_jump` (modifiers only; `Ctrl+Alt` means Ctrl+Alt+1..9); every chord needs at least one modifier |
 | `ghost_opacity` | `40` | percent used by the ghost preset (20-100); never brightens a window that is already dimmer; never saved over `opacity` |
 | `copy_on_select` | `false` | copy the selection when the mouse button is released |
 | `right_click` | `"off"` | `"paste"`: right-click copies a selection, or pastes when nothing is selected |

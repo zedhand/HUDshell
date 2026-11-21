@@ -389,9 +389,12 @@ fn handle_term_message(hwnd: isize, m: &str) {
                 Some("bottom") => 15,
                 Some("bottomleft") => 16,
                 Some("bottomright") => 17,
+                Some("toggle") => 99, // double click on the top strip: maximize / restore
                 _ => 0,
             };
-            if ht != 0 {
+            if ht == 99 {
+                crate::toggle_maximize(hwnd);
+            } else if ht != 0 {
                 crate::start_native_drag(hwnd, ht);
             }
         }

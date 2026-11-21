@@ -30,6 +30,8 @@ pub struct Hotkeys {
     pub size_cycle: String,
     pub font_bigger: String,
     pub font_smaller: String,
+    /// Put the focused terminal's text size back to `font_size` (with `text_scale_hotkeys = "all"`: every terminal).
+    pub font_reset: String,
     /// Next / previous shell (works while HUDshell is passive: they are global hotkeys).
     pub shell_next: String,
     pub shell_prev: String,
@@ -69,6 +71,7 @@ impl Default for Hotkeys {
             size_cycle: "Ctrl+Alt+/".into(),
             font_bigger: "Ctrl+Alt+=".into(),
             font_smaller: "Ctrl+Alt+-".into(),
+            font_reset: "Ctrl+Alt+0".into(),
             shell_next: "Ctrl+Alt+PageDown".into(),
             shell_prev: "Ctrl+Alt+PageUp".into(),
             shell_new: "Ctrl+Alt+N".into(),
@@ -131,7 +134,19 @@ pub struct Config {
     pub opacity: u32,
     pub hotkeys: Hotkeys,
     pub font_family: String,
+    /// Starting text size in points (8-48) of every terminal.
     pub font_size: u32,
+    /// Percent (50-300) applied on top of every terminal's size: 100 = as set, 150 = half as big again.
+    pub text_scale: u32,
+    /// Percent (50-300) for HUDshell's own text: tab names, pane names, overlays, the picker and the settings panel.
+    pub ui_scale: u32,
+    /// Line height of the terminals in percent of the font's own (100-200).
+    pub line_height: u32,
+    /// Extra space between characters in pixels (0-10).
+    pub letter_spacing: u32,
+    /// What the bigger / smaller / reset text hotkeys change: "focused" = only the terminal that has the keyboard (each
+    /// terminal keeps its own size for the run), "all" = every terminal together (and `font_size` is saved).
+    pub text_scale_hotkeys: String,
     /// Full path of the shell to run instead of the automatic PowerShell 7 search.
     pub shell: Option<String>,
     /// Last window position and size in physical pixels.
@@ -208,6 +223,11 @@ impl Default for Config {
             hotkeys: Hotkeys::default(),
             font_family: "Cascadia Mono, Consolas, monospace".into(),
             font_size: 14,
+            text_scale: 100,
+            ui_scale: 100,
+            line_height: 100,
+            letter_spacing: 0,
+            text_scale_hotkeys: "focused".into(),
             shell: None,
             window: None,
             theme: "midnight".into(),
@@ -296,6 +316,13 @@ pub const MIN_OPACITY: u32 = 20;
 
 fn validate(cfg: &mut Config) {
     cfg.font_size = cfg.font_size.clamp(8, 48);
+    cfg.text_scale = cfg.text_scale.clamp(50, 300);
+    cfg.ui_scale = cfg.ui_scale.clamp(50, 300);
+    cfg.line_height = cfg.line_height.clamp(100, 200);
+    cfg.letter_spacing = cfg.letter_spacing.min(10);
+    if !matches!(cfg.text_scale_hotkeys.as_str(), "focused" | "all") {
+        cfg.text_scale_hotkeys = "focused".into();
+    }
     cfg.opacity = cfg.opacity.clamp(MIN_OPACITY, 100);
     cfg.scrollback = cfg.scrollback.clamp(100, 100_000);
     if !matches!(cfg.unicode.as_str(), "default" | "11" | "graphemes") {
@@ -378,6 +405,7 @@ fn validate(cfg: &mut Config) {
         ("size_cycle", &mut cfg.hotkeys.size_cycle, def.size_cycle),
         ("font_bigger", &mut cfg.hotkeys.font_bigger, def.font_bigger),
         ("font_smaller", &mut cfg.hotkeys.font_smaller, def.font_smaller),
+        ("font_reset", &mut cfg.hotkeys.font_reset, def.font_reset),
         ("shell_next", &mut cfg.hotkeys.shell_next, def.shell_next),
         ("shell_prev", &mut cfg.hotkeys.shell_prev, def.shell_prev),
         ("shell_new", &mut cfg.hotkeys.shell_new, def.shell_new),
@@ -572,7 +600,7 @@ mod tests {
     #[test]
     fn default_hotkeys_are_all_valid_and_distinct() {
         let h = Hotkeys::default();
-        let all = [&h.click_through, &h.grab_focus, &h.show_hide, &h.cycle_colours, &h.opacity_up, &h.opacity_down, &h.settings, &h.quit, &h.ghost, &h.corner_next, &h.corner_prev, &h.size_cycle, &h.font_bigger, &h.font_smaller,
+        let all = [&h.click_through, &h.grab_focus, &h.show_hide, &h.cycle_colours, &h.opacity_up, &h.opacity_down, &h.settings, &h.quit, &h.ghost, &h.corner_next, &h.corner_prev, &h.size_cycle, &h.font_bigger, &h.font_smaller, &h.font_reset,
             &h.shell_next, &h.shell_prev, &h.shell_new, &h.shell_close, &h.shell_list, &h.shell_picker, &h.shell_attention,
             &h.layout_cycle, &h.pane_zoom, &h.pane_next];
         let mut seen = std::collections::HashSet::new();
@@ -689,6 +717,22 @@ mod tests {
         assert_eq!(default_profile(&c).name, "claude");
         c.default_profile = "X".into();
         assert_eq!(default_profile(&c).name, "x", "the default is matched without regard to case");
+    }
+
+    #[test]
+    fn text_settings_are_validated() {
+        let d = Config::default();
+        assert_eq!((d.text_scale, d.ui_scale, d.line_height, d.letter_spacing, d.text_scale_hotkeys.as_str()), (100, 100, 100, 0, "focused"),
+            "defaults leave the text exactly as it was");
+        let mut c = Config { text_scale: 5, ui_scale: 999, line_height: 10, letter_spacing: 99, text_scale_hotkeys: "x".into(), ..Config::default() };
+        validate(&mut c);
+        assert_eq!((c.text_scale, c.ui_scale, c.line_height, c.letter_spacing, c.text_scale_hotkeys.as_str()), (50, 300, 100, 10, "focused"));
+        c.text_scale = 175;
+        c.line_height = 130;
+        c.text_scale_hotkeys = "all".into();
+        validate(&mut c);
+        assert_eq!((c.text_scale, c.line_height, c.text_scale_hotkeys.as_str()), (175, 130, "all"));
+        assert_eq!(parse_hotkey(&Hotkeys::default().font_reset), Some((0x4000 | 0x2 | 0x1, b'0' as u32)));
     }
 
     #[test]

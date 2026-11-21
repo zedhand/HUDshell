@@ -4,7 +4,49 @@ Machine: Windows 11 build 26300, WebView2 Runtime 157.x, Rust 1.99 (MSVC), Power
 Codex CLI 0.170.0, three displays (all at 100% scaling). Latest full regression: 2026-11-20 with `scripts/test-all.ps1`.
 "Tested" means observed in a log, a cell-text dump or a screenshot; anything not listed is in [known-gaps.md](known-gaps.md).
 
-## Latest full run (scripts/test-all.ps1, no sandbox, 2026-11-20, final build with the window-drag fix): 301 pass, 0 fail, 2 intentional skips
+## Latest full run (scripts/test-all.ps1, no sandbox, 2026-11-20, mixed scaling, text scaling, snapping and maximize): 394 pass, 0 fail, 3 warnings
+
+Run on freshly built release and harness executables, on a machine with three monitors: 2560x1440 at 100% (primary), 1920x1080 at **150%**
+and a 1920x480 strip at 100%. The real-prompt suite was **not** run, so no prompt went to Claude Code or Codex. The three warnings are the
+two intentional `autotest` skips (same kitty-protocol guard as before) and one **known limit reported by `kbd`**: AltGr+Q, which types `@` on
+a German layout, is also HUDshell's quit hotkey (Ctrl+Alt+Q), and the hotkey wins (see known-gaps and the README). Per suite: static 16 (58 unit
+tests; release exe 1.13 MB), keys 6, width 3, hideshow 3, clickfocus 3, clipboard 3, autotest 22 (+2 skips), ui 29, scrollback 8, ghost 14,
+attention 10, policy 12, place 24 (corners, size presets, font and snapping on the primary and on the 150% monitor), dpi 8, text 13, qol 16,
+sessions 10, shells 34, layout 35, input 26 (the real-mouse suite on the primary and on the 150% monitor), snap 34, kbd 12 (+1 warning),
+cost 5, release 20, config 24, soak 4. The settings file was restored byte-for-byte by `release` and `config`; soak memory 215 -> 216 MB.
+The keyboard layout in use before the run was checked to be back after `kbd`, which switches it to German and French while it runs.
+
+**New since the previous full run, with what each showed**
+
+- **Mixed scaling (`dpi`, `place` and `input` on both monitors).** Moving the window between the 100% and 150% monitors keeps its logical size
+  (700x420 becomes 1050x630 and back), the page switches scale with it, docking uses the scaled margin (12 px at 150%), and the real-mouse
+  suite passes on both monitors. The window had no `WM_DPICHANGED` handling before; it was added for this.
+- **Text scaling (`text`, 13 checks).** Each terminal keeps its own size (hotkeys change only the focused one, reset goes back, switching back
+  shows the remembered size); `text_scale_hotkeys = all` changes every terminal; `text_scale = 150` shows 14 points as 21; line height and
+  letter spacing reach the terminals and give fewer rows and columns; `ui_scale = 150` makes the tab strip 30 px high with 18 px text. The
+  defaults leave HUDshell's own text pixel-identical to before.
+- **Keyboard layouts (`kbd`).** With German and French active, real key presses gave each layout's letters (including accented ones and a dead
+  key followed by a letter), and the default hotkeys still fired. The AltGr clash above is the one finding. Not covered: any other layout, IME.
+- **Snapping, maximizing (`snap`, 34 checks, real mouse, every monitor).** A drag ending 6 px from each corner snaps flush on both axes with the
+  scaled margin; dragging to the top edge of the screen maximizes the window to the work area; dragging the maximized window's strip down
+  restores its size; a double click on the strip maximizes and restores; dragging across the border to each other monitor puts the window
+  wholly there at that monitor's scaling and it then snaps into that monitor's corner.
+
+**Defects found by these tests and fixed.** (1) *Snapping could not be pulled away from.* Windows proposes each rectangle of a drag relative to the one
+last applied, so a window held by the snap distance (16 px) never escaped when moved in small steps; it only jumped out with big movements.
+The first `snap` run showed it (the bottom corners of the narrow monitor never reached their target). Fixed by tracking the position the
+window would have without snapping (`place::SnapDrag`, with unit tests). (2) The window could not be moved or resized with the mouse at all
+before 2026-11-20 (see the section below). **Mistakes of mine on the way, kept for the record:** the first `snap` run also failed on two faults of my
+test script (a phantom "other monitor" given to the non-primary monitors, and a crash reading the log while the app was writing it; the
+reader now shares the file and retries); a first attempt to start a drag only after the cursor had moved made 10 checks fail (the window lagged
+behind the cursor) and was reverted; and the `kbd` suite once left the keyboard on German because Windows shares one layout between all windows and the
+suite did not switch it back at the end. It was restored by hand, and the suite now restores it and checks that it really is back.
+
+**Not covered:** scalings other than 100% and 150%; dragging across the monitor border by hand (the tests drag with the real mouse by script);
+the settings panel's real-mouse checks at 150% (they use pixel offsets for 100%); the real-prompt suite; layouts other than German and French, and
+IME; sleep / resume; a clean machine, other Windows versions or a game. These stay in known-gaps.
+
+## Previous full run (commit 65602f9, window-drag fix, before mixed scaling and snapping): 301 pass, 0 fail, 2 intentional skips
 
 Run on freshly built release and harness executables after the fix described under "A defect found by `input`" below. The real-prompt suite
 was **not** run (no sandbox given), so no prompt went to Claude Code or Codex. Per suite: static 16 (55 unit tests; release exe 1.12 MB),

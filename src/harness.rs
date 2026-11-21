@@ -6,7 +6,7 @@
 
 use super::*;
 /// Scripted terminal scenario (`--term --selftest2`): (ms from start, action).
-/// Actions: "w:<text>" write to the shell, "ctrlc", "dump:<label>", "resize:W,H", "quit".
+/// Actions: "w:<text>" write to the shell, "ctrlc", "dump:<label>", "resize:W,H" (96-dpi pixels), "quit".
 const SCENARIO: &[(u64, &str)] = &[
     (3500, "w:claude --version\r"),
     (6500, "w:codex --version\r"),
@@ -880,13 +880,71 @@ fn build_soak() -> &'static [(u64, &'static str)] {
     })
 }
 
+/// `--texttest` (run with `--text-hotkeys all`, `--text-scale N`, `--ui-scale N`, `--line-height N`, `--letter-spacing N` as
+/// needed): each terminal's own text size, the hotkeys' scope, reset, and the scales. Every dump lists all sizes.
+const TEXT: &[(u64, &str)] = &[
+    (1500, "cdp-focus"),
+    (2000, "resize:900,520"),
+    (3000, "dumps:1:t-base"),
+    (3500, "shell:new"),
+    (7000, "font:+"),
+    (7300, "font:+"),
+    (8000, "dumps:2:t-two-big"),
+    (8600, "shell:jump:1"),
+    (9000, "font:-"),
+    (9800, "dumps:1:t-one-small"),
+    (10200, "shell:jump:2"),
+    (10800, "dumps:2:t-two-kept"),
+    (11200, "font:reset"),
+    (12000, "dumps:2:t-reset"),
+    (12500, "quit"),
+];
+
+/// `--dpitest` (run with `--at X,Y --cross CX,CY`): the window starts at X,Y, moves to CX,CY (another monitor, normally with
+/// a different scaling), docks in a corner there, and comes back. State and page dumps at every step.
+fn build_dpitest() -> &'static [(u64, &'static str)] {
+    static S: std::sync::OnceLock<&'static [(u64, &'static str)]> = std::sync::OnceLock::new();
+    S.get_or_init(|| {
+        let args: Vec<String> = std::env::args().collect();
+        let pos = |name: &str| -> (i32, i32) {
+            let v = args.iter().position(|a| a == name).and_then(|i| args.get(i + 1)).cloned().unwrap_or_default();
+            let n: Vec<i32> = v.split(',').filter_map(|p| p.trim().parse().ok()).collect();
+            (n.first().copied().unwrap_or(200), n.get(1).copied().unwrap_or(200))
+        };
+        let (cx, cy) = pos("--cross");
+        let (hx, hy) = pos("--at");
+        let leak = |s: String| -> &'static str { Box::leak(s.into_boxed_str()) };
+        let v: Vec<(u64, &'static str)> = vec![
+            (1500, "cdp-focus"),
+            (2000, "resize:700,420"),
+            (3000, "state:a"),
+            (3100, "dump:a"),
+            (4000, leak(format!("moveto:{cx},{cy}"))),
+            (6000, "state:b"),
+            (6100, "dump:b"),
+            (7000, "corner:next"),
+            (8000, "state:c"),
+            (8100, "dump:c"),
+            (9000, leak(format!("moveto:{hx},{hy}"))),
+            (11000, "state:d"),
+            (11100, "dump:d"),
+            (12000, "quit"),
+        ];
+        &*Box::leak(v.into_boxed_slice())
+    })
+}
+
 /// `--inputtest` (run with `--interactive --layout side-by-side --dividers --tabs always`): no script of its own. Every
 /// second it dumps the page (with the position of the tabs and dividers) and the window state, so the runner can aim
 /// real mouse and keyboard input at what is really on screen and read the result.
 fn build_inputtest() -> &'static [(u64, &'static str)] {
     static S: std::sync::OnceLock<&'static [(u64, &'static str)]> = std::sync::OnceLock::new();
     S.get_or_init(|| {
-        let mut v: Vec<(u64, &'static str)> = vec![(1500, "cdp-focus"), (2000, "resize:900,520")];
+        // --size W,H (96-dpi pixels) sets the window size the script starts with (default 900,520).
+        let args: Vec<String> = std::env::args().collect();
+        let size = args.iter().position(|a| a == "--size").and_then(|i| args.get(i + 1)).cloned().unwrap_or_else(|| "900,520".into());
+        let resize: &'static str = Box::leak(format!("resize:{size}").into_boxed_str());
+        let mut v: Vec<(u64, &'static str)> = vec![(1500, "cdp-focus"), (2000, resize)];
         let mut t = 6000u64;
         while t <= 80000 {
             v.push((t, "state:m"));
@@ -900,6 +958,8 @@ fn build_inputtest() -> &'static [(u64, &'static str)] {
 
 fn scen() -> &'static [(u64, &'static str)] {
     match SCEN_SEL.load(Ordering::SeqCst) {
+        31 => TEXT,
+        30 => build_dpitest(),
         29 => build_inputtest(),
         28 => LABELS,
         27 => LAYOUTOWN,
@@ -1084,6 +1144,9 @@ unsafe fn run_action(hwnd: HWND, act: &str) {
         let mut p = dim.split(',');
         let w: i32 = p.next().and_then(|s| s.parse().ok()).unwrap_or(900);
         let h: i32 = p.next().and_then(|s| s.parse().ok()).unwrap_or(520);
+        // W,H are 96-dpi pixels: the same logical size on a monitor with another scaling (identical at 100%).
+        let dpi = unsafe { GetDpiForWindow(hwnd) }.max(96) as i32;
+        let (w, h) = (w * dpi / 96, h * dpi / 96);
         let _ = unsafe {
             SetWindowPos(hwnd, None, 0, 0, w, h, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE)
         };
@@ -1151,7 +1214,7 @@ unsafe fn run_action(hwnd: HWND, act: &str) {
         let wk = unsafe { work_area(hwnd) };
         log(&format!(
             "STATE label={label} rect={},{},{},{} work={},{},{},{} font={} dpi={} alpha={a} pct={pct} click_through={} ghost={} focus={} visible={} cfg_opacity={}",
-            wr.left, wr.top, wr.right, wr.bottom, wk.l, wk.t, wk.r, wk.b, cfg().font_size, unsafe { GetDpiForWindow(hwnd) },
+            wr.left, wr.top, wr.right, wr.bottom, wk.l, wk.t, wk.r, wk.b, font_size_of(shells_lock().active()), unsafe { GetDpiForWindow(hwnd) },
             CLICK_THROUGH.load(Ordering::SeqCst),
             GHOST_ON.load(Ordering::SeqCst),
             TERMINAL_FOCUS.load(Ordering::SeqCst),
@@ -1242,17 +1305,31 @@ unsafe fn run_action(hwnd: HWND, act: &str) {
     } else if act == "size" {
         unsafe { cycle_size(hwnd) };
     } else if let Some(v) = act.strip_prefix("font:") {
-        change_font(if v == "-" { -1 } else { 1 });
+        match v {
+            "reset" => reset_font(),
+            "-" => change_font(-1),
+            _ => change_font(1),
+        }
     } else if let Some(v) = act.strip_prefix("moving:") {
         // Simulate a drag: a rectangle with the window's size at x,y goes through the real WM_MOVING handler.
         let mut p = v.split(',');
         let x: i32 = p.next().and_then(|s| s.parse().ok()).unwrap_or(0);
         let y: i32 = p.next().and_then(|s| s.parse().ok()).unwrap_or(0);
+        // x,y are relative to the top-left of the work area of the monitor the window is on, so the same script
+        // works on any monitor (on the primary one the work area starts at 0,0).
+        let work = unsafe { work_area(hwnd) };
+        *lock_or_recover(&SNAP_DRAG) = None; // each simulated message stands alone (no drag state between them)
         let mut cur = RECT::default();
         let _ = unsafe { GetWindowRect(hwnd, &mut cur) };
-        let mut r = RECT { left: x, top: y, right: x + (cur.right - cur.left), bottom: y + (cur.bottom - cur.top) };
+        let mut r = RECT { left: x + work.l, top: y + work.t, right: x + work.l + (cur.right - cur.left), bottom: y + work.t + (cur.bottom - cur.top) };
         let res = unsafe { SendMessageW(hwnd, WM_MOVING, Some(WPARAM(0)), Some(LPARAM(&mut r as *mut RECT as isize))) };
-        log(&format!("MOVING in={x},{y} out={},{},{},{} handled={}", r.left, r.top, r.right, r.bottom, res.0));
+        log(&format!("MOVING in={x},{y} out={},{},{},{} handled={}", r.left - work.l, r.top - work.t, r.right - work.l, r.bottom - work.t, res.0));
+    } else if let Some(v) = act.strip_prefix("moveto:") {
+        // Move the window (keeping its size) to absolute screen coordinates, e.g. onto another monitor.
+        let mut p = v.split(',');
+        let x: i32 = p.next().and_then(|s| s.parse().ok()).unwrap_or(0);
+        let y: i32 = p.next().and_then(|s| s.parse().ok()).unwrap_or(0);
+        let _ = unsafe { SetWindowPos(hwnd, None, x, y, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE) };
     } else if act == "ghost" {
         unsafe { toggle_ghost(hwnd) };
     } else if let Some(v) = act.strip_prefix("opacity:") {
@@ -1407,7 +1484,7 @@ const SCENARIO_FLAGS: &[&str] = &[
     "--autotest", "--keys", "--widthtest", "--probe", "--probe2", "--probe3", "--probe4", "--real",
     "--clickfocus", "--hideshow", "--clipboard", "--soak", "--scrolltest", "--ghosttest", "--attention",
     "--policytest", "--placetest", "--idletest", "--starttest", "--autostarttest", "--sessiontest", "--shellstest",
-    "--tabmodes", "--shellsfull", "--layouttest", "--layoutempty", "--layoutstart", "--layoutown", "--labeltest", "--inputtest",
+    "--tabmodes", "--shellsfull", "--layouttest", "--layoutempty", "--layoutstart", "--layoutown", "--labeltest", "--inputtest", "--dpitest", "--texttest",
 ];
 
 pub(crate) fn is_test_mode() -> bool {
@@ -1480,7 +1557,7 @@ pub(crate) unsafe fn arm(hwnd: HWND) {
     if SCENARIO_FLAGS.iter().any(|f| any_scen(f)) {
         let args: Vec<String> = std::env::args().collect();
         SCEN_SEL.store(
-            if any_scen("--inputtest") { 29 } else if any_scen("--labeltest") { 28 } else if any_scen("--layoutown") { 27 } else if any_scen("--layoutstart") { 26 } else if any_scen("--layoutempty") { 25 } else if any_scen("--layouttest") { 24 } else if any_scen("--shellsfull") { 23 } else if any_scen("--tabmodes") { 22 } else if any_scen("--shellstest") { 21 } else if any_scen("--sessiontest") { 20 } else if any_scen("--autostarttest") { 19 } else if any_scen("--starttest") { 18 } else if any_scen("--idletest") { 17 } else if any_scen("--placetest") { 16 } else if any_scen("--policytest") { 15 } else if any_scen("--attention") { 14 } else if any_scen("--ghosttest") { 13 } else if any_scen("--scrolltest") { 12 } else if any_scen("--soak") { 11 } else if any_scen("--clipboard") { 10 } else if any_scen("--hideshow") { 9 } else if any_scen("--clickfocus") { 8 } else if any_scen("--real") { 7 } else if any_scen("--probe4") { 6 } else if any_scen("--probe3") { 5 } else if any_scen("--probe2") { 4 } else if any_scen("--probe") { 3 } else if any_scen("--widthtest") { 2 } else if any_scen("--keys") { 1 } else { 0 },
+            if any_scen("--texttest") { 31 } else if any_scen("--dpitest") { 30 } else if any_scen("--inputtest") { 29 } else if any_scen("--labeltest") { 28 } else if any_scen("--layoutown") { 27 } else if any_scen("--layoutstart") { 26 } else if any_scen("--layoutempty") { 25 } else if any_scen("--layouttest") { 24 } else if any_scen("--shellsfull") { 23 } else if any_scen("--tabmodes") { 22 } else if any_scen("--shellstest") { 21 } else if any_scen("--sessiontest") { 20 } else if any_scen("--autostarttest") { 19 } else if any_scen("--starttest") { 18 } else if any_scen("--idletest") { 17 } else if any_scen("--placetest") { 16 } else if any_scen("--policytest") { 15 } else if any_scen("--attention") { 14 } else if any_scen("--ghosttest") { 13 } else if any_scen("--scrolltest") { 12 } else if any_scen("--soak") { 11 } else if any_scen("--clipboard") { 10 } else if any_scen("--hideshow") { 9 } else if any_scen("--clickfocus") { 8 } else if any_scen("--real") { 7 } else if any_scen("--probe4") { 6 } else if any_scen("--probe3") { 5 } else if any_scen("--probe2") { 4 } else if any_scen("--probe") { 3 } else if any_scen("--widthtest") { 2 } else if any_scen("--keys") { 1 } else { 0 },
             Ordering::SeqCst,
         );
         let delay = args
@@ -1562,8 +1639,30 @@ pub(crate) fn override_config(mut c: config::Config) -> config::Config {
     if let Some(v) = opt("--pane-shells") {
         c.pane_shells = v;
     }
+    // --at x,y[,w,h]: where the window starts, in physical pixels (to start it on another monitor).
+    if let Some(v) = opt("--at") {
+        let n: Vec<i32> = v.split(',').filter_map(|p| p.trim().parse().ok()).collect();
+        if n.len() >= 2 {
+            c.window = Some(config::Geometry { x: n[0], y: n[1], w: n.get(2).copied().unwrap_or(560), h: n.get(3).copied().unwrap_or(300) });
+        }
+    }
     if let Some(v) = opt("--tab-program") {
         c.tab_program = v;
+    }
+    if let Some(v) = opt("--text-scale").and_then(|v| v.parse().ok()) {
+        c.text_scale = v;
+    }
+    if let Some(v) = opt("--ui-scale").and_then(|v| v.parse().ok()) {
+        c.ui_scale = v;
+    }
+    if let Some(v) = opt("--line-height").and_then(|v| v.parse().ok()) {
+        c.line_height = v;
+    }
+    if let Some(v) = opt("--letter-spacing").and_then(|v| v.parse().ok()) {
+        c.letter_spacing = v;
+    }
+    if let Some(v) = opt("--text-hotkeys") {
+        c.text_scale_hotkeys = v;
     }
     if let Some(v) = opt("--split").and_then(pair) {
         c.split = v;

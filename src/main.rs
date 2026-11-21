@@ -55,6 +55,7 @@ const HK_CORNER_PREV: i32 = 11;
 const HK_SIZE: i32 = 12;
 const HK_FONT_UP: i32 = 13;
 const HK_FONT_DOWN: i32 = 14;
+const HK_FONT_RESET: i32 = 18;
 const HK_LAYOUT: i32 = 15;
 const HK_PANE_ZOOM: i32 = 16;
 const HK_PANE_NEXT: i32 = 17;
@@ -746,6 +747,7 @@ unsafe fn scaled(hwnd: HWND, px: u32) -> i32 {
 /// Dock the window in the next (+1) or previous (-1) screen corner of its monitor, keeping its size.
 /// A window that is not in a corner yet first goes to the nearest one.
 unsafe fn move_to_corner(hwnd: HWND, step: i32) {
+    unsafe { restore_window(hwnd, None) };
     let mut r = RECT::default();
     if unsafe { GetWindowRect(hwnd, &mut r) }.is_err() {
         return;
@@ -764,6 +766,7 @@ unsafe fn move_to_corner(hwnd: HWND, step: i32) {
 
 /// Switch to the next size preset, keeping the corner the window is nearest to where it is.
 unsafe fn cycle_size(hwnd: HWND) {
+    unsafe { restore_window(hwnd, None) };
     let mut r = RECT::default();
     if unsafe { GetWindowRect(hwnd, &mut r) }.is_err() {
         return;
@@ -785,28 +788,195 @@ unsafe fn cycle_size(hwnd: HWND) {
     unsafe { save_geometry(hwnd) };
 }
 
+/// Drag-time state: the position the window would have without snapping (see place::SnapDrag), the rectangle it had
+/// before the drag, and whether the drag is a move (not a resize) started on the top strip.
+static SNAP_DRAG: Mutex<Option<place::SnapDrag>> = Mutex::new(None);
+static DRAG_START: Mutex<Option<RECT>> = Mutex::new(None);
+static DRAG_IS_MOVE: AtomicBool = AtomicBool::new(false);
+/// The window fills the work area of a monitor (dragged to the top edge, or the top strip double-clicked); the rectangle and
+/// scaling it had before are kept to restore it.
+static MAXIMIZED: AtomicBool = AtomicBool::new(false);
+static RESTORE_RECT: Mutex<Option<RECT>> = Mutex::new(None);
+static RESTORE_DPI: AtomicU32 = AtomicU32::new(96);
+
+fn lock_or_recover<T>(m: &'static Mutex<T>) -> std::sync::MutexGuard<'static, T> {
+    m.lock().unwrap_or_else(|p| p.into_inner())
+}
+
 /// Magnetic edge snapping while the window is dragged (WM_MOVING). Returns true when the rectangle changed.
 unsafe fn snap_moving(hwnd: HWND, r: &mut RECT) -> bool {
+    if MAXIMIZED.swap(false, Ordering::SeqCst) {
+        // The first movement of a drag that began on a maximized window: it leaves the maximized state, at the size it had
+        // before, staying under the cursor in the same proportion as before (like a normal title bar).
+        if let Some(rr) = lock_or_recover(&RESTORE_RECT).take() {
+            let mut pt = windows::Win32::Foundation::POINT::default();
+            let _ = unsafe { GetCursorPos(&mut pt) };
+            let mut cur = RECT::default();
+            let _ = unsafe { GetWindowRect(hwnd, &mut cur) };
+            let k_num = unsafe { GetDpiForWindow(hwnd) }.max(96) as i64;
+            let k_den = RESTORE_DPI.load(Ordering::SeqCst).max(96) as i64;
+            let w = ((rr.right - rr.left) as i64 * k_num / k_den) as i32;
+            let h = ((rr.bottom - rr.top) as i64 * k_num / k_den) as i32;
+            let rel = (pt.x - cur.left) as f64 / ((cur.right - cur.left).max(1)) as f64;
+            let nl = (pt.x as f64 - rel * w as f64) as i32;
+            let nt = r.top;
+            *r = RECT { left: nl, top: nt, right: nl + w, bottom: nt + h };
+            *lock_or_recover(&SNAP_DRAG) = Some(place::SnapDrag::new(to_rect(r)));
+            *lock_or_recover(&DRAG_START) = Some(*r);
+            log(&format!("restored from maximized to {w}x{h} at {nl},{nt}: the drag left the maximized state"));
+            return true;
+        }
+    }
     let c = cfg();
     let work = unsafe { work_area(hwnd) };
-    let before = to_rect(r);
-    let after = place::snap_rect(before, work, unsafe { scaled(hwnd, c.snap_distance) }, unsafe { scaled(hwnd, c.snap_margin) });
-    if after == before {
+    let proposed = to_rect(r);
+    let (dist, margin) = unsafe { (scaled(hwnd, c.snap_distance), scaled(hwnd, c.snap_margin)) };
+    let after = lock_or_recover(&SNAP_DRAG)
+        .get_or_insert_with(|| place::SnapDrag::new(proposed))
+        .step(proposed, work, dist, margin);
+    #[cfg(feature = "harness")]
+    {
+        let mut pt = windows::Win32::Foundation::POINT::default();
+        let _ = unsafe { GetCursorPos(&mut pt) };
+        log(&format!(
+            "SNAPDRAG cursor={},{} in={},{},{},{} out={},{},{},{} work={},{},{},{} dpi={}",
+            pt.x, pt.y, proposed.l, proposed.t, proposed.r, proposed.b, after.l, after.t, after.r, after.b, work.l, work.t, work.r, work.b,
+            unsafe { GetDpiForWindow(hwnd) }
+        ));
+    }
+    if after == proposed {
         return false;
     }
     *r = RECT { left: after.l, top: after.t, right: after.r, bottom: after.b };
     true
 }
 
-/// Make the terminal font bigger or smaller by `delta` points (8-48), remember it and tell the page.
+/// Fill the work area `work` (of the monitor the cursor or the window is on). `before` is the rectangle to restore later.
+unsafe fn maximize_window(hwnd: HWND, work: RECT, before: Option<RECT>) {
+    let mut cur = RECT::default();
+    let _ = unsafe { GetWindowRect(hwnd, &mut cur) };
+    if !MAXIMIZED.load(Ordering::SeqCst) {
+        *lock_or_recover(&RESTORE_RECT) = Some(before.unwrap_or(cur));
+        RESTORE_DPI.store(unsafe { GetDpiForWindow(hwnd) }.max(96), Ordering::SeqCst);
+    }
+    MAXIMIZED.store(true, Ordering::SeqCst);
+    let _ = unsafe {
+        SetWindowPos(hwnd, None, work.left, work.top, work.right - work.left, work.bottom - work.top, SWP_NOZORDER | SWP_NOACTIVATE)
+    };
+    log(&format!("maximized to the work area {},{},{},{}", work.left, work.top, work.right, work.bottom));
+}
+
+/// Undo `maximize_window`. With `anchor_x` (a drag from the top strip) the window keeps the same proportional place under the cursor.
+unsafe fn restore_window(hwnd: HWND, anchor_x: Option<i32>) {
+    if !MAXIMIZED.swap(false, Ordering::SeqCst) {
+        return;
+    }
+    let Some(rr) = lock_or_recover(&RESTORE_RECT).take() else { return };
+    let mut cur = RECT::default();
+    let _ = unsafe { GetWindowRect(hwnd, &mut cur) };
+    // the size it had, in the scaling of the monitor it is on now
+    let k_num = unsafe { GetDpiForWindow(hwnd) }.max(96) as i64;
+    let k_den = RESTORE_DPI.load(Ordering::SeqCst).max(96) as i64;
+    let (w, h) = (((rr.right - rr.left) as i64 * k_num / k_den) as i32, ((rr.bottom - rr.top) as i64 * k_num / k_den) as i32);
+    let (x, y) = match anchor_x {
+        Some(cx) => {
+            let rel = (cx - cur.left) as f64 / ((cur.right - cur.left).max(1)) as f64;
+            ((cx as f64 - rel * w as f64) as i32, cur.top)
+        }
+        None => (rr.left, rr.top),
+    };
+    let _ = unsafe { SetWindowPos(hwnd, None, x, y, w, h, SWP_NOZORDER | SWP_NOACTIVATE) };
+    log(&format!("restored from maximized to {w}x{h} at {x},{y}"));
+    unsafe { save_geometry(hwnd) };
+}
+
+/// The top strip was double-clicked: maximize, or restore.
+pub fn toggle_maximize(hwnd_i: isize) {
+    let hwnd = HWND(hwnd_i as *mut std::ffi::c_void);
+    unsafe {
+        if MAXIMIZED.load(Ordering::SeqCst) {
+            restore_window(hwnd, None);
+        } else {
+            let work = work_area(hwnd);
+            maximize_window(hwnd, RECT { left: work.l, top: work.t, right: work.r, bottom: work.b }, None);
+        }
+    }
+}
+
+/// A move drag ended: if the cursor is on the top edge of a monitor, the window fills that monitor's work area, like a normal window.
+unsafe fn after_move_drag(hwnd: HWND) {
+    use windows::Win32::Foundation::POINT;
+    use windows::Win32::Graphics::Gdi::{GetMonitorInfoW, MonitorFromPoint, MONITORINFO, MONITOR_DEFAULTTONEAREST};
+    let mut pt = POINT::default();
+    if unsafe { GetCursorPos(&mut pt) }.is_err() {
+        return;
+    }
+    let mon = unsafe { MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST) };
+    let mut mi = MONITORINFO { cbSize: std::mem::size_of::<MONITORINFO>() as u32, ..Default::default() };
+    if !unsafe { GetMonitorInfoW(mon, &mut mi) }.as_bool() {
+        return;
+    }
+    let slack = unsafe { scaled(hwnd, 2) };
+    if pt.y <= mi.rcMonitor.top + slack && !MAXIMIZED.load(Ordering::SeqCst) {
+        let before = *lock_or_recover(&DRAG_START);
+        unsafe { maximize_window(hwnd, mi.rcWork, before) };
+    }
+}
+
+/// Text size (points) of each terminal that has its own, by session id, for this run. Others use `font_size`.
+static FONT_SIZES: Mutex<Vec<(u32, u32)>> = Mutex::new(Vec::new());
+/// `font_size` as it was at start: what the reset hotkey goes back to (in "all" mode `font_size` itself changes).
+static FONT_START: AtomicU32 = AtomicU32::new(14);
+
+/// The text size (points, before `text_scale`) of terminal `id`.
+fn font_size_of(id: u32) -> u32 {
+    FONT_SIZES
+        .lock()
+        .ok()
+        .and_then(|l| l.iter().find(|(i, _)| *i == id).map(|(_, s)| *s))
+        .unwrap_or_else(|| cfg().font_size)
+}
+
+/// Make the focused terminal's text bigger or smaller by `delta` points (8-48) and tell the page; `text_scale_hotkeys =
+/// "all"` changes every terminal together instead and saves `font_size`.
 fn change_font(delta: i32) {
-    let mut size = 0;
-    cfg_update(|c| {
-        c.font_size = (c.font_size as i32 + delta).clamp(8, 48) as u32;
-        size = c.font_size;
-    });
-    log(&format!("font size -> {size}"));
-    wv::post(&serde_json::json!({ "t": "font", "size": size }).to_string());
+    apply_font(Some(delta));
+}
+
+/// Put the text size back to the size it had at start (the focused terminal, or all with `text_scale_hotkeys = "all"`).
+fn reset_font() {
+    apply_font(None);
+}
+
+fn apply_font(delta: Option<i32>) {
+    let start = FONT_START.load(Ordering::SeqCst);
+    if cfg().text_scale_hotkeys == "all" {
+        let mut size = 0;
+        cfg_update(|c| {
+            c.font_size = match delta {
+                Some(d) => (c.font_size as i32 + d).clamp(8, 48) as u32,
+                None => start,
+            };
+            size = c.font_size;
+        });
+        if let Ok(mut l) = FONT_SIZES.lock() {
+            l.clear(); // every terminal follows the common size again
+        }
+        log(&format!("font size -> {size} (all terminals)"));
+        wv::post(&serde_json::json!({ "t": "font", "size": size, "all": true }).to_string());
+    } else {
+        let id = shells_lock().active();
+        let size = match delta {
+            Some(d) => (font_size_of(id) as i32 + d).clamp(8, 48) as u32,
+            None => start,
+        };
+        if let Ok(mut l) = FONT_SIZES.lock() {
+            l.retain(|(i, _)| *i != id);
+            l.push((id, size));
+        }
+        log(&format!("font size -> {size} (shell {id})"));
+        wv::post(&serde_json::json!({ "t": "font", "s": id, "size": size }).to_string());
+    }
 }
 
 fn on_screen(g: &config::Geometry) -> bool {
@@ -828,6 +998,11 @@ unsafe fn save_geometry(hwnd: HWND) {
     }
     let mut r = RECT::default();
     if unsafe { GetWindowRect(hwnd, &mut r) }.is_ok() {
+        if MAXIMIZED.load(Ordering::SeqCst) {
+            if let Some(rr) = *lock_or_recover(&RESTORE_RECT) {
+                r = rr;
+            }
+        }
         cfg_update(|c| {
             c.window = Some(config::Geometry { x: r.left, y: r.top, w: r.right - r.left, h: r.bottom - r.top })
         });
@@ -1088,6 +1263,11 @@ pub fn start_native_drag(hwnd_i: isize, ht: u32) {
     unsafe {
         let mut pt = POINT::default();
         let _ = GetCursorPos(&mut pt);
+        // A maximized window is not resized from its edges. Dragging its strip takes it out of the maximized state, but
+        // only once it really moves (see snap_moving): a plain click on the strip must not restore it.
+        if MAXIMIZED.load(Ordering::SeqCst) && ht != 2 {
+            return;
+        }
         let _ = ReleaseCapture();
         let lp = ((pt.y as isize & 0xFFFF) << 16) | (pt.x as isize & 0xFFFF);
         let _ = PostMessageW(Some(hwnd), WM_NCLBUTTONDOWN, WPARAM(ht as usize), LPARAM(lp));
@@ -1214,6 +1394,9 @@ fn close_shell(id: u32) {
     pty::close(id);
     let next = shells_lock().remove(id);
     if let Ok(mut l) = SPAWN_PROFILES.lock() {
+        l.retain(|(i, _)| *i != id);
+    }
+    if let Ok(mut l) = FONT_SIZES.lock() {
         l.retain(|(i, _)| *i != id);
     }
     // Its pane shows a shell that was not on screen, if there is one; otherwise the focus goes to the
@@ -1480,6 +1663,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                     HK_SIZE => cycle_size(hwnd),
                     HK_FONT_UP => change_font(1),
                     HK_FONT_DOWN => change_font(-1),
+                    HK_FONT_RESET => reset_font(),
                     HK_LAYOUT => layout_cycle(),
                     HK_PANE_ZOOM => pane_zoom(),
                     HK_PANE_NEXT => pane_step(1),
@@ -1576,7 +1760,29 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 }
                 LRESULT(0)
             }
+            WM_DPICHANGED => {
+                // The window was moved to a monitor with another scaling. Keep its size in logical (scaled) terms:
+                // take the rectangle Windows suggests, so it neither shrinks nor grows relative to the text.
+                let r = unsafe { &*(lparam.0 as *const RECT) };
+                let _ = SetWindowPos(
+                    hwnd,
+                    None,
+                    r.left,
+                    r.top,
+                    r.right - r.left,
+                    r.bottom - r.top,
+                    SWP_NOZORDER | SWP_NOACTIVATE,
+                );
+                log(&format!("dpi changed to {}: window now {}x{}", (wparam.0 & 0xFFFF) as u32, r.right - r.left, r.bottom - r.top));
+                // a drag in progress carries on from the new size and scaling
+                *lock_or_recover(&SNAP_DRAG) = None;
+                if let Some(s) = lock_or_recover(&DRAG_START).as_mut() {
+                    *s = *r;
+                }
+                LRESULT(0)
+            }
             WM_NCLBUTTONDOWN => {
+                DRAG_IS_MOVE.store(wparam.0 as u32 == HTCAPTION, Ordering::SeqCst);
                 log(&format!("WM_NCLBUTTONDOWN hit-test={} passive={}", wparam.0, !TERMINAL_FOCUS.load(Ordering::SeqCst)));
                 foreground_note("at non-client click");
                 DefWindowProcW(hwnd, msg, wparam, lparam)
@@ -1635,6 +1841,10 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             }
             WM_ENTERSIZEMOVE => {
                 log("WM_ENTERSIZEMOVE (drag/resize began)");
+                let mut wr = RECT::default();
+                let _ = GetWindowRect(hwnd, &mut wr);
+                *lock_or_recover(&SNAP_DRAG) = Some(place::SnapDrag::new(to_rect(&wr)));
+                *lock_or_recover(&DRAG_START) = Some(wr);
                 foreground_note("at size/move start");
                 let _ = SetTimer(Some(hwnd), 2, 100, None);
                 DefWindowProcW(hwnd, msg, wparam, lparam)
@@ -1648,6 +1858,11 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 let _ = KillTimer(Some(hwnd), 2);
                 log("WM_EXITSIZEMOVE");
                 foreground_note("at size/move end");
+                *lock_or_recover(&SNAP_DRAG) = None;
+                if DRAG_IS_MOVE.swap(false, Ordering::SeqCst) {
+                    after_move_drag(hwnd);
+                }
+                *lock_or_recover(&DRAG_START) = None;
                 save_geometry(hwnd);
                 DefWindowProcW(hwnd, msg, wparam, lparam)
             }
@@ -1788,6 +2003,7 @@ fn main() -> windows::core::Result<()> {
             (HK_SIZE, &hk.size_cycle, "size presets"),
             (HK_FONT_UP, &hk.font_bigger, "bigger font"),
             (HK_FONT_DOWN, &hk.font_smaller, "smaller font"),
+            (HK_FONT_RESET, &hk.font_reset, "reset font size"),
             (HK_SHELL_NEXT, &hk.shell_next, "next shell"),
             (HK_SHELL_PREV, &hk.shell_prev, "previous shell"),
             (HK_SHELL_NEW, &hk.shell_new, "new shell"),
@@ -1831,6 +2047,7 @@ fn main() -> windows::core::Result<()> {
             let c0 = cfg();
             shells_lock().adopt(1, &config::default_profile(&c0).name);
             let mut l = layout_lock();
+            FONT_START.store(c0.font_size, Ordering::SeqCst);
             l.set_own(c0.pane_shells == "own");
             l.start(1);
             l.set_min(c0.pane_min[0], c0.pane_min[1]);
@@ -1874,6 +2091,10 @@ fn main() -> windows::core::Result<()> {
             &serde_json::json!({
                 "font": loaded.font_family,
                 "fontSize": loaded.font_size,
+                "textScale": loaded.text_scale,
+                "uiScale": loaded.ui_scale,
+                "lineHeight": loaded.line_height as f64 / 100.0,
+                "letterSpacing": loaded.letter_spacing,
                 "scrollback": loaded.scrollback,
                 "theme": theme_json(&loaded),
                 "copyOnSelect": loaded.copy_on_select,

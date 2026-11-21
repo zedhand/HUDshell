@@ -39,6 +39,13 @@
   // uses for Shift+Enter); 'none' leaves xterm.js behaviour untouched.
   const shiftEnter = injected.shiftEnter || 'none';
 
+  // Text size: each terminal has its own base size (points); `textScale` (percent) multiplies all of them. HUDshell's own
+  // text follows `uiScale` through the --ui CSS variable.
+  let textScale = injected.textScale || 100;
+  let curBase = injected.fontSize || 14;
+  const effSize = (base) => Math.max(6, Math.round(base * textScale / 100));
+  document.documentElement.style.setProperty('--ui', String((injected.uiScale || 100) / 100));
+
   const termHost = document.getElementById('term');
   const views = new Map();   // session id -> view
   let activeId = 1;
@@ -90,7 +97,9 @@
       cursorBlink: false,
       scrollback: injected.scrollback || 2000,
       fontFamily: injected.font || '"Cascadia Mono", Consolas, monospace',
-      fontSize: injected.fontSize || 14,
+      fontSize: effSize(curBase),
+      lineHeight: injected.lineHeight || 1,
+      letterSpacing: injected.letterSpacing || 0,
       windowsPty: { backend: 'conpty', buildNumber: injected.build || 26100 },
       theme: currentTheme,
     });
@@ -107,7 +116,7 @@
     } catch (e) {
       send({ t: 'jserror', where: 'unicode-addon', msg: String(e) });
     }
-    const v = { id, term, fit, pane, label, exited: false, lastSize: '', kitty: { flags: 0, stack: [] },
+    const v = { id, term, fit, pane, label, base: curBase, exited: false, lastSize: '', kitty: { flags: 0, stack: [] },
                title: '', prog: '', unread: false, attn: false, profile: '', color: '' };
     // The program's own window title (OSC 0 / 2) names the tab; control characters are never shown.
     term.onTitleChange((t) => {
@@ -569,9 +578,19 @@
       case 'cue':
         pulseCue();
         break;
-      case 'font':
-        // Live font size change from the host hotkeys; refit so each shell gets the new cell count.
-        for (const o of views.values()) o.term.options.fontSize = m.size;
+      case 'font': {
+        // Live text size change from the host hotkeys: all terminals, or the one named by s; refit so each
+        // shell gets the new cell count. A new terminal starts at the common size.
+        if (m.all) curBase = m.size;
+        const targets = m.all ? [...views.values()] : (v ? [v] : []);
+        for (const o of targets) { o.base = m.size; o.term.options.fontSize = effSize(o.base); }
+        fitShown();
+        requestAnimationFrame(reportArea);
+        break;
+      }
+      case 'textscale':
+        textScale = Math.max(50, Math.min(300, Number(m.pct) || 100));
+        for (const o of views.values()) o.term.options.fontSize = effSize(o.base);
         fitShown();
         requestAnimationFrame(reportArea);
         break;
@@ -603,6 +622,12 @@
                ui: { strip: document.body.classList.contains('tabs-on'), active: activeId,
                      labels: tabs.list.map((e, i) => (i + 1) + ' ' + labelOf(e) + markOf(e)),
                      progs: tabs.list.map((e) => (views.get(e.id) || {}).prog || '').join(','),
+                     fonts: tabs.list.map((e) => { const w = views.get(e.id); return e.id + ':' + (w ? w.term.options.fontSize : '-') + '/' + (w ? w.base : '-'); }).join(','),
+                     text: { scale: textScale, lh: d.term.options.lineHeight, ls: d.term.options.letterSpacing,
+                             ui: getComputedStyle(document.documentElement).getPropertyValue('--ui').trim(),
+                             tabh: tabsEl.getBoundingClientRect().height,
+                             tabfs: (() => { const t = tabsEl.querySelector('.tab'); return t ? getComputedStyle(t).fontSize : ''; })(),
+                             termtop: Math.round(termHost.getBoundingClientRect().top) },
                      rects: (() => {
                        const rc = (el) => { const b = el.getBoundingClientRect(); return [Math.round(b.left), Math.round(b.top), Math.round(b.width), Math.round(b.height)]; };
                        return { dpr: window.devicePixelRatio, term: rc(termHost),
@@ -691,9 +716,21 @@
   // The web view covers the whole window, so a press on the top strip or on an edge never reaches the host's own
   // hit-test (which says "caption" / "border" there). The page says so instead, and the host starts Windows' own
   // move / resize loop (so edge snapping and the size limits apply). Neither takes the keyboard.
+  let lastStripDown = 0;
   window.addEventListener('mousedown', (e) => {
     const t = e.target && e.target.closest ? e.target.closest('#drag, .edge') : null;
     if (t && e.button === 0) {
+      if (t.id === 'drag') {
+        // two presses on the strip in quick succession = double click: maximize / restore (a normal title bar does the same)
+        const now = Date.now();
+        if (now - lastStripDown < 450) {
+          lastStripDown = 0;
+          send({ t: 'nc', hit: 'toggle' });
+          e.preventDefault();
+          return;
+        }
+        lastStripDown = now;
+      }
       send({ t: 'nc', hit: t.id === 'drag' ? 'caption' : t.dataset.hit });
       e.preventDefault();
       return;

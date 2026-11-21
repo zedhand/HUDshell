@@ -31,12 +31,24 @@ Key decisions and why:
 - The window is `WS_EX_TOPMOST | TOOLWINDOW | NOACTIVATE | LAYERED`. While passive it never takes the keyboard
   (`MA_NOACTIVATE`), so a game keeps focus.
 - **Click-through** adds `WS_EX_TRANSPARENT`: mouse input falls through. It is a user setting (default on).
+- **Scaling.** The process is per-monitor DPI aware (v2). When the window is moved to a monitor with another scaling, `WM_DPICHANGED` applies the
+  rectangle Windows suggests, so the window keeps its logical size (it grows 1.5 x going from 100% to 150%) and the page, whose scale WebView2
+  follows by itself, re-fits the terminal. Pixel distances in the settings (`snap_distance`, `snap_margin`, `sizes`) are 96-dpi values scaled by
+  the window's current scaling. The size stored in `config.json` is physical pixels (see known-gaps).
 - **Moving and resizing.** The web view covers the whole window, so a real mouse press on the top strip or an edge lands on the web view and
   never reaches the host's own hit-test (`WM_NCHITTEST` still answers "caption" / "border" there, for hit-test queries). The page therefore
   has an invisible handle on each edge and corner and treats the top strip as a handle: a press on one sends `nc` with its kind, and the host
   posts `WM_NCLBUTTONDOWN` with the matching hit-test code, which starts Windows' own move / resize loop (so edge snapping in `WM_MOVING`
   and the size limits apply). These presses are not "clicks on the terminal", so they never take the keyboard. Before 2026-11-20 this did not
   work: the window could only be moved with the corner hotkeys.
+- **Snapping and maximizing.** Windows proposes each rectangle of a drag relative to the one that was *last applied*, so snapping must not
+  feed its own result back (a window held by the snap distance could never be pulled away slowly: found by a real-mouse test on 2026-11-20).
+  `place::SnapDrag` keeps the position the window would have without snapping and snaps that, so the magnet holds and then releases.
+  Releasing a move with the cursor on the top edge of a monitor (or double-clicking the strip) makes the window fill that monitor's work
+  area; it is done by resizing the window (never with Windows' own maximize, which would activate it and take the keyboard), and the
+  rectangle it had is kept. A maximized window leaves that state on the first actual movement of a drag from its strip (not on a plain
+  click), keeping its proportional place under the cursor, at its earlier size in the scaling of the monitor it is on. The corner and size
+  hotkeys restore it first; the saved window position is the restored rectangle.
 - **Grab focus** (hotkey, tray, or clicking the terminal while interactive) clears `NOACTIVATE`, calls
   `SetForegroundWindow` (allowed because a registered hotkey or real input is in progress) and makes the window
   clickable while focused. **Release** restores the previous foreground window and click-through.
@@ -100,6 +112,17 @@ Key decisions and why:
 - Zoom shows the focused pane alone at full size; moving the pane focus while zoomed shows the next pane zoomed.
 - Equal splits by default. `split` sets uneven ones; `pane_dividers` adds draggable dividers (mouse only, so not while click-through).
 - The layout is not restored at start unless `remember_layout` is on, and then only the preset and split (session restore is later).
+
+## Text size
+
+- Each terminal has a base size in points (starting at `font_size`, 8-48). The size xterm.js draws is `round(base * text_scale / 100)` (at least 6),
+  so `text_scale` is one multiplier over everything and a terminal's own size stays a number the user can reason about.
+- The bigger / smaller / reset hotkeys (`text_scale_hotkeys`) change the base size of the focused terminal only, kept by the host for the run
+  (not saved: a saved per-terminal size needs session restore); with `"all"` they change every terminal and save `font_size` (the earlier
+  behaviour). Reset goes back to the `font_size` of the start. A terminal opened later starts at the common size.
+- `line_height` and `letter_spacing` are xterm.js options of every terminal. `ui_scale` sets one CSS variable that HUDshell's own text and
+  the tab strip height are multiples of; at 100 the pixel values are exactly what they were before the setting existed.
+- There is no live reload and no settings-panel row for these yet (config is read at start); both are planned.
 
 ## Clipboard, links and permissions
 

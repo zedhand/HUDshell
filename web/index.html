@@ -5,7 +5,7 @@
 <meta http-equiv="Content-Security-Policy"
       content="default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self'; img-src 'self' data:; connect-src 'none'">
 <style>
-  :root { --bg: #0c1620; --fg: #d7e2ec; }
+  :root { --bg: #0c1620; --fg: #d7e2ec; --ui: 1; /* scale of HUDshell's own text (config ui_scale) */ }
   html, body { margin: 0; height: 100%; background: var(--bg); overflow: hidden; }
   /* Slim drag strip: same colour as the terminal, with a faint grip. The host treats this band
      (see DRAG_STRIP_PX) as the window's title area, so it drags like a title bar. */
@@ -24,10 +24,10 @@
                  background: currentColor; opacity: 0.22; margin: 9px auto 0; }
   #term { position: absolute; top: 22px; left: 6px; right: 0; bottom: 4px; }
   /* Tab strip: one label per shell. Shown according to the `tabs` setting (auto / always / overlay). */
-  #tabs { display: none; position: absolute; top: 22px; left: 6px; right: 0; height: 20px; overflow: hidden; white-space: nowrap;
-          font: 12px/20px "Cascadia Mono", Consolas, monospace; color: var(--fg); user-select: none; }
+  #tabs { display: none; position: absolute; top: 22px; left: 6px; right: 0; height: calc(20px * var(--ui)); overflow: hidden; white-space: nowrap;
+          font: calc(12px * var(--ui)) / calc(20px * var(--ui)) "Cascadia Mono", Consolas, monospace; color: var(--fg); user-select: none; }
   body.tabs-on #tabs { display: flex; }
-  body.tabs-on #term { top: 42px; }
+  body.tabs-on #term { top: calc(22px + 20px * var(--ui)); }
   #tabs .tab { padding: 0 10px; margin-right: 2px; opacity: .55; cursor: pointer; border-bottom: 2px solid transparent;
                flex: 0 1 auto; min-width: 0; max-width: 40ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   #tabs .tab.on { opacity: 1; border-bottom-color: var(--accent, var(--fg)); }
@@ -35,7 +35,7 @@
   #tabs .tab .mark.bang { font-weight: 700; }
   /* Shell list overlay (quick glance) and profile picker: plain text boxes like the settings panel. */
   #shells, #picker { display: none; position: absolute; top: 34px; left: 50%; transform: translateX(-50%); z-index: 12; margin: 0;
-                     padding: 8px 14px; border: 1px solid var(--fg); font: 14px/1.35 "Cascadia Mono", Consolas, monospace;
+                     padding: 8px 14px; border: 1px solid var(--fg); font: calc(14px * var(--ui))/1.35 "Cascadia Mono", Consolas, monospace;
                      color: var(--fg); background: var(--bg); white-space: pre; user-select: none; max-width: 90%; overflow: hidden; }
   #shells.open, #picker.open { display: block; }
   /* One pane per shell session; the host's layout says which are on screen and where. */
@@ -44,17 +44,17 @@
   /* Split panes: a faint frame on each, a brighter one on the pane that has the keyboard, a small name. */
   .pane.split::after { content: ''; position: absolute; inset: 0; border: 1px solid var(--fg); opacity: .14; pointer-events: none; z-index: 5; }
   .pane.split.focus::after { opacity: .6; }
-  .pane .plabel { position: absolute; top: 0; right: 4px; z-index: 6; font: 11px/14px "Cascadia Mono", Consolas, monospace;
+  .pane .plabel { position: absolute; top: 0; right: 4px; z-index: 6; font: calc(11px * var(--ui))/calc(14px * var(--ui)) "Cascadia Mono", Consolas, monospace;
                   color: var(--fg); opacity: .55; pointer-events: none; white-space: nowrap; }
   .pane.empty { display: flex; align-items: center; justify-content: center; text-align: center; white-space: pre; color: var(--fg);
-                font: 12px/1.4 "Cascadia Mono", Consolas, monospace; user-select: none; }
+                font: calc(12px * var(--ui))/1.4 "Cascadia Mono", Consolas, monospace; user-select: none; }
   .divider { position: absolute; z-index: 8; }
   .divider.v { top: 0; bottom: 0; width: 6px; cursor: col-resize; }
   .divider.h { left: 0; right: 0; height: 6px; cursor: row-resize; }
   #tabs .tab.vis { opacity: .8; }
   /* Settings panel: plain text box drawing, like the terminal itself. */
   #settings { display: none; position: absolute; top: 28px; right: 10px; z-index: 10; margin: 0; padding: 8px 12px; border: 1px solid var(--fg);
-              font: 14px/1.3 "Cascadia Mono", Consolas, monospace; color: var(--fg); background: var(--bg);
+              font: calc(14px * var(--ui))/1.3 "Cascadia Mono", Consolas, monospace; color: var(--fg); background: var(--bg);
               white-space: pre; user-select: none; cursor: default; }
   #settings.open { display: block; }
   #settings .k { opacity: .6; }
