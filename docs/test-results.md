@@ -1,18 +1,51 @@
 # Test results
 
 Machine: Windows 11 build 26300, WebView2 Runtime 157.x, Rust 1.99 (MSVC), PowerShell 7.7, Claude Code 2.1.328 (2.1.329 on 2026-11-20),
-Codex CLI 0.170.0, three displays (all at 100% scaling). Latest full regression: 2026-11-20 with `scripts/test-all.ps1`.
+Codex CLI 0.170.0, three displays (all at 100% scaling). Latest full regression: 2026-11-21 with `scripts/test-all.ps1`.
 "Tested" means observed in a log, a cell-text dump or a screenshot; anything not listed is in [known-gaps.md](known-gaps.md).
 
 ## CI check of the commits after the last full run (2026-11-21)
 
 Commit 7411ade (live settings reload, session restore, web view recovery, start-failure message, AltGr warning, panel rows) was pushed before any
 suite had been run on it. CI (the `static` suite on GitHub's `windows-latest`) failed once: one of the new unit tests, written by me, expected the
-wrong pane order. After the fix (00765f1) CI passed: **66 unit tests pass** and the release exe is 1.19 MB. That is **all** that has run for
-these features: no desktop suite (`reload`, `restore`, `recover`, `sessions`, `kbd`, `ui`, ...) has been run on them, so every behaviour they
-describe is still unverified. The previous full run below is of the code before them.
+wrong pane order. After the fix (00765f1) CI passed: **66 unit tests pass** and the release exe is 1.19 MB. That was **all** that had run for
+these features at the time; the desktop suites were run afterwards (see the latest full run below).
 
-## Latest full run (scripts/test-all.ps1, no sandbox, 2026-11-20, mixed scaling, text scaling, snapping and maximize): 394 pass, 0 fail, 3 warnings
+## Latest full run (scripts/test-all.ps1, no sandbox, 2026-11-21, after the seven features, corner snapping and the maximize option): 406 pass, 0 fail, 6 warnings
+
+Fresh release and harness builds, `scripts/test-all.ps1` without a sandbox; the real-prompt suite was **not** run. Per suite: static 16 (67 unit
+tests; release exe 1.19 MB), keys 6, width 3, hideshow 3, clickfocus 3, clipboard 3, autotest 22 (+2 skips), ui 29, scrollback 8, ghost 14,
+attention 10, policy 12, place 13, dpi (no check ran, see below), text 13, reload 9, restore 7, recover 6, qol 16, sessions 12, shells 34,
+layout 35, input 13, snap 52, kbd 14 (+1 warning), cost 5, release 20, config 24, soak 4. Warnings: the two intentional `autotest` skips, the
+known AltGr+Q limit reported by `kbd`, and three "no monitor with a different scaling found" (`place`, `dpi`, `input`).
+**The machine now reports no monitor at a different scaling** (the earlier 150% monitor was not found), so this run did not test mixed scaling at
+all and `place` / `input` ran on one scaling only; the mixed-scaling results in the section below are from the previous run and have not been repeated.
+
+**The features pushed untested in 7411ade, now run:** live settings reload (`reload` 9/9: text and UI scale, tabs mode, opacity, line height and
+letter spacing take effect, an invalid file keeps the settings in use, a start-only setting reports a restart notice), session restore (`restore`
+7/7: four shells from three profiles and the 2 x 2 layout with the same panes and focus come back; off by default and leaves the file alone; a
+damaged file is ignored), web view recovery (`recover` 6/6: this instance's browser process was killed, the web view was created again, and both
+shells kept running with output shown in the new page), the start-failure message (`sessions`), the AltGr start notice (`kbd`: names Ctrl+Alt+Q
+with a German layout active, silent otherwise) and the settings-panel rows (`ui`: the click on `[close]` works). The keyboard layout in use
+before the run was checked to be back after `kbd`.
+
+**Defects and test faults found, with what they were.** (1) *Test fault:* `restore` expected the panes in order 1,2,3,4, but the first run had
+saved 3,1,2,4 (the focused shell takes the first pane) and the restore reproduced exactly that; the expectation was wrong, the product was right.
+(2) *Test fault:* the `[close]` click position in `ui` was a guess (two lines added; there are four); corrected to the measured line. (3) *Product
+change, not a defect:* see below.
+
+**Corner snapping, square corners and maximize over the taskbar (2026-11-21).** The owner reported that a small window did not snap into corners
+and that the corners stayed rounded when snapped or maximized. Cause: snapping stopped at the 8 px margin (reach 16 px), so a window never
+reached the corner, and Windows 11 rounds the window's corners all the time. Now a drop within 3 x `snap_distance` + `snap_margin` of a corner
+goes flush into it, the corners become square while the window touches a corner of the screen's usable area or is maximized (rounded again
+after), and maximizing fills the whole monitor over the taskbar (`maximize_area = monitor`, default; `work` keeps the taskbar). Checked by `snap`
+with real mouse drags into all four corners of each of the three monitors (flush within 1 px; the log reports "square"), a top-edge drag to
+maximize (fills the monitor; square; rounded again after the restore), and by looking at screenshots of every corner and the maximized window,
+including 8 x zooms of the corner pixels: the corners are right angles. The screenshots were kept local and are not part of the repository.
+The `place` and `input` checks that expected the old 8 px gap in a corner were updated to expect no gap. **Not tested:** `maximize_area = work`
+(only its settings parsing is unit-tested), the taskbar on another edge or auto-hidden, and a very small window that is nearly as wide as the zone.
+
+## Previous full run (scripts/test-all.ps1, no sandbox, 2026-11-20, mixed scaling, text scaling, snapping and maximize): 394 pass, 0 fail, 3 warnings
 
 Run on freshly built release and harness executables, on a machine with three monitors: 2560x1440 at 100% (primary), 1920x1080 at **150%**
 and a 1920x480 strip at 100%. The real-prompt suite was **not** run, so no prompt went to Claude Code or Codex. The three warnings are the

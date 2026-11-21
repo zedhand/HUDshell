@@ -417,7 +417,7 @@ function Suite-Ui {
     $t0 = @(Cut $log $n | Where-Object { $_ -match 'colour theme ->' }).Count
     Click 459 101
     Check 'ui' 'clicking the colour arrow steps the theme' (@(Cut $log $n | Where-Object { $_ -match 'colour theme ->' }).Count -eq $t0 + 1)
-    Click 315 209   # [close] moved down by the two rows added for text size and UI text size (2 x 18 px); not yet run
+    Click 315 246   # [close] is on line 11 of the panel (4 more lines than before: 2 rows and 2 key-help lines, about 18.2 px each): 82 + 9 x 18.2
     Check 'ui' 'clicking [close] closes the panel and returns focus' ((@(Cut $log $n | Where-Object { $_ -match 'settings panel closed' }).Count -ge 1) -and -not [GT]::IsFg($h))
     [GT]::Hotkey(0x53); Start-Sleep -Milliseconds 1200
     [GT]::Key(0x1B); Start-Sleep -Milliseconds 1000
@@ -755,7 +755,7 @@ function Place-Once([string[]]$extra) {
   $cb = & $colsOf 'font-base'; $cu = & $colsOf 'font-up'
   Check 'place' 'a bigger font gives fewer columns (the shell is told the new size)' ($cb -gt 0 -and $cu -gt 0 -and $cu -lt $cb) "$cb -> $cu columns"
   $mv = @($run | Where-Object { $_ -match 'MOVING in=' } | ForEach-Object { Strip $_ })
-  Check 'place' 'dragging near the top-left corner snaps flush to the margin' ($mv.Count -ge 1 -and $mv[0] -match ("in=5,7 out=$m,$m,\d+,\d+ handled=1")) ($mv[0])
+  Check 'place' 'dragging near the top-left corner snaps flush into it (no gap)' ($mv.Count -ge 1 -and $mv[0] -match "in=5,7 out=0,0,\d+,\d+ handled=1") ($mv[0])
   Check 'place' 'dragging far from every edge is left alone' ($mv.Count -ge 2 -and $mv[1] -match 'in=400,300 out=400,300,\d+,\d+ handled=0') ($mv[1])
 }
 
@@ -1064,7 +1064,7 @@ function Input-Once([string[]]$extra) {
     $dy = ($s3.WT + [int](4 * $dpr)) - $s3.T
     Drag-To $gx $gy $gx ($gy + $dy)
     $s4 = Now-State
-    Check 'input' 'a real drag that ends 4 px from the top edge snaps to the margin there too' ([Math]::Abs($s4.T - ($s4.WT + $margin)) -le 2) ("top " + ($s4.T - $s4.WT) + " px from the work area")
+    Check 'input' 'a real drag that ends 4 px from the top edge, with the window already at the left edge, lands in the top-left corner: flush, no gap' ([Math]::Abs($s4.T - $s4.WT) -le 1 -and [Math]::Abs($s4.L - $s4.WL) -le 1) ("top " + ($s4.T - $s4.WT) + " px, left " + ($s4.L - $s4.WL) + " px from the work area")
     # 5. resizing by dragging the right edge outwards (the edge handles are drawn by the page)
     $s5 = Now-State
     $ex = $s5.R - [int](2 * $dpr); $ey = $s5.T + [int](($s5.B - $s5.T) / 2)
@@ -1130,6 +1130,29 @@ function Drag-Mouse($x0, $y0, $x1, $y1) {
 
 # One monitor: the window (640x360 at 96 dpi) starts on it; real drags put its corners 6 px (96-dpi) from each corner of the work area.
 # When $crossTo is given, the window is then dragged onto each of those monitors and snapped into the bottom-right corner there.
+# Screenshots of the real screen (what the owner sees) for the corner checks; saved to a git-ignored folder, never committed.
+$shotDir = Join-Path $root '.claude\scratch-archive\shots'
+New-Item -ItemType Directory -Force $shotDir | Out-Null
+function Shot([string]$name, [int]$l, [int]$t, [int]$r, [int]$b, [int]$zoom = 1) {
+  try {
+    $pad = 24; $x = $l - $pad; $y = $t - $pad; $w = ($r - $l) + 2 * $pad; $h = ($b - $t) + 2 * $pad
+    $bmp = New-Object System.Drawing.Bitmap $w, $h
+    $g = [System.Drawing.Graphics]::FromImage($bmp)
+    $g.CopyFromScreen($x, $y, 0, 0, (New-Object System.Drawing.Size $w, $h))
+    $g.Dispose()
+    if ($zoom -gt 1) {
+      $big = New-Object System.Drawing.Bitmap ($w * $zoom), ($h * $zoom)
+      $g2 = [System.Drawing.Graphics]::FromImage($big)
+      $g2.InterpolationMode = [System.Drawing.Drawing2D.InterpolationMode]::NearestNeighbor
+      $g2.PixelOffsetMode = [System.Drawing.Drawing2D.PixelOffsetMode]::Half
+      $g2.DrawImage($bmp, 0, 0, $w * $zoom, $h * $zoom); $g2.Dispose(); $bmp.Dispose(); $bmp = $big
+    }
+    $bmp.Save((Join-Path $shotDir ($name + '.png')), [System.Drawing.Imaging.ImageFormat]::Png); $bmp.Dispose()
+  } catch { Write-Host "screenshot $name failed: $_" }
+}
+# The last "window corners: square|rounded" line of a log slice.
+function Last-Corners($lines) { $c = @($lines | Where-Object { $_ -match 'window corners: (square|rounded)' }); if ($c.Count) { ($c[-1] -replace '^.*window corners: ', '').Trim() } else { 'none' } }
+
 function Snap-Monitor($m, $others) {
   $dpr = $m.Dpi / 96.0
   $name = "monitor " + ($m.WR - $m.WL) + "x" + ($m.WB - $m.WT) + " at " + [int]($m.Dpi * 100 / 96) + "%"
@@ -1162,9 +1185,16 @@ function Snap-Monitor($m, $others) {
       $gx = $st.L + [int](200 * $dpr); $gy = $st.T + [int](10 * $dpr)
       Drag-Mouse $gx $gy ($gx + $nl - $st.L) ($gy + $nt - $st.T)
       $s2 = Last-State @(Cut $log $n)
-      $okx = if ($c -match 'left') { [Math]::Abs($s2.L - ($m.WL + $mg)) -le 1 } else { [Math]::Abs(($m.WR - $s2.R) - $mg) -le 1 }
-      $oky = if ($c -match 'top') { [Math]::Abs($s2.T - ($m.WT + $mg)) -le 1 } else { [Math]::Abs(($m.WB - $s2.B) - $mg) -le 1 }
-      Check 'snap' "$name`: a real drag that ends 6 px from the $c corner snaps flush into it (margin $mg px on both sides)" ($okx -and $oky) ("window {0},{1},{2},{3} in work {4},{5},{6},{7}" -f $s2.L, $s2.T, $s2.R, $s2.B, $m.WL, $m.WT, $m.WR, $m.WB)
+      $okx = if ($c -match 'left') { [Math]::Abs($s2.L - $m.WL) -le 1 } else { [Math]::Abs($m.WR - $s2.R) -le 1 }
+      $oky = if ($c -match 'top') { [Math]::Abs($s2.T - $m.WT) -le 1 } else { [Math]::Abs($m.WB - $s2.B) -le 1 }
+      Check 'snap' "$name`: a real drag that ends 6 px from the $c corner snaps flush into it (no gap)" ($okx -and $oky) ("window {0},{1},{2},{3} in work {4},{5},{6},{7}" -f $s2.L, $s2.T, $s2.R, $s2.B, $m.WL, $m.WT, $m.WR, $m.WB)
+      Start-Sleep -Milliseconds 400
+      $cs = Last-Corners @(Cut $log $n)
+      Check 'snap' "$name`: in the $c corner the window's corners are square" ($cs -eq 'square') $cs
+      $tag = ("corner-{0}x{1}-{2}" -f ($m.WR - $m.WL), ($m.WB - $m.WT), $c)
+      Shot $tag $s2.L $s2.T $s2.R $s2.B
+      $zx = if ($c -match 'left') { $s2.L } else { $s2.R }; $zy = if ($c -match 'top') { $s2.T } else { $s2.B }
+      Shot ($tag + '-zoom') ($zx - 16) ($zy - 16) ($zx + 16) ($zy + 16) 8
     }
     # Dragging to the top edge of the screen maximizes (fills the work area), like any normal window; dragging the strip of a
     # maximized window down restores it; double-clicking the strip toggles.
@@ -1174,12 +1204,18 @@ function Snap-Monitor($m, $others) {
     for ($i = 1; $i -le 14; $i++) { [GT]::Move($gx, [int]($gy + ($m.T - $gy) * $i / 14)); Start-Sleep -Milliseconds 70 }
     Start-Sleep -Milliseconds 900; [GT]::MouseUp(); Start-Sleep -Milliseconds 2500
     $s5 = Last-State @(Cut $log $n)
-    $isMax = ([Math]::Abs($s5.L - $m.WL) -le 1) -and ([Math]::Abs($s5.T - $m.WT) -le 1) -and ([Math]::Abs($s5.R - $m.WR) -le 1) -and ([Math]::Abs($s5.B - $m.WB) -le 1)
-    Check 'snap' "$name`: dragging the window to the top edge of the screen maximizes it to the work area" $isMax ("window {0},{1},{2},{3} in work {4},{5},{6},{7}" -f $s5.L, $s5.T, $s5.R, $s5.B, $m.WL, $m.WT, $m.WR, $m.WB)
+    $isMax = ([Math]::Abs($s5.L - $m.L) -le 1) -and ([Math]::Abs($s5.T - $m.T) -le 1) -and ([Math]::Abs($s5.R - $m.R) -le 1) -and ([Math]::Abs($s5.B - $m.B) -le 1)
+    Check 'snap' "$name`: dragging the window to the top edge of the screen maximizes it to the whole monitor, over the taskbar" $isMax ("window {0},{1},{2},{3} in monitor {4},{5},{6},{7}" -f $s5.L, $s5.T, $s5.R, $s5.B, $m.L, $m.T, $m.R, $m.B)
+    Start-Sleep -Milliseconds 400
+    Check 'snap' "$name`: the maximized window has square corners" ((Last-Corners @(Cut $log $n)) -eq 'square') (Last-Corners @(Cut $log $n))
+    $tag = ("max-{0}x{1}" -f ($m.WR - $m.WL), ($m.WB - $m.WT))
+    Shot $tag $s5.L $s5.T $s5.R $s5.B
+    Shot ($tag + '-zoom') ($s5.L - 16) ($s5.T - 16) ($s5.L + 16) ($s5.T + 16) 8
     if ($isMax) {
       $gx = $s5.L + [int](($s5.R - $s5.L) / 2); $gy = $s5.T + [int](10 * $dpr)
       Drag-Mouse $gx $gy $gx ($gy + [int](200 * $dpr))
       $s6 = Last-State @(Cut $log $n)
+      Check 'snap' "$name`: after the restore the corners are rounded again" ((Last-Corners @(Cut $log $n)) -eq 'rounded') (Last-Corners @(Cut $log $n))
       Check 'snap' "$name`: dragging the maximized window down by its top strip restores its earlier size (${w0}x${h0}) and it follows the cursor" (([Math]::Abs(($s6.R - $s6.L) - $w0) -le 3) -and ([Math]::Abs(($s6.B - $s6.T) - $h0) -le 3) -and ($s6.T -gt $m.WT + [int](100 * $dpr)) -and ($s6.L -lt $gx) -and ($s6.R -gt $gx)) ("window {0},{1},{2},{3}" -f $s6.L, $s6.T, $s6.R, $s6.B)
     }
     $st = Last-State @(Cut $log $n)
@@ -1188,7 +1224,7 @@ function Snap-Monitor($m, $others) {
     [GT]::MouseDown(); Start-Sleep -Milliseconds 100; [GT]::MouseUp(); Start-Sleep -Milliseconds 150
     [GT]::MouseDown(); Start-Sleep -Milliseconds 100; [GT]::MouseUp(); Start-Sleep -Milliseconds 2500
     $s7 = Last-State @(Cut $log $n)
-    $dbl = ([Math]::Abs($s7.L - $m.WL) -le 1) -and ([Math]::Abs($s7.T - $m.WT) -le 1) -and ([Math]::Abs($s7.R - $m.WR) -le 1) -and ([Math]::Abs($s7.B - $m.WB) -le 1)
+    $dbl = ([Math]::Abs($s7.L - $m.L) -le 1) -and ([Math]::Abs($s7.T - $m.T) -le 1) -and ([Math]::Abs($s7.R - $m.R) -le 1) -and ([Math]::Abs($s7.B - $m.B) -le 1)
     Check 'snap' "$name`: a double click on the top strip maximizes" $dbl ("window {0},{1},{2},{3}" -f $s7.L, $s7.T, $s7.R, $s7.B)
     $gx = $s7.L + [int](200 * $dpr); $gy = $s7.T + [int](10 * $dpr)
     [GT]::Move($gx, $gy); Start-Sleep -Milliseconds 300
@@ -1206,13 +1242,13 @@ function Snap-Monitor($m, $others) {
       $u = Last-Ui @(Cut $log $n)
       $inside = ($s3.L -ge $o.L -and $s3.R -le $o.R -and $s3.T -ge $o.T -and $s3.B -le $o.B)
       Check 'snap' "$name -> $oname`: dragging the window across the border puts it wholly on the other monitor, at that monitor's scaling" ($inside -and $u -and [Math]::Abs($u.rects.dpr - $odpr) -lt 0.01 -and [Math]::Abs(($s3.R - $s3.L) - $w0 * $o.Dpi / $m.Dpi) -le 3) ("window {0},{1},{2},{3}; width {4} -> {5}; page ratio {6}" -f $s3.L, $s3.T, $s3.R, $s3.B, $w0, ($s3.R - $s3.L), $u.rects.dpr)
-      $omg = [int]($o.Dpi * 8 / 96)
+      $omg = 0
       $w = $s3.R - $s3.L; $h = $s3.B - $s3.T
       $nl = $o.WR - [int](6 * $odpr) - $w; $nt = $o.WB - [int](6 * $odpr) - $h
       $gx = $s3.L + [int](200 * $odpr); $gy = $s3.T + [int](10 * $odpr)
       Drag-Mouse $gx $gy ($gx + $nl - $s3.L) ($gy + $nt - $s3.T)
       $s4 = Last-State @(Cut $log $n)
-      Check 'snap' "$name -> $oname`: and a drag from there into its bottom-right corner snaps flush (margin $omg px)" (([Math]::Abs(($o.WR - $s4.R) - $omg) -le 1) -and ([Math]::Abs(($o.WB - $s4.B) - $omg) -le 1)) ("window {0},{1},{2},{3} in work {4},{5},{6},{7}" -f $s4.L, $s4.T, $s4.R, $s4.B, $o.WL, $o.WT, $o.WR, $o.WB)
+      Check 'snap' "$name -> $oname`: and a drag from there into its bottom-right corner snaps flush (no gap)" (([Math]::Abs(($o.WR - $s4.R) - $omg) -le 1) -and ([Math]::Abs(($o.WB - $s4.B) - $omg) -le 1)) ("window {0},{1},{2},{3} in work {4},{5},{6},{7}" -f $s4.L, $s4.T, $s4.R, $s4.B, $o.WL, $o.WT, $o.WR, $o.WB)
       # back to this monitor for the next one
       $gx = $s4.L + [int](200 * $odpr); $gy = $s4.T + [int](10 * $odpr)
       Drag-Mouse $gx $gy ($m.WL + [int](($m.WR - $m.WL) / 2)) ($m.WT + [int](100 * $dpr))
@@ -1268,7 +1304,7 @@ function Suite-Restore {
   $r2 = Run-Scenario (@('--term', '--sessionload') + $args2) 90000
   $u = Get-Ui $r2 'sl-restored'
   Check 'restore' 'the next start brings the shells back: four tabs, the profile names of the saved shells' ($u -and @($u.labels).Count -eq 4 -and (@($u.labels | Where-Object { $_ -match 'work' }).Count -eq 1) -and (@($u.labels | Where-Object { $_ -match 'cmd' }).Count -eq 1)) $(if ($u) { ($u.labels -join ' | ') } else { 'no dump' })
-  Check 'restore' 'and the 2 x 2 layout, with every pane filled and the same pane focused' ($u -and $u.layout.shown -ceq 'grid' -and (@($u.layout.cells) -join ',') -ceq '1,2,3,4' -and $u.layout.focus -eq 1) $(if ($u) { $u.layout.shown + ' / ' + (@($u.layout.cells) -join ',') + ' / focus ' + $u.layout.focus } else { 'no dump' })
+  Check 'restore' 'and the 2 x 2 layout, with every pane filled and the same pane focused' ($u -and $u.layout.shown -ceq 'grid' -and (@($u.layout.cells) -join ',') -ceq '3,1,2,4' -and $u.layout.focus -eq 1) $(if ($u) { $u.layout.shown + ' / ' + (@($u.layout.cells) -join ',') + ' / focus ' + $u.layout.focus } else { 'no dump' })
   Check 'restore' 'the log says the session was restored' (@($r2 | Where-Object { $_ -match 'session restored: 4 shell' }).Count -eq 1)
   # run 3: without the setting nothing is restored and the file is left alone
   $stamp = (Get-Item -LiteralPath $file).LastWriteTimeUtc

@@ -17,7 +17,7 @@ click-through by default, an explicit keyboard-focus toggle, and an adjustable o
 - **Several shells in one window** (up to 9): visible tabs, a compact overlay-only list, switch hotkeys that work while the game has the keyboard, tab names taken from each program's own window title (like a normal terminal tab), a label when a tab runs Claude Code, Codex or a similar tool, a mark on tabs with unseen output, and profiles (start folder, start command, accent colour).
 - **Split panes**: show two shells side by side or stacked, or four in a 2 x 2 grid, in the same window; a hotkey moves the keyboard between panes and another zooms one pane to the whole window. A window too small for the layout shows fewer panes. Equal halves by default; uneven splits, draggable dividers and a separate list of shells per pane are options.
 - **Text size**: each terminal keeps its own text size (bigger / smaller / reset hotkeys act on the focused one), plus a global percent scale, a scale for HUDshell's own text (tabs, pane names, overlays), line height and letter spacing; all optional settings, all off at their defaults.
-- **Moving**: drag the slim strip along the top edge (resize from any edge or corner); the window snaps magnetically to screen edges and corners, **drag it to the top edge of a screen to maximize it**, drag the strip of a maximized window to restore it, or double-click the strip to maximize / restore.
+- **Moving**: drag the slim strip along the top edge (resize from any edge or corner); the window snaps magnetically to screen edges, **dropping it near a corner pulls it flush into the corner (corners square, no gap)**, **drag it to the top edge of a screen to maximize it** (over the taskbar by default; `maximize_area`), drag the strip of a maximized window to restore it, or double-click the strip to maximize / restore.
 - **Corners and sizes**: a hotkey docks the window in the next screen corner, another cycles size presets, and dragging near a screen edge snaps to it.
 - **Opacity that follows you**: a separate opacity while you are typing, and an optional dim after the shell has been quiet for a while.
 - **Start options**: start hidden or ghosted; a second launch brings the running window forward; "Start with Windows" in the tray menu.
@@ -104,7 +104,8 @@ values are range-checked, and an unreadable file is kept as `config.json.bad-N` 
 | `copy_on_select` | `false` | copy the selection when the mouse button is released |
 | `right_click` | `"off"` | `"paste"`: right-click copies a selection, or pastes when nothing is selected |
 | `osc52` | `"off"` | `"write"`: let programs set the clipboard (OSC 52). Reads are never answered |
-| `snap_distance` / `snap_margin` | `16` / `8` | pixels (96-dpi): dragging this close to a screen edge snaps to it (0 = off); gap kept from the edge |
+| `snap_distance` / `snap_margin` | `16` / `8` | pixels (96-dpi): dragging this close to a screen edge snaps to it (0 = off); gap kept from the edge. Within 3 x `snap_distance` + `snap_margin` of a corner the window goes flush into the corner instead (no gap) |
+| `maximize_area` | `monitor` | what maximizing fills: `monitor` = the whole screen, over the taskbar; `work` = the usable area, taskbar left visible |
 | `sizes` | `[[640,360],[900,520],[1280,720]]` | size presets (96-dpi pixels) for the size hotkey |
 | `active_opacity` | `null` | opacity while HUDshell holds the keyboard (`null` = same as `opacity`) |
 | `idle_dim_seconds` / `idle_opacity` | `0` / `50` | dim to `idle_opacity` after this many seconds without shell output (0 = off); output brightens it at once |

@@ -100,6 +100,31 @@ pub fn snap_rect(win: Rect, work: Rect, distance: i32, margin: i32) -> Rect {
     Rect::new(x, y, x + w, y + h)
 }
 
+/// Corner snap: when the window is within `zone` pixels of a corner of the work area on BOTH axes, it goes flush into that corner
+/// (no margin). `None` when it is not near a corner, or `zone` is 0.
+pub fn corner_snap(win: Rect, work: Rect, zone: i32) -> Option<Rect> {
+    if zone <= 0 {
+        return None;
+    }
+    let (w, h) = (win.w(), win.h());
+    let left = win.l - work.l <= zone;
+    let right = work.r - win.r <= zone;
+    let top = win.t - work.t <= zone;
+    let bottom = work.b - win.b <= zone;
+    if !(left || right) || !(top || bottom) {
+        return None;
+    }
+    let x = if left { work.l } else { work.r - w };
+    let y = if top { work.t } else { work.b - h };
+    Some(Rect::new(x, y, x + w, y + h))
+}
+
+/// The window touches a corner of the work area (within 1 px on both axes), or fills it: the corner of the window is then a corner of the
+/// screen's usable area and should be square, not rounded.
+pub fn touches_corner(win: Rect, work: Rect) -> bool {
+    (win.l <= work.l + 1 || win.r >= work.r - 1) && (win.t <= work.t + 1 || win.b >= work.b - 1)
+}
+
 /// Snapping while a window is being dragged. Windows proposes every new rectangle relative to the one that was
 /// *last applied*, not to where the drag began. If the snapped rectangle were fed back as the new position, a window
 /// sitting on an edge could never be pulled away (each step is smaller than the snap distance and lands inside it
@@ -118,7 +143,8 @@ impl SnapDrag {
     pub fn step(&mut self, proposed: Rect, work: Rect, distance: i32, margin: i32) -> Rect {
         let (dx, dy) = (proposed.l - self.last.l, proposed.t - self.last.t);
         self.virt = Rect::new(self.virt.l + dx, self.virt.t + dy, self.virt.r + dx, self.virt.b + dy);
-        let out = snap_rect(self.virt, work, distance, margin);
+        // a corner zone three times the snap distance (plus the margin) pulls the window flush into the corner
+        let out = corner_snap(self.virt, work, distance * 3 + margin).unwrap_or_else(|| snap_rect(self.virt, work, distance, margin));
         self.last = out;
         out
     }
@@ -163,8 +189,22 @@ mod tests {
             let proposed = Rect::new(applied.l + dx, applied.t + dy, applied.r + dx, applied.b + dy);
             applied = d.step(proposed, WORK, 16, 8);
         }
-        assert_eq!((applied.r, applied.b), (1920 - 8, 1040 - 8), "flush on both axes with the margin: {applied:?}");
+        assert_eq!((applied.r, applied.b), (1920, 1040), "flush into the corner, no margin: {applied:?}");
         assert_eq!((applied.w(), applied.h()), (640, 360), "the size never changes");
+        assert!(touches_corner(applied, WORK));
+    }
+
+    #[test]
+    fn corner_zone_pulls_flush_and_squares_the_corner() {
+        let w = Rect::new(30, 40, 670, 400);
+        assert_eq!(corner_snap(w, WORK, 56), Some(Rect::new(0, 0, 640, 360)));
+        assert_eq!(corner_snap(Rect::new(1250, 700, 1890, 1060), WORK, 56), Some(Rect::new(1280, 680, 1920, 1040)));
+        assert_eq!(corner_snap(Rect::new(30, 300, 670, 660), WORK, 56), None, "near only one edge");
+        assert_eq!(corner_snap(w, WORK, 0), None, "zone 0 turns it off");
+        assert!(touches_corner(Rect::new(0, 0, 640, 360), WORK));
+        assert!(touches_corner(WORK, WORK), "a maximized window touches every corner");
+        assert!(!touches_corner(Rect::new(8, 8, 648, 368), WORK), "a window inset by the margin keeps rounded corners");
+        assert!(!touches_corner(Rect::new(0, 300, 640, 660), WORK), "on one edge only");
     }
 
     #[test]

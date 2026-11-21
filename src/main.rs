@@ -822,6 +822,31 @@ fn lock_or_recover<T>(m: &'static Mutex<T>) -> std::sync::MutexGuard<'static, T>
     m.lock().unwrap_or_else(|p| p.into_inner())
 }
 
+/// Whether the window currently has square corners (Windows 11 rounds them by default).
+static CORNERS_SQUARE: AtomicBool = AtomicBool::new(false);
+
+/// Square corners while the window sits in a corner of the work area or fills it (maximized); rounded otherwise.
+/// Windows rounds all four corners or none, so "touches a corner" decides for the whole window.
+unsafe fn update_corner_style(hwnd: HWND) {
+    use windows::Win32::Graphics::Dwm::{DwmSetWindowAttribute, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_DONOTROUND, DWMWCP_ROUND};
+    if hwnd.0.is_null() {
+        return;
+    }
+    let mut wr = RECT::default();
+    if unsafe { GetWindowRect(hwnd, &mut wr) }.is_err() {
+        return;
+    }
+    let square = place::touches_corner(to_rect(&wr), unsafe { work_area(hwnd) });
+    if CORNERS_SQUARE.swap(square, Ordering::SeqCst) == square {
+        return;
+    }
+    let pref: i32 = if square { DWMWCP_DONOTROUND.0 } else { DWMWCP_ROUND.0 };
+    let _ = unsafe {
+        DwmSetWindowAttribute(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, &pref as *const i32 as *const std::ffi::c_void, std::mem::size_of::<i32>() as u32)
+    };
+    log(&format!("window corners: {}", if square { "square" } else { "rounded" }));
+}
+
 /// Magnetic edge snapping while the window is dragged (WM_MOVING). Returns true when the rectangle changed.
 unsafe fn snap_moving(hwnd: HWND, r: &mut RECT) -> bool {
     DRAG_MOVED.store(true, Ordering::SeqCst);
@@ -880,8 +905,18 @@ unsafe fn maximize_window(hwnd: HWND, work: RECT, before: Option<RECT>) {
         RESTORE_DPI.store(unsafe { GetDpiForWindow(hwnd) }.max(96), Ordering::SeqCst);
     }
     MAXIMIZED.store(true, Ordering::SeqCst);
+    // over the whole monitor the window must also stay above the taskbar (which is itself topmost)
+    let over_taskbar = cfg().maximize_area != "work";
     let _ = unsafe {
-        SetWindowPos(hwnd, None, work.left, work.top, work.right - work.left, work.bottom - work.top, SWP_NOZORDER | SWP_NOACTIVATE)
+        SetWindowPos(
+            hwnd,
+            if over_taskbar { Some(HWND_TOPMOST) } else { None },
+            work.left,
+            work.top,
+            work.right - work.left,
+            work.bottom - work.top,
+            if over_taskbar { SWP_NOACTIVATE } else { SWP_NOZORDER | SWP_NOACTIVATE },
+        )
     };
     log(&format!("maximized to the work area {},{},{},{}", work.left, work.top, work.right, work.bottom));
 }
@@ -1287,8 +1322,12 @@ pub fn toggle_maximize(hwnd_i: isize) {
         if MAXIMIZED.load(Ordering::SeqCst) {
             restore_window(hwnd, None);
         } else {
-            let work = work_area(hwnd);
-            maximize_window(hwnd, RECT { left: work.l, top: work.t, right: work.r, bottom: work.b }, None);
+            use windows::Win32::Graphics::Gdi::{GetMonitorInfoW, MonitorFromWindow, MONITORINFO, MONITOR_DEFAULTTONEAREST};
+            let mon = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+            let mut mi = MONITORINFO { cbSize: std::mem::size_of::<MONITORINFO>() as u32, ..Default::default() };
+            if GetMonitorInfoW(mon, &mut mi).as_bool() {
+                maximize_window(hwnd, if cfg().maximize_area == "work" { mi.rcWork } else { mi.rcMonitor }, None);
+            }
         }
     }
 }
@@ -1309,7 +1348,7 @@ unsafe fn after_move_drag(hwnd: HWND) {
     let slack = unsafe { scaled(hwnd, 2) };
     if pt.y <= mi.rcMonitor.top + slack && !MAXIMIZED.load(Ordering::SeqCst) {
         let before = *lock_or_recover(&DRAG_START);
-        unsafe { maximize_window(hwnd, mi.rcWork, before) };
+        unsafe { maximize_window(hwnd, if cfg().maximize_area == "work" { mi.rcWork } else { mi.rcMonitor }, before) };
     }
 }
 
@@ -2192,6 +2231,11 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             }
             WM_SIZE => {
                 wv::resize(hwnd);
+                update_corner_style(hwnd);
+                DefWindowProcW(hwnd, msg, wparam, lparam)
+            }
+            WM_MOVE => {
+                update_corner_style(hwnd);
                 DefWindowProcW(hwnd, msg, wparam, lparam)
             }
             pty::WM_APP_PTY => {

@@ -174,6 +174,9 @@ pub struct Config {
     pub snap_distance: u32,
     /// Gap (96-dpi pixels) kept between a snapped or docked window and the screen edge.
     pub snap_margin: u32,
+    /// What maximizing (drag to the top edge, double-click the top strip) fills: `monitor` = the whole monitor, over the taskbar;
+    /// `work` = the usable area, leaving the taskbar visible.
+    pub maximize_area: String,
     /// Size presets [width, height] in 96-dpi pixels for the size hotkey.
     pub sizes: Vec<[u32; 2]>,
     /// Opacity used while HUDshell holds the keyboard. `null` = same as `opacity`.
@@ -246,6 +249,7 @@ impl Default for Config {
             attention_toast: true,
             snap_distance: 16,
             snap_margin: 8,
+            maximize_area: "monitor".into(),
             sizes: vec![[640, 360], [900, 520], [1280, 720]],
             active_opacity: None,
             idle_dim_seconds: 0,
@@ -349,6 +353,10 @@ fn validate(cfg: &mut Config) {
     }
     if !matches!(cfg.restore_session.as_str(), "off" | "shells") {
         cfg.restore_session = "off".into();
+    }
+    cfg.maximize_area = cfg.maximize_area.trim().to_lowercase();
+    if !matches!(cfg.maximize_area.as_str(), "monitor" | "work") {
+        cfg.maximize_area = "monitor".into();
     }
     if !matches!(cfg.pane_shells.as_str(), "shared" | "own") {
         cfg.pane_shells = "shared".into();
@@ -802,6 +810,7 @@ mod tests {
         assert_eq!((d.layout.as_str(), d.layout_fill.as_str(), d.remember_layout, d.split, d.pane_dividers, d.pane_min),
             ("single", "new", false, [50, 50], false, [30, 6]), "defaults are the recommended behaviour");
         assert_eq!(d.pane_shells, "shared");
+        assert_eq!(d.maximize_area, "monitor");
         assert_eq!(d.restore_session, "off", "restoring is opt-in");
         let mut r = Config { restore_session: "x".into(), ..Config::default() };
         validate(&mut r);
@@ -817,9 +826,14 @@ mod tests {
         validate(&mut c);
         assert_eq!((c.layout.as_str(), c.layout_fill.as_str(), c.split, c.pane_min), ("grid", "new", [20, 80], [10, 100]));
         assert_eq!(c.pane_shells, "shared", "an unknown value falls back");
+        c.maximize_area = " WORK ".into();
         c.pane_shells = "own".into();
         validate(&mut c);
         assert_eq!(c.pane_shells, "own");
+        assert_eq!(c.maximize_area, "work", "trimmed and lower-cased");
+        c.maximize_area = "bogus".into();
+        validate(&mut c);
+        assert_eq!(c.maximize_area, "monitor", "an unknown value falls back");
         c.layout = "2x2".into();
         c.layout_fill = "empty".into();
         validate(&mut c);

@@ -44,8 +44,13 @@ Key decisions and why:
 - **Snapping and maximizing.** Windows proposes each rectangle of a drag relative to the one that was *last applied*, so snapping must not
   feed its own result back (a window held by the snap distance could never be pulled away slowly: found by a real-mouse test on 2026-11-20).
   `place::SnapDrag` keeps the position the window would have without snapping and snaps that, so the magnet holds and then releases.
-  Releasing a move with the cursor on the top edge of a monitor (or double-clicking the strip) makes the window fill that monitor's work
-  area; it is done by resizing the window (never with Windows' own maximize, which would activate it and take the keyboard), and the
+  Near a corner (both axes within 3 x the snap distance plus the margin) the window goes flush into the corner with no gap
+  (`place::corner_snap`); along a single edge it keeps the margin. Windows 11 rounds a window's corners all-or-none, so
+  `update_corner_style` (on `WM_MOVE` / `WM_SIZE`) switches `DWMWA_WINDOW_CORNER_PREFERENCE` to `DONOTROUND` while the window touches a
+  corner of the work area or is maximized, and back to `ROUND` otherwise.
+  Releasing a move with the cursor on the top edge of a monitor (or double-clicking the strip) makes the window fill that monitor
+  (`maximize_area = monitor`, over the taskbar: the window is also raised within the topmost band so the taskbar does not cover it) or its work
+  area (`work`); it is done by resizing the window (never with Windows' own maximize, which would activate it and take the keyboard), and the
   rectangle it had is kept. A maximized window leaves that state on the first actual movement of a drag from its strip (not on a plain
   click), keeping its proportional place under the cursor, at its earlier size in the scaling of the monitor it is on. The corner and size
   hotkeys restore it first; the saved window position is the restored rectangle.
