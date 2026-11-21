@@ -211,7 +211,10 @@ function Suite-Static {
   Write-Host "=== static ==="
   $o = & cargo test 2>&1 | ForEach-Object { $_.ToString() }
   $line = ($o | Select-String 'test result:' | Select-Object -First 1)
-  Check 'static' 'cargo unit tests' ($line -and $line.ToString() -match 'ok\. \d+ passed; 0 failed') ($line.ToString().Trim())
+  # name the failing tests in the result (the summary line alone does not say which one failed)
+  $failedTests = @($o | Where-Object { $_ -match '^test .* \.\.\. FAILED' } | ForEach-Object { ($_ -replace '^test ', '') -replace ' \.\.\. FAILED.*', '' })
+  $why = if ($failedTests.Count -gt 0) { ' | failed: ' + ($failedTests -join ', ') } else { '' }
+  Check 'static' 'cargo unit tests' ($line -and $line.ToString() -match 'ok\. \d+ passed; 0 failed') (($line.ToString().Trim()) + $why)
   Stop-HUDshell
   $b = [IO.File]::ReadAllBytes($rel)
   $ascii = [Text.Encoding]::ASCII.GetString($b); $uni = [Text.Encoding]::Unicode.GetString($b)

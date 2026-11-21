@@ -117,7 +117,8 @@ mod tests {
         l.set_preset(Preset::Columns, &[1, 2, 5], 2);
         let s = Session::capture(&entries(), 2, &l);
         assert_eq!(s.shells, vec!["pwsh", "work", "cmd"]);
-        assert_eq!((s.layout.as_str(), s.active, s.slots.clone()), ("side-by-side", 1, vec![1, 2]), "ids become tab-order indexes");
+        // the focused shell (tab 2) is placed first, then the shell that was showing (tab 1): ids become tab-order indexes
+        assert_eq!((s.layout.as_str(), s.active, s.slots.clone()), ("side-by-side", 1, vec![1, 0]));
         let text = serde_json::to_string_pretty(&s).unwrap();
         assert_eq!(Session::parse(&text), Some(s));
     }
