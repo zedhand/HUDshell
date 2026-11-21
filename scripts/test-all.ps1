@@ -1835,7 +1835,7 @@ function Suite-KbdAny {
   $loaded = New-Object System.Collections.Generic.List[IntPtr]
   $before = @([GT]::InstalledLayouts())
   foreach ($klid in '00000419', '0000041D', '00000411', '00000804', '00000412') { $h0 = [GT]::LoadLayout($klid); if ($h0 -ne [IntPtr]::Zero -and ($before -notcontains ($h0.ToInt64() -band 0xFFFFFFFF))) { $loaded.Add($h0) } }
-  if ($script:ImeHkl) { $h0 = [GT]::LoadLayout($script:ImeHkl); if ($h0 -ne [IntPtr]::Zero -and ($before -notcontains ($h0.ToInt64() -band 0xFFFFFFFF))) { $loaded.Add($h0) } }
+  foreach ($ime in @($script:ImeHkl)) { if ($ime) { $h0 = [GT]::LoadLayout($ime); if ($h0 -ne [IntPtr]::Zero -and ($before -notcontains ($h0.ToInt64() -band 0xFFFFFFFF))) { $loaded.Add($h0) } } }
   $installed = @([GT]::InstalledLayouts())
   # a layout handle is (layout / device id) << 16 | language id: US keyboards (0x0409 in the high half, whatever the language) and the German and French
   # layouts (tested in `kbd`) are left out
@@ -1883,24 +1883,31 @@ function Suite-KbdAny {
       $screen = Screen
       Check 'kbdany' "$tag`: $($keys.Count) real key presses give the characters Windows says this layout has on them ($exp)" ($screen.Contains($mark + $exp)) ("wanted $mark$exp")
       # an input method: Japanese (0411), Chinese (0804, 0404): a phrase in romaji, converted and committed
-      $phrase = switch ($lang) { 0x0411 { 'nihongo' } 0x0804 { 'nihao' } 0x0404 { 'nihao' } default { '' } }
+      # input methods: a phrase in romaji (or, for Korean, the keys of one syllable block pair), converted and committed. Some IMEs start in direct input: if the
+      # first try gives plain letters, the IME's own mode key is pressed once and it is tried again.
+      $phrase = switch ($lang) { 0x0411 { 'nihongo' } 0x0804 { 'nihao' } 0x0404 { 'nihao' } 0x0412 { 'gksrmf' } default { '' } }
+      $toggleVk = switch ($lang) { 0x0411 { 0x16 } 0x0412 { 0x15 } default { 0x10 } }   # VK_IME_ON / VK_HANGUL / a tap of Shift (Pinyin)
       if ($phrase) {
-        [GT]::RequestLayout([IntPtr][int64]$startLayout); Start-Sleep -Milliseconds 1200
-        foreach ($ch in ("echo IME$idx-").ToCharArray()) { [void][GT]::TypeChar($ch, $us); Start-Sleep -Milliseconds 40 }
-        [GT]::RequestLayout($hkl); Start-Sleep -Milliseconds 1800
-        if ($lang -eq 0x0411) { [GT]::Key(0x16); Start-Sleep -Milliseconds 500 }   # VK_IME_ON: the Japanese IME starts in direct input
-        foreach ($ch in $phrase.ToCharArray()) { [GT]::Key([byte][char]::ToUpper($ch)); Start-Sleep -Milliseconds 120 }
-        Start-Sleep -Milliseconds 500
-        [GT]::Key(0x20); Start-Sleep -Milliseconds 700    # convert
-        [GT]::Key(0x0D); Start-Sleep -Milliseconds 700    # commit
-        [GT]::RequestLayout([IntPtr][int64]$startLayout); Start-Sleep -Milliseconds 1200
-        [GT]::Key(0x0D); Start-Sleep -Milliseconds 2500
-        $screen = Screen
-        $line = @($screen -split "`n" | Where-Object { $_ -match ("IME$idx-") }) | Select-Object -Last 1
-        $cjk = $line -match '[\u3040-\u30ff\u3400-\u9fff\uac00-\ud7af]'
-        if ($cjk) { Check 'kbdany' "$tag`: an IME phrase typed in romaji ($phrase) arrives as real Japanese / Chinese characters in the terminal" $true $line }
-        elseif ($line -match ("IME$idx-" + $phrase)) { Warn 'kbdany' "$tag`: the IME stayed in direct input mode (the romaji arrived as plain letters): composition not tested" $line }
-        else { Check 'kbdany' "$tag`: an IME phrase typed in romaji ($phrase) arrives as real Japanese / Chinese characters in the terminal" $false $line }
+        $result = ''; $line = ''
+        foreach ($attempt in 1, 2) {
+          [GT]::RequestLayout([IntPtr][int64]$startLayout); Start-Sleep -Milliseconds 1200
+          foreach ($ch in ("echo IME$idx$attempt-").ToCharArray()) { [void][GT]::TypeChar($ch, $us); Start-Sleep -Milliseconds 40 }
+          [GT]::RequestLayout($hkl); Start-Sleep -Milliseconds 1800
+          if ($lang -eq 0x0411 -or $attempt -eq 2) { [GT]::Key([byte]$toggleVk); Start-Sleep -Milliseconds 500 }
+          foreach ($ch in $phrase.ToCharArray()) { [GT]::Key([byte][char]::ToUpper($ch)); Start-Sleep -Milliseconds 120 }
+          Start-Sleep -Milliseconds 500
+          if ($lang -ne 0x0412) { [GT]::Key(0x20); Start-Sleep -Milliseconds 700 }    # convert
+          [GT]::Key(0x0D); Start-Sleep -Milliseconds 700    # commit
+          [GT]::RequestLayout([IntPtr][int64]$startLayout); Start-Sleep -Milliseconds 1200
+          [GT]::Key(0x0D); Start-Sleep -Milliseconds 2500
+          $screen = Screen
+          $line = @($screen -split "`n" | Where-Object { $_ -match ("IME$idx$attempt-") }) | Select-Object -Last 1
+          if ($line -match '[\u3040-\u30ff\u3400-\u9fff\uac00-\ud7af]') { $result = 'cjk'; break }
+          elseif ($line -match ("IME$idx$attempt-" + $phrase)) { $result = 'plain' } else { $result = 'other'; break }
+        }
+        if ($result -eq 'cjk') { Check 'kbdany' "$tag`: an IME phrase typed in romaji ($phrase) arrives as real Japanese / Chinese / Korean characters in the terminal" $true $line }
+        elseif ($result -eq 'plain') { Warn 'kbdany' "$tag`: the IME stayed in direct input mode (the letters arrived as plain letters, also after its mode key): composition not tested" $line }
+        else { Check 'kbdany' "$tag`: an IME phrase typed in romaji ($phrase) arrives as real Japanese / Chinese / Korean characters in the terminal" $false $line }
       }
       Grab
     }
@@ -1992,6 +1999,28 @@ function Set-DisplayScale([int]$x, [int]$y, [int]$percent) {
   return (Wait-Until { $m = @(Get-Monitors) | Where-Object { $_.L -eq $x -and $_.T -eq $y } | Select-Object -First 1; $m -and $m.Dpi -eq $want } 25)
 }
 
+# The same for any screen (by the top-left of its physical rectangle).
+function Auto-ScaleAt([int]$x, [int]$y, [int]$percent, [string]$what, [scriptblock]$tests) {
+  $orig = Get-DisplayScales | Where-Object { $_.X -eq $x -and $_.Y -eq $y } | Select-Object -First 1
+  if (-not $orig) { Warn 'scaling' "the scaling of $what could not be read: $percent% skipped"; return }
+  if ($orig.Percent -eq $percent) { Warn 'scaling' "$what is at $percent% already: skipped"; return }
+  if ($orig.Max -lt $percent) { Warn 'scaling' "$percent% is not offered for $what (up to $($orig.Max)%): skipped"; return }
+  Write-Host ""
+  Write-Host "----- $what at $percent% (set by the script; it is $($orig.Percent)% now and will be put back) -----"
+  try {
+    if (-not (Set-DisplayScale $x $y $percent)) { Warn 'scaling' "$what did not switch to $percent%: its tests were skipped"; return }
+    Write-Host "reached: $percent% (letting Windows settle for 8 s)"
+    Start-Sleep 8
+    $script:CheckTag = " [$what $percent%]"
+    try { & $tests } catch { Write-Host "a test in this state stopped with an error: $_" } finally { $script:CheckTag = '' }
+  } finally {
+    [void](Set-DisplayScale $x $y $orig.Percent)
+    Start-Sleep 5
+    $now = Get-DisplayScales | Where-Object { $_.X -eq $x -and $_.Y -eq $y } | Select-Object -First 1
+    Check 'scaling' "$what is back at $($orig.Percent)% after the $percent% tests" ($now -and $now.Percent -eq $orig.Percent) $(if ($now) { "now $($now.Percent)%" } else { 'unknown' })
+  }
+}
+
 # One scaling state of the main screen, set by the script: its tests run, and the original scaling is put back and checked.
 function Auto-Scale([int]$percent, [scriptblock]$tests) {
   $primary = @(Get-Monitors) | Where-Object { $_.Primary } | Select-Object -First 1
@@ -2057,32 +2086,38 @@ function Auto-Taskbar([string]$tag, [int]$edge, [scriptblock]$tests) {
 }
 
 # ---- the Japanese input method, installed for the test and removed again (two elevated prompts the person accepts) --------------------------------------
-function Install-ImeForTest {
+function Install-ImeForTest([string[]]$langs = @('ja-JP')) {
+  $script:ImeLangs = $langs
   $script:ImeOrigObj = Get-WinUserLanguageList
   $script:ImeOrigList = @($script:ImeOrigObj | ForEach-Object { $_.LanguageTag })
-  Write-Host "language list now: $($script:ImeOrigList -join ', ')"
+  Write-Host "language list now: $($script:ImeOrigList -join ', '); installing: $($langs -join ', ')"
   $ps1 = Join-Path $scratch 'ime-install.ps1'
-  Set-Content -LiteralPath $ps1 -Value 'try { Install-Language -Language ja-JP -ErrorAction Stop | Out-String | Set-Content (Join-Path $env:TEMP "hudshell-ime-install.txt"); "done" | Add-Content (Join-Path $env:TEMP "hudshell-ime-install.txt") } catch { "error: $_" | Set-Content (Join-Path $env:TEMP "hudshell-ime-install.txt") }'
-  Remove-Item (Join-Path $env:TEMP 'hudshell-ime-install.txt') -ErrorAction SilentlyContinue
-  Say 'A Windows prompt will ask to allow a PowerShell window (it installs the Japanese language feature for the IME test). Accept it (Yes).'
+  $txt = Join-Path $env:TEMP 'hudshell-ime-install.txt'
+  Set-Content -LiteralPath $ps1 -Value ('try { foreach ($l in "' + ($langs -join '","') + '") { Install-Language -Language $l -ErrorAction Stop | Out-Null }; "done" | Set-Content "' + $txt + '" } catch { "error: $_" | Set-Content "' + $txt + '" }')
+  Remove-Item $txt -ErrorAction SilentlyContinue
+  Say ('A Windows prompt will ask to allow a PowerShell window (it installs the language feature(s) for the IME test: ' + ($langs -join ', ') + '). Accept it (Yes).')
   try { Start-Process powershell -Verb RunAs -WindowStyle Hidden -Wait -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "`"$ps1`"") } catch { Warn 'ime' 'the install prompt was declined: no IME test'; return $false }
-  $res = if (Test-Path (Join-Path $env:TEMP 'hudshell-ime-install.txt')) { Get-Content (Join-Path $env:TEMP 'hudshell-ime-install.txt') -Raw } else { '' }
-  if ($res -notmatch 'done') { Warn 'ime' ("installing the Japanese language feature did not work: " + ($res -replace '\s+', ' ')); return $false }
-  # add Japanese to the language list (it is put back exactly afterwards)
-  $l = Get-WinUserLanguageList; $l.Add('ja-JP'); Set-WinUserLanguageList $l -Force
+  $res = if (Test-Path $txt) { Get-Content $txt -Raw } else { '' }
+  if ($res -notmatch 'done') { Warn 'ime' ("installing the language feature did not work: " + ($res -replace '\s+', ' ')); return $false }
+  # add the languages to the language list (it is put back exactly afterwards)
+  $l = Get-WinUserLanguageList; foreach ($t in $langs) { $l.Add($t) }; Set-WinUserLanguageList $l -Force
   Start-Sleep 5
   return $true
 }
 
 function Remove-ImeAfterTest {
   if ($script:ImeOrigObj) { Set-WinUserLanguageList $script:ImeOrigObj -Force }
+  $langs = if ($script:ImeLangs) { $script:ImeLangs } else { @('ja-JP') }
   $ps1 = Join-Path $scratch 'ime-uninstall.ps1'
-  Set-Content -LiteralPath $ps1 -Value 'try { Uninstall-Language -Language ja-JP -ErrorAction Stop | Out-Null; "done" | Set-Content (Join-Path $env:TEMP "hudshell-ime-uninstall.txt") } catch { "error: $_" | Set-Content (Join-Path $env:TEMP "hudshell-ime-uninstall.txt") }'
-  Remove-Item (Join-Path $env:TEMP 'hudshell-ime-uninstall.txt') -ErrorAction SilentlyContinue
-  Say 'A Windows prompt will ask once more to remove the Japanese language feature again. Accept it (Yes).'
-  try { Start-Process powershell -Verb RunAs -WindowStyle Hidden -Wait -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "`"$ps1`"") } catch { Warn 'ime' 'the removal prompt was declined: the Japanese language feature is still installed (remove it in Settings > Time & language)' }
+  $txt = Join-Path $env:TEMP 'hudshell-ime-uninstall.txt'
+  Set-Content -LiteralPath $ps1 -Value ('try { foreach ($l in "' + ($langs -join '","') + '") { Uninstall-Language -Language $l -ErrorAction Stop | Out-Null }; "done" | Set-Content "' + $txt + '" } catch { "error: $_" | Set-Content "' + $txt + '" }')
+  Remove-Item $txt -ErrorAction SilentlyContinue
+  Say 'A Windows prompt will ask once more to remove the language feature(s) again. Accept it (Yes).'
+  try { Start-Process powershell -Verb RunAs -WindowStyle Hidden -Wait -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "`"$ps1`"") } catch { Warn 'ime' 'the removal prompt was declined: the language feature(s) are still installed (remove them in Settings > Time & language)' }
+  $removed = (Test-Path $txt) -and ((Get-Content $txt -Raw) -match 'done')
   $now = @((Get-WinUserLanguageList) | ForEach-Object { $_.LanguageTag })
   Check 'ime' 'your language list is back to what it was before the test' (($now -join ',') -eq ($script:ImeOrigList -join ',')) ("was " + ($script:ImeOrigList -join ',') + ", now " + ($now -join ','))
+  Check 'ime' 'the language feature(s) added for the test were removed again' $removed $(if ($removed) { '' } else { ((Get-Content $txt -ErrorAction SilentlyContinue) -join ' ') })
 }
 
 # ---- a real game (MANUAL) -----------------------------------------------------------------------------------------------------------------------
@@ -2233,6 +2268,29 @@ function Run-State([string[]]$names) {
   foreach ($n in $names) {
     if ($only.Count -gt 0 -and $only -notcontains $n.ToLower()) { continue }
     try { & ('Suite-' + $n) } catch { Write-Host "suite $n stopped with an error: $_" }
+  }
+}
+
+# What is left after `everything`: the taskbar on the right edge, another screen at other scalings, the Chinese and Korean input methods. (The game and sleep
+# parts are separate: `-Suite gamesession` with HUDSHELL_GAME_NOFT=1 and `-Suite sleepresume`.)
+function Suite-Remaining {
+  Write-Host "=== remaining: taskbar on the right, the left screen at other scalings, Chinese and Korean input methods ==="
+  $skip = @(($env:HUDSHELL_HW_SKIP -split ',') | ForEach-Object { $_.Trim().ToLower() } | Where-Object { $_ })
+  if ($skip -notcontains 'taskbar') { Auto-Taskbar 'on the right' 2 { Run-State 'MaxWork', 'Place', 'Snap' } }
+  if ($skip -notcontains 'scaling') {
+    $others = @(Get-DisplayScales | Where-Object { -not ($_.X -eq 0 -and $_.Y -eq 0) -and $_.Max -gt 100 } | Sort-Object -Property Percent -Descending)
+    foreach ($o in $others) {
+      foreach ($pct in 100, 125, 175) { Auto-ScaleAt $o.X $o.Y $pct ("the screen at $($o.X),$($o.Y)") { Run-State 'Dpi', 'Place' } }
+    }
+  }
+  if ($skip -notcontains 'ime') {
+    Write-Host ""
+    Write-Host "----- Chinese and Korean input methods (installed for the test, then removed) -----"
+    $installed = $false
+    try {
+      $installed = Install-ImeForTest @('zh-CN', 'ko-KR')
+      if ($installed) { $script:ImeHkl = @('E00E0804', 'E0120412'); Suite-KbdAny }
+    } finally { $script:ImeHkl = $null; if ($installed) { Remove-ImeAfterTest } }
   }
 }
 
@@ -2726,6 +2784,7 @@ foreach ($s in $want) {
     'kbdany' { Suite-KbdAny }
     'gamesession' { Suite-GameSession }
     'everything' { Suite-Everything }
+    'remaining' { Suite-Remaining }
     'scaleprobe' {
       Write-Host '=== scaleprobe: the display scaling Windows reports (read only), and a write of the same value back (no change) ==='
       $d = @(Get-DisplayScales)

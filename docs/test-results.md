@@ -11,6 +11,15 @@ suite had been run on it. CI (the `static` suite on GitHub's `windows-latest`) f
 wrong pane order. After the fix (00765f1) CI passed: **66 unit tests pass** and the release exe is 1.19 MB. That was **all** that had run for
 these features at the time; the desktop suites were run afterwards (see the latest full run below).
 
+## What was left over (2026-11-21, `-Suite remaining`): taskbar on the right, another screen at other scalings
+
+Run by the script, nothing set by hand. **Taskbar on the right edge** (registry, restored byte for byte): `maxwork` 3, `place` 28 and the full real-mouse `snap` on all three monitors (64) passed;
+this is also the first complete multi-monitor `snap` run after the corner-snap fix. **The left screen (150%) set to 125% and to 175%**: `dpi` 9 and `place` 28 each passed (the window keeps its logical size between a
+100% and a 125% / 175% screen, the page follows, the web view covers the window, docking uses the scaled margin); at 100% `place` passed and `dpi` correctly reported that there was no second scaling to compare.
+The screen's original 150% was put back and checked each time. The third (480 px high) screen offers no scaling above 100%.
+**Not run:** the Chinese and Korean input methods (the elevated prompt for the language install was declined or not answered, so nothing was installed or changed), the WoW click-through re-check
+(the game was not in front), and real sleep (the streaming program still blocks it).
+
 ## The rest of the manual tests (2026-11-21): layouts, IME, scalings, taskbar edges, a real game, sleep, real prompts
 
 **Final full run after all of it (`scripts/test-all.ps1`, no sandbox): 539 pass, 0 fail, 3 warnings** (the two intentional `autotest` skips and the AltGr+Q limit; 80 unit tests; clippy clean; the taskbar was

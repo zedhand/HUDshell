@@ -7,7 +7,7 @@ Everything here is either untested or not implemented. Verified behaviour is in 
 | Item | What it takes |
 |---|---|
 | Pane frames and names drawn over the edge cells of a pane; the small-window fallback on a monitor that is not at 100% | by hand |
-| Scalings other than 100%, 125%, 150%, 175%, 200% and 225% (tested: 100% and 150% monitors side by side, and the main screen at 125%, 175%, 200% and 225%, which is all Windows offers for it); the third (100%, 480 px high) monitor at another scaling | a display that offers more scalings |
+| Scalings other than 100%, 125%, 150%, 175%, 200% and 225% (tested: the main screen at 125%, 175%, 200% and 225%, and the left screen at 100%, 125%, 150% and 175%, all that Windows offers for them); the third (100%, 480 px high) screen offers nothing else | a display that offers more scalings |
 | The size saved in `config.json` is in physical pixels: if the display scaling is changed between runs, the window comes back the same number of pixels, so a different logical size | change the scaling and restart |
 | Other games (one borderless game was tried 2026-11-21: see test-results); exclusive-fullscreen games (overlays cannot draw over them); anti-cheat titles beyond that one | try each under normal use; stop at any warning |
 | Frame-time / FPS impact next to a running game (measured once with PresentMon in one scene that was capped at 30 fps, which hides small costs: no difference was visible) | a scene that is not frame-capped, and a heavier game |
@@ -22,7 +22,7 @@ Everything here is either untested or not implemented. Verified behaviour is in 
 | Long, busy sessions at low opacity over a game (readability) | judgement over real use |
 | Whether Claude Code or Codex ring the terminal bell (the census does not count BEL; they sent no OSC 9 / OSC 777 in the real run) | count BEL in the census, or configure the CLIs' own notification setting (not done: it would edit their configuration) |
 | The permission prompt about pasting clipboard text seen once during a policy run | its source was not identified; no WebView2 permission request was logged and a search found no documented Windows prompt of that kind. If it recurs, note the exact wording and the step |
-| Corner docking, size presets, snapping and tiling with the taskbar on the left or top edge (tested 2026-11-21 by setting the registry value and restarting Explorer; the original setting was restored) and visible at the bottom: all pass after one corner-snap fix; a taskbar on the right edge is untested; the secondary monitors' taskbars were not moved | the right edge |
+| Corner docking, size presets, snapping and tiling with the taskbar on the left, top, right or bottom edge (tested 2026-11-21 by setting the registry value and restarting Explorer; the original setting was restored each time); the secondary monitors' taskbars were not moved | the secondary monitors' taskbars |
 | Tab strip while click-through is on (clicks pass through by design) | by hand |
 | A profile's start command timing (typed 0.9 s after the shell starts; a slow profile script could miss it) | try a heavy profile |
 | Clicking an OSC 8 link, the ghost tray menu item, the tray notification for attention requests, keyboard scrollback inside the CLIs | by hand |
