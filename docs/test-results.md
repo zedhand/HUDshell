@@ -21,6 +21,11 @@ known AltGr+Q limit reported by `kbd`, and three "no monitor with a different sc
 **The machine now reports no monitor at a different scaling** (the earlier 150% monitor was not found), so this run did not test mixed scaling at
 all and `place` / `input` ran on one scaling only; the mixed-scaling results in the section below are from the previous run and have not been repeated.
 
+**Mixed scaling re-run the same day** (second display set back to 150%; `place`, `dpi`, `input`, `snap` only, not a full run): **110 pass, 0 fail,
+0 warnings** (dpi 8, input 26, place 24, snap 52). The window keeps its logical size between the 100% and 150% monitors (700x420 becomes
+1050x630), and the real-mouse corner drags, maximize, restore and double-click checks pass on all three monitors, including the 150% one.
+Screenshots of the corners and the maximized window on the 150% monitor show right-angle corners and a window filling the monitor (kept local).
+
 **The features pushed untested in 7411ade, now run:** live settings reload (`reload` 9/9: text and UI scale, tabs mode, opacity, line height and
 letter spacing take effect, an invalid file keeps the settings in use, a start-only setting reports a restart notice), session restore (`restore`
 7/7: four shells from three profiles and the 2 x 2 layout with the same panes and focus come back; off by default and leaves the file alone; a
