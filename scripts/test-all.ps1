@@ -33,7 +33,7 @@ New-Item -ItemType Directory -Force $scratch | Out-Null
 $env:HUDSHELL_TEST_DIR = $scratch
 if ($Sandbox) { $env:HUDSHELL_SANDBOX = $Sandbox } else { $env:HUDSHELL_SANDBOX = $scratch }
 $Suite = @($Suite | ForEach-Object { $_ -split ',' } | Where-Object { $_ })
-$want = if ($Suite -contains 'all') { @('static', 'keys', 'width', 'hideshow', 'clickfocus', 'clipboard', 'autotest', 'ui', 'scrollback', 'ghost', 'attention', 'policy', 'place', 'dpi', 'text', 'reload', 'restore', 'recover', 'windows', 'winrestore', 'winmove', 'costwin', 'tileoff', 'tabsedit', 'tabsui', 'gamepos', 'altmove', 'qol', 'sessions', 'shells', 'layout', 'input', 'snap', 'windowsnap', 'kbd', 'cost', 'release', 'config', 'soak') + $(if ($Sandbox) { 'real' } else { @() }) } else { $Suite }
+$want = if ($Suite -contains 'all') { @('static', 'keys', 'width', 'hideshow', 'clickfocus', 'clipboard', 'autotest', 'ui', 'scrollback', 'ghost', 'attention', 'policy', 'place', 'dpi', 'text', 'reload', 'restore', 'recover', 'windows', 'winrestore', 'winmove', 'costwin', 'tileoff', 'tabsedit', 'tabsui', 'gamepos', 'altmove', 'wvbounds', 'qol', 'sessions', 'shells', 'layout', 'input', 'snap', 'windowsnap', 'kbd', 'cost', 'release', 'config', 'soak') + $(if ($Sandbox) { 'real' } else { @() }) } else { $Suite }
 
 $script:R = New-Object System.Collections.Generic.List[object]
 # Appended to every check name while a suite runs a second time on another monitor.
@@ -744,13 +744,21 @@ function Place-Once([string[]]$extra) {
   $run = Run-Scenario (@('--term', '--placetest', '--delay', '2') + $extra) 60000
   $s = Get-States $run
   function Rc($k) { $v = (($s[$k].rect) -split ','); $w = (($s[$k].work) -split ','); @{ l = [int]$v[0]; t = [int]$v[1]; r = [int]$v[2]; b = [int]$v[3]; wl = [int]$w[0]; wt = [int]$w[1]; wr = [int]$w[2]; wb = [int]$w[3]; dpi = [int]$s[$k].dpi } }
-  foreach ($k in 'c1', 'c2', 'c3', 'c4', 'back', 'size1', 'size2', 'size3') { if (-not $s.ContainsKey($k)) { Check 'place' "state $k logged" $false; return } }
+  foreach ($k in 'start', 'c1', 'c2', 'c3', 'c4', 'back', 'size1', 'size2', 'size3') { if (-not $s.ContainsKey($k)) { Check 'place' "state $k logged" $false; return } }
   $m = [int][math]::Round(8 * (Rc 'c1').dpi / 96.0)
-  $a = Rc 'c1'; Check 'place' 'first press docks into the top-left corner with the margin' (($a.l - $a.wl) -eq $m -and ($a.t - $a.wt) -eq $m) "margin $m"
-  $a = Rc 'c2'; Check 'place' 'next: top-right' (($a.wr - $a.r) -eq $m -and ($a.t - $a.wt) -eq $m)
-  $a = Rc 'c3'; Check 'place' 'next: bottom-right' (($a.wr - $a.r) -eq $m -and ($a.wb - $a.b) -eq $m)
-  $a = Rc 'c4'; Check 'place' 'next: bottom-left' (($a.l - $a.wl) -eq $m -and ($a.wb - $a.b) -eq $m)
-  $a = Rc 'back'; Check 'place' 'previous goes counter-clockwise (bottom-right)' (($a.wr - $a.r) -eq $m -and ($a.wb - $a.b) -eq $m)
+  # The first press docks into the corner nearest to the window's centre, and each next press goes one corner on (clockwise): with a window that
+  # fills most of the screen (a large scaling) that is not the top-left one.
+  $st0 = Rc 'start'
+  $cx = ($st0.l + $st0.r) / 2; $cy = ($st0.t + $st0.b) / 2
+  $right = $cx -gt (($st0.wl + $st0.wr) / 2); $bottom = $cy -gt (($st0.wt + $st0.wb) / 2)
+  $first = if (-not $right -and -not $bottom) { 0 } elseif ($right -and -not $bottom) { 1 } elseif ($right -and $bottom) { 2 } else { 3 }
+  $names = 'top-left', 'top-right', 'bottom-right', 'bottom-left'
+  $inCorner = { param($a, $i) $okx = if ($i -eq 0 -or $i -eq 3) { ($a.l - $a.wl) -eq $m } else { ($a.wr - $a.r) -eq $m }; $oky = if ($i -le 1) { ($a.t - $a.wt) -eq $m } else { ($a.wb - $a.b) -eq $m }; $okx -and $oky }
+  $a = Rc 'c1'; Check 'place' ("first press docks into the nearest corner (" + $names[$first] + ") with the margin") (& $inCorner $a $first) "margin $m"
+  $a = Rc 'c2'; Check 'place' ("next: " + $names[($first + 1) % 4]) (& $inCorner $a (($first + 1) % 4))
+  $a = Rc 'c3'; Check 'place' ("next: " + $names[($first + 2) % 4]) (& $inCorner $a (($first + 2) % 4))
+  $a = Rc 'c4'; Check 'place' ("next: " + $names[($first + 3) % 4]) (& $inCorner $a (($first + 3) % 4))
+  $a = Rc 'back'; Check 'place' ("previous goes counter-clockwise (" + $names[($first + 2) % 4] + ")") (& $inCorner $a (($first + 2) % 4))
   $c1 = Rc 'c1'; $c3 = Rc 'c3'
   Check 'place' 'docking keeps the window size' ((($c1.r - $c1.l) -eq ($c3.r - $c3.l)) -and (($c1.b - $c1.t) -eq ($c3.b - $c3.t)))
   $d = [double](Rc 'size1').dpi / 96
@@ -1574,6 +1582,9 @@ function Suite-Dpi {
   foreach ($k in 'a', 'b', 'c', 'd') { if (-not $s.ContainsKey($k)) { Check 'dpi' "state $k logged" $false; return } }
   function Rc2($k) { $v = (($s[$k].rect) -split ','); $w = (($s[$k].work) -split ','); @{ l = [int]$v[0]; t = [int]$v[1]; r = [int]$v[2]; b = [int]$v[3]; wl = [int]$w[0]; wt = [int]$w[1]; wr = [int]$w[2]; wb = [int]$w[3]; dpi = [int]$s[$k].dpi } }
   $a = Rc2 'a'; $b = Rc2 'b'; $c = Rc2 'c'; $d = Rc2 'd'
+  # The web view must cover the whole window after every scaling change (a web view smaller than its window shows black strips along two edges).
+  $mism = @('a', 'b', 'c', 'd') | Where-Object { $s[$_].wv -ne $s[$_].client }
+  Check 'dpi' 'the web view covers the whole client area of the window in every state (no black strips)' (@($mism).Count -eq 0) ((@('a', 'b', 'c', 'd') | ForEach-Object { "$_ wv=" + $s[$_].wv + " client=" + $s[$_].client }) -join '; ')
   $ua = Get-Ui $run 'a'; $ub = Get-Ui $run 'b'; $ud = Get-Ui $run 'd'
   Check 'dpi' "starts on the $pp% monitor: the window and the page both use $pp%" ($a.dpi -eq $prim.Dpi -and $ua -and [Math]::Abs($ua.rects.dpr - $prim.Dpi / 96.0) -lt 0.01) ("window dpi " + $a.dpi + ", page ratio " + $ua.rects.dpr)
   Check 'dpi' "moved to the $ap% monitor: the window and the page both switch to $ap%" ($b.dpi -eq $alt.Dpi -and $ub -and [Math]::Abs($ub.rects.dpr - $alt.Dpi / 96.0) -lt 0.01) ("window dpi " + $b.dpi + ", page ratio " + $ub.rects.dpr)
@@ -1762,6 +1773,19 @@ function Suite-CostWindows {
       Check 'costwin' 'four idle windows stay under 10% of one core' ($b.CpuPct -lt 10) "$($b.CpuPct)%"
     }
   } finally { Stop-HUDshell }
+}
+
+# The web view must cover its whole window after every kind of resize (black strips along two edges were seen once). No OS input.
+function Suite-WvBounds {
+  Write-Host "=== wvbounds: the web view covers the whole window after resizes, docking, layouts and detaching (no OS input) ==="
+  $r = Run-Scenario @('--term', '--wvtest', '--delay', '2') 90000
+  $s = Get-States $r
+  $labels = 's0', 's1', 's2', 's3', 's4', 's5', 's6', 's7', 's8', 'w1', 'w2', 'w3', 'w4', 'w5'
+  $bad = @($labels | Where-Object { -not $s.ContainsKey($_) -or $s[$_].wv -ne $s[$_].client })
+  Check 'wvbounds' 'after every step (14 states, two windows) the web view is exactly as big as the client area of the window' ($bad.Count -eq 0) $(if ($bad.Count) { ($bad | ForEach-Object { "$_ wv=" + $s[$_].wv + " client=" + $s[$_].client }) -join '; ' } else { 'all 14 equal' })
+  $fixed = @($r | Where-Object { $_ -match 'webview: its bounds .* were not the window' })
+  Check 'wvbounds' 'the self-check never had to correct the web view in this run' ($fixed.Count -eq 0) $(if ($fixed.Count) { $fixed[0] -replace '^\d+ ', '' } else { '' })
+  Check 'wvbounds' 'no start failures logged and the run finished' ((@($r | Where-Object { $_ -match 'FAILED to start' }).Count -eq 0) -and (@($r | Where-Object { $_ -match 'AUTOTEST: finished' }).Count -eq 1))
 }
 
 # A shell in the alternate screen (what full-screen programs use) moves into a window of its own (no OS input).
@@ -2211,6 +2235,7 @@ foreach ($s in $want) {
     'tabsedit' { Suite-TabsEdit }
     'gamepos' { Suite-GamePos }
     'altmove' { Suite-AltMove }
+    'wvbounds' { Suite-WvBounds }
     'monitorunplug' { Suite-MonitorUnplug }
     'maxwork' { Suite-MaxWork }
     'sleepresume' { Suite-SleepResume }

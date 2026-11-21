@@ -1063,6 +1063,41 @@ fn build_dpitest() -> &'static [(u64, &'static str)] {
     })
 }
 
+/// `--wvtest`: windows are resized, docked, tiled-sized, split and detached in many ways; after every step the web view's bounds are logged next to the
+/// window's client area, and the runner compares them (Suite-WvBounds).
+const WVTEST: &[(u64, &str)] = &[
+    (1500, "cdp-focus"),
+    (2000, "resize:900,520"),
+    (2500, "state:s0"),
+    (3000, "size"),
+    (3500, "state:s1"),
+    (4000, "size"),
+    (4500, "state:s2"),
+    (5000, "size"),
+    (5500, "state:s3"),
+    (6000, "corner:next"),
+    (6500, "state:s4"),
+    (7000, "resize:640,360"),
+    (7500, "state:s5"),
+    (8000, "shell:new"),
+    (11000, "layout:next"),
+    (12000, "state:s6"),
+    (12500, "layout:next"),
+    (13500, "state:s7"),
+    (14000, "layout:next"),
+    (15000, "state:s8"),
+    (15500, "window:detach:2"),
+    (22000, "state:w1"),
+    (22500, "inwin:2:state:w2"),
+    (23000, "inwin:2:size"),
+    (23500, "inwin:2:state:w3"),
+    (24000, "inwin:2:corner:next"),
+    (24500, "inwin:2:state:w4"),
+    (25000, "inwin:2:resize:800,480"),
+    (25500, "inwin:2:state:w5"),
+    (26000, "quit"),
+];
+
 /// `--sleeptest`: two windows, a shell in each that prints a heartbeat; every second the state of the windows is logged. The runner puts the computer
 /// to sleep and checks everything after it wakes (Suite-SleepResume, manual).
 fn build_sleeptest() -> &'static [(u64, &'static str)] {
@@ -1288,6 +1323,7 @@ fn build_inputtest() -> &'static [(u64, &'static str)] {
 
 fn scen() -> &'static [(u64, &'static str)] {
     match SCEN_SEL.load(Ordering::SeqCst) {
+        49 => WVTEST,
         48 => build_sleeptest(),
         47 => ALT_MOVE,
         46 => build_monitortest(),
@@ -1559,13 +1595,19 @@ unsafe fn run_action(hwnd: HWND, act: &str) {
         let _ = unsafe { GetWindowRect(hwnd, &mut wr) };
         let wk = unsafe { work_area(hwnd) };
         log(&format!(
-            "STATE label={label} rect={},{},{},{} work={},{},{},{} font={} dpi={} alpha={a} pct={pct} click_through={} ghost={} focus={} visible={} cfg_opacity={}",
+            "STATE label={label} rect={},{},{},{} work={},{},{},{} font={} dpi={} alpha={a} pct={pct} click_through={} ghost={} focus={} visible={} cfg_opacity={} wv={} client={}",
             wr.left, wr.top, wr.right, wr.bottom, wk.l, wk.t, wk.r, wk.b, font_size_of(shells_lock().active()), unsafe { GetDpiForWindow(hwnd) },
             CLICK_THROUGH.load(Ordering::SeqCst),
             GHOST_ON.load(Ordering::SeqCst),
             TERMINAL_FOCUS.load(Ordering::SeqCst),
             VISIBLE.load(Ordering::SeqCst),
-            cfg().opacity
+            cfg().opacity,
+            wv::bounds().map(|b| format!("{}x{}", b.right - b.left, b.bottom - b.top)).unwrap_or_else(|| "none".into()),
+            {
+                let mut c = RECT::default();
+                let _ = unsafe { GetClientRect(hwnd, &mut c) };
+                format!("{}x{}", c.right - c.left, c.bottom - c.top)
+            }
         ));
     } else if let Some(id) = act.strip_prefix("window:detach:") {
         detach_shell(id.parse().unwrap_or(0));
@@ -1934,7 +1976,7 @@ const SCENARIO_FLAGS: &[&str] = &[
     "--autotest", "--keys", "--widthtest", "--probe", "--probe2", "--probe3", "--probe4", "--real",
     "--clickfocus", "--hideshow", "--clipboard", "--soak", "--scrolltest", "--ghosttest", "--attention",
     "--policytest", "--placetest", "--idletest", "--starttest", "--autostarttest", "--sessiontest", "--shellstest",
-    "--tabmodes", "--shellsfull", "--layouttest", "--layoutempty", "--layoutstart", "--layoutown", "--labeltest", "--inputtest", "--dpitest", "--texttest", "--reloadtest", "--sessionsave", "--sessionload", "--startfailtest", "--recovertest", "--windowstest", "--windowsnap", "--windowssave", "--windowsload", "--windowsmove", "--costwindows", "--tabsedit", "--tabsload", "--gamepos", "--monitortest", "--altmove", "--sleeptest",
+    "--tabmodes", "--shellsfull", "--layouttest", "--layoutempty", "--layoutstart", "--layoutown", "--labeltest", "--inputtest", "--dpitest", "--texttest", "--reloadtest", "--sessionsave", "--sessionload", "--startfailtest", "--recovertest", "--windowstest", "--windowsnap", "--windowssave", "--windowsload", "--windowsmove", "--costwindows", "--tabsedit", "--tabsload", "--gamepos", "--monitortest", "--altmove", "--sleeptest", "--wvtest",
 ];
 
 pub(crate) fn is_test_mode() -> bool {
@@ -2007,7 +2049,7 @@ pub(crate) unsafe fn arm(hwnd: HWND) {
     if SCENARIO_FLAGS.iter().any(|f| any_scen(f)) {
         let args: Vec<String> = std::env::args().collect();
         SCEN_SEL.store(
-            if any_scen("--sleeptest") { 48 } else if any_scen("--altmove") { 47 } else if any_scen("--monitortest") { 46 } else if any_scen("--gamepos") { 45 } else if any_scen("--tabsload") { 44 } else if any_scen("--tabsedit") { 43 } else if any_scen("--costwindows") { 42 } else if any_scen("--windowsmove") { 41 } else if any_scen("--windowsload") { 40 } else if any_scen("--windowssave") { 39 } else if any_scen("--windowsnap") { 38 } else if any_scen("--windowstest") { 37 } else if any_scen("--recovertest") { 36 } else if any_scen("--startfailtest") { 35 } else if any_scen("--sessionload") { 34 } else if any_scen("--sessionsave") { 33 } else if any_scen("--reloadtest") { 32 } else if any_scen("--texttest") { 31 } else if any_scen("--dpitest") { 30 } else if any_scen("--inputtest") { 29 } else if any_scen("--labeltest") { 28 } else if any_scen("--layoutown") { 27 } else if any_scen("--layoutstart") { 26 } else if any_scen("--layoutempty") { 25 } else if any_scen("--layouttest") { 24 } else if any_scen("--shellsfull") { 23 } else if any_scen("--tabmodes") { 22 } else if any_scen("--shellstest") { 21 } else if any_scen("--sessiontest") { 20 } else if any_scen("--autostarttest") { 19 } else if any_scen("--starttest") { 18 } else if any_scen("--idletest") { 17 } else if any_scen("--placetest") { 16 } else if any_scen("--policytest") { 15 } else if any_scen("--attention") { 14 } else if any_scen("--ghosttest") { 13 } else if any_scen("--scrolltest") { 12 } else if any_scen("--soak") { 11 } else if any_scen("--clipboard") { 10 } else if any_scen("--hideshow") { 9 } else if any_scen("--clickfocus") { 8 } else if any_scen("--real") { 7 } else if any_scen("--probe4") { 6 } else if any_scen("--probe3") { 5 } else if any_scen("--probe2") { 4 } else if any_scen("--probe") { 3 } else if any_scen("--widthtest") { 2 } else if any_scen("--keys") { 1 } else { 0 },
+            if any_scen("--wvtest") { 49 } else if any_scen("--sleeptest") { 48 } else if any_scen("--altmove") { 47 } else if any_scen("--monitortest") { 46 } else if any_scen("--gamepos") { 45 } else if any_scen("--tabsload") { 44 } else if any_scen("--tabsedit") { 43 } else if any_scen("--costwindows") { 42 } else if any_scen("--windowsmove") { 41 } else if any_scen("--windowsload") { 40 } else if any_scen("--windowssave") { 39 } else if any_scen("--windowsnap") { 38 } else if any_scen("--windowstest") { 37 } else if any_scen("--recovertest") { 36 } else if any_scen("--startfailtest") { 35 } else if any_scen("--sessionload") { 34 } else if any_scen("--sessionsave") { 33 } else if any_scen("--reloadtest") { 32 } else if any_scen("--texttest") { 31 } else if any_scen("--dpitest") { 30 } else if any_scen("--inputtest") { 29 } else if any_scen("--labeltest") { 28 } else if any_scen("--layoutown") { 27 } else if any_scen("--layoutstart") { 26 } else if any_scen("--layoutempty") { 25 } else if any_scen("--layouttest") { 24 } else if any_scen("--shellsfull") { 23 } else if any_scen("--tabmodes") { 22 } else if any_scen("--shellstest") { 21 } else if any_scen("--sessiontest") { 20 } else if any_scen("--autostarttest") { 19 } else if any_scen("--starttest") { 18 } else if any_scen("--idletest") { 17 } else if any_scen("--placetest") { 16 } else if any_scen("--policytest") { 15 } else if any_scen("--attention") { 14 } else if any_scen("--ghosttest") { 13 } else if any_scen("--scrolltest") { 12 } else if any_scen("--soak") { 11 } else if any_scen("--clipboard") { 10 } else if any_scen("--hideshow") { 9 } else if any_scen("--clickfocus") { 8 } else if any_scen("--real") { 7 } else if any_scen("--probe4") { 6 } else if any_scen("--probe3") { 5 } else if any_scen("--probe2") { 4 } else if any_scen("--probe") { 3 } else if any_scen("--widthtest") { 2 } else if any_scen("--keys") { 1 } else { 0 },
             Ordering::SeqCst,
         );
         let delay = args

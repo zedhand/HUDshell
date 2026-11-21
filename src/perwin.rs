@@ -31,6 +31,15 @@ pub fn register(hwnd: isize) -> u32 {
     serial
 }
 
+/// Register the window if it is not registered yet, and return its serial number. The window procedure calls this on the very first message a window
+/// gets (`WM_NCCREATE`), so every message after that, including the ones sent while `CreateWindowEx` is still running, belongs to the right window.
+pub fn register_once(hwnd: isize) -> u32 {
+    if let Some(s) = serial_of(hwnd) {
+        return s;
+    }
+    register(hwnd)
+}
+
 /// Remove a window from the table (its per-window values are dropped with it by `forget_all`).
 pub fn unregister(hwnd: isize) -> Option<u32> {
     let mut w = windows_lock();

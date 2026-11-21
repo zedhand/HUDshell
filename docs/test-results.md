@@ -11,6 +11,33 @@ suite had been run on it. CI (the `static` suite on GitHub's `windows-latest`) f
 wrong pane order. After the fix (00765f1) CI passed: **66 unit tests pass** and the release exe is 1.19 MB. That was **all** that had run for
 these features at the time; the desktop suites were run afterwards (see the latest full run below).
 
+## Hardware session (2026-11-21): taskbar, scaling, real unplug; three defects found and fixed
+
+One manual sitting (`scripts	est-all.ps1 -Suite hardware`, the person changing the taskbar and scaling in Windows' settings and unplugging a cable; the
+taskbar-edge and sleep parts were skipped: this Windows cannot move the taskbar, and the script was not allowed to put the computer to sleep).
+**55 pass, 7 fail**, all 7 in one state, explained below.
+
+- **Taskbar visible at the bottom: 14 pass** (`maxwork` 3, `place` 11). With `maximize_area = work`, dragging to the top edge fills the work area and stops at the
+  taskbar, and both half tiles are halves of the work area. Corner docking and size presets respect the work area.
+- **Main screen at 125%: 19 pass** (`dpi`, `place`).
+- **Main screen at 200%: 12 pass, 7 fail** (`place`; `dpi` passed). Six of the failures were a **test fault**: the test assumed the first corner press goes to the top-left,
+  but with a window that fills most of a 200% screen the nearest corner is another one (now the test works out the nearest corner). One was a **real defect**:
+  the largest size preset (1440 px at 200%) is cut to a work area that is 1344 px high when the taskbar is visible, and the size hotkey no longer recognised the
+  window as being at that preset, so it never cycled on. Fixed (`place::fit_sizes`: presets are cut to the work area first and duplicates dropped), covered
+  by a unit test. **Not re-run on a 200% screen**; `place` passes at 100% (40 pass with `qol`).
+- **A real unplug of the 150% monitor: 10 pass** (`monitorunplug`). The windows that had been on it moved onto the primary at their logical size (700x420) and
+  staggered (the fix from the first unplug), the window on the primary stayed, HUDshell kept running, and all windows were on screen after the cable went back.
+
+**Black strips along two edges of a window (reported by the owner from a screenshot, 2026-11-21).** After a window was created (a detach, or a restore
+opening several windows), the window that was already open could have its web view shrunk by 14 pixels in both directions, leaving black strips along its
+right and bottom edges until the next resize. Reproduced by a new self-check that compares the web view's bounds with the window: "bounds 626x346 were not the
+window's 640x360" in window 1 right after window 2 was created. **Cause (introduced with several windows):** while `CreateWindowEx` runs, Windows sends the new
+window its first resize and frame messages, but the window was only added to the per-window table after the call returned, so those messages were handled as the
+window that happened to be current: the new window's momentary client size (626x346) was applied to the other window's web view. **Fix:** a window is registered
+at its first message (`WM_NCCREATE`). Two safety nets were added: the web view's bounds are compared with the window every 2 seconds and corrected (and logged) if
+they differ, and `wvbounds` (resizes, docking, layouts, detach in two windows) checks 14 states and that the self-check never had to correct anything: 3 pass.
+The earlier scaling-change theory did not reproduce (`dpi` now also checks the web view covers the window in every state: pass).
+
 ## Scrollback on moves, tab names and order, window places per program (2026-11-21): full run 528 pass, 0 fail, 3 warnings
 
 Full run (`scripts/test-all.ps1`, no sandbox) on the build with these three features: **528 pass, 0 fail, 3 warnings** (the two intentional `autotest`

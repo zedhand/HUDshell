@@ -685,6 +685,39 @@ fn session_of(v: &serde_json::Value) -> pty::SessionId {
     v["s"].as_u64().unwrap_or(1) as pty::SessionId
 }
 
+/// The bounds the current window's web view has now (client coordinates), for the tests that compare them with the window's client area.
+#[cfg(feature = "harness")]
+pub fn bounds() -> Option<RECT> {
+    let ctrl = controller()?;
+    let mut rc = RECT::default();
+    unsafe { ctrl.Bounds(&mut rc) }.ok()?;
+    Some(rc)
+}
+
+/// Safety net: if the web view's bounds are not the window's client area (a web view smaller than its window shows black strips along two edges),
+/// put them right. Returns true when something had to be corrected. Cheap: one `Bounds` call.
+pub unsafe fn ensure_bounds(hwnd: HWND) -> bool {
+    let Some(ctrl) = controller() else { return false };
+    let mut want = RECT::default();
+    if unsafe { GetClientRect(hwnd, &mut want) }.is_err() || want.right <= want.left || want.bottom <= want.top {
+        return false;
+    }
+    let mut have = RECT::default();
+    if unsafe { ctrl.Bounds(&mut have) }.is_ok() && have.left == want.left && have.top == want.top && have.right == want.right && have.bottom == want.bottom {
+        return false;
+    }
+    let _ = unsafe { ctrl.SetBounds(want) };
+    log(&format!(
+        "webview: its bounds {}x{} were not the window's {}x{}: corrected (window {})",
+        have.right - have.left,
+        have.bottom - have.top,
+        want.right - want.left,
+        want.bottom - want.top,
+        crate::perwin::current()
+    ));
+    true
+}
+
 pub unsafe fn resize(hwnd: HWND) {
     if let Some(ctrl) = controller() {
         let mut rc = RECT::default();

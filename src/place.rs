@@ -59,6 +59,19 @@ pub fn step_corner(from: usize, step: i32) -> usize {
     ((from as i32 + step).rem_euclid(CORNERS as i32)) as usize
 }
 
+/// The size presets as they can really be shown: each cut to the work area, and a preset that ends up the same size as the one before it left out
+/// (so the size hotkey always has a next size to go to, and a window that fills the work area is recognised as the preset it was cut from).
+pub fn fit_sizes(sizes: &[(i32, i32)], work: Rect) -> Vec<(i32, i32)> {
+    let mut out: Vec<(i32, i32)> = Vec::new();
+    for &(w, h) in sizes {
+        let s = (w.min(work.w()), h.min(work.h()));
+        if out.last() != Some(&s) {
+            out.push(s);
+        }
+    }
+    out
+}
+
 /// Index of the preset closest in area to the current size, then the next one (wrapping).
 pub fn next_size(sizes: &[(i32, i32)], cur_w: i32, cur_h: i32) -> usize {
     if sizes.is_empty() {
@@ -403,6 +416,19 @@ mod tests {
             c = step_corner(c, 1);
         }
         assert_eq!(c, 0);
+    }
+
+    #[test]
+    fn presets_bigger_than_the_work_area_still_cycle() {
+        // 200%: the presets are 1280x720, 1800x1040 and 2560x1440 pixels, but a visible taskbar leaves a work area 1344 high
+        let work = Rect::new(0, 0, 2560, 1344);
+        let sizes = fit_sizes(&[(1280, 720), (1800, 1040), (2560, 1440)], work);
+        assert_eq!(sizes, vec![(1280, 720), (1800, 1040), (2560, 1344)]);
+        // the window that fills the work area is the last preset, and the next press wraps to the first
+        assert_eq!(next_size(&sizes, 2560, 1344), 0);
+        assert_eq!(next_size(&sizes, 1280, 720), 1);
+        // two presets that end up the same size are one
+        assert_eq!(fit_sizes(&[(1280, 720), (3000, 2000), (4000, 3000)], work), vec![(1280, 720), (2560, 1344)]);
     }
 
     #[test]

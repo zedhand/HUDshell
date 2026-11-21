@@ -853,11 +853,13 @@ unsafe fn cycle_size(hwnd: HWND) {
     }
     let win = to_rect(&r);
     let work = unsafe { work_area(hwnd) };
-    let sizes: Vec<(i32, i32)> =
-        cfg().sizes.iter().map(|s| unsafe { (scaled(hwnd, s[0]), scaled(hwnd, s[1])) }).collect();
+    // the presets as they fit the work area (a preset bigger than it is cut to it, so the window that fills it is that preset)
+    let sizes = place::fit_sizes(&cfg().sizes.iter().map(|s| unsafe { (scaled(hwnd, s[0]), scaled(hwnd, s[1])) }).collect::<Vec<_>>(), work);
+    if sizes.is_empty() {
+        return;
+    }
     let i = place::next_size(&sizes, win.w(), win.h());
     let (w, h) = sizes[i];
-    let (w, h) = (w.min(work.w()), h.min(work.h()));
     let corner = place::corner_of(win, work);
     let x = if corner == 1 || corner == 2 { win.r - w } else { win.l };
     let y = if corner == 2 || corner == 3 { win.b - h } else { win.t };
@@ -2615,7 +2617,7 @@ unsafe fn create_window(id: u32, profile: &str, at: Option<[i32; 4]>) -> Option<
         )
     }
     .ok()?;
-    let serial = perwin::register(hwnd.0 as isize);
+    let serial = perwin::register_once(hwnd.0 as isize);
     let _w = perwin::enter(serial);
     let c = cfg();
     unsafe {
@@ -2646,7 +2648,10 @@ unsafe fn create_window(id: u32, profile: &str, at: Option<[i32; 4]>) -> Option<
         }
     }
     match unsafe { wv::init(hwnd, id) } {
-        Ok(()) => log(&format!("window {serial} created (hwnd 0x{:X}) with shell {id}", hwnd.0 as usize)),
+        Ok(()) => {
+            let _ = unsafe { SetTimer(Some(hwnd), 9, 2000, None) };
+            log(&format!("window {serial} created (hwnd 0x{:X}) with shell {id}", hwnd.0 as usize))
+        }
         Err(e) => {
             log(&format!("window {serial}: WebView2 init FAILED: {e}"));
             let _ = unsafe { DestroyWindow(hwnd) };
@@ -2957,6 +2962,12 @@ unsafe fn window_gone(hwnd: HWND) -> bool {
 }
 
 unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+    // A window belongs to the table from its first message: the resize and frame messages Windows sends while CreateWindowEx is still running must
+    // not be handled as if they came for the window that happens to be the current one (that shrank the first window's web view by the new window's
+    // frame, leaving black strips along two of its edges).
+    if msg == WM_NCCREATE {
+        perwin::register_once(hwnd.0 as isize);
+    }
     let _window = perwin::enter_hwnd(hwnd.0 as isize);
     unsafe {
         match msg {
@@ -3173,6 +3184,9 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             WM_TIMER => {
                 if wparam.0 == 4 {
                     idle_tick(hwnd);
+                } else if wparam.0 == 9 {
+                    // every 2 s: the web view must cover the window (see wv::ensure_bounds)
+                    wv::ensure_bounds(hwnd);
                 } else if wparam.0 == 7 {
                     poll_game_places();
                 } else if wparam.0 == 8 {
@@ -3248,6 +3262,11 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                     add_tray(hwnd);
                 }
                 LRESULT(0)
+            }
+            WM_NCDESTROY => {
+                // a window that was registered at its first message but never finished being created (or is gone now) leaves the table
+                perwin::unregister(hwnd.0 as isize);
+                DefWindowProcW(hwnd, msg, wparam, lparam)
             }
             WM_DESTROY => {
                 if perwin::count() <= 1 && SESSION_LIVE.load(Ordering::SeqCst) {
@@ -3341,7 +3360,7 @@ fn main() -> windows::core::Result<()> {
             Some(hinstance),
             None,
         )?;
-        perwin::register(hwnd.0 as isize);
+        perwin::register_once(hwnd.0 as isize);
         SetLayeredWindowAttributes(hwnd, COLORREF(0), 255, LWA_ALPHA)?;
         apply_opacity(hwnd, loaded.opacity);
 
@@ -3444,6 +3463,7 @@ fn main() -> windows::core::Result<()> {
                 Ok(()) => {
                     log("WebView2 ready");
                     let _ = SetTimer(Some(hwnd), 3, 1500, None);
+                    let _ = SetTimer(Some(hwnd), 9, 2000, None);
                     if loaded.tab_program != "off" {
                         let _ = SetTimer(Some(hwnd), 5, 2000, None);
                     }
