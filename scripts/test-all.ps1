@@ -97,6 +97,20 @@ public static class GT {
   // WM_INPUTLANGCHANGEREQUEST (0x50) to the window that has the keyboard focus, as the language bar would send it.
   public static void RequestLayout(IntPtr hkl) { IntPtr f = FocusHwnd(); if (f != IntPtr.Zero) PostMessage(f, 0x50, IntPtr.Zero, hkl); }
   public static int ScanKey(char c, IntPtr hkl) { return VkKeyScanEx(c, hkl); }
+  [DllImport("user32.dll")] static extern int GetKeyboardLayoutList(int n, IntPtr[] list);
+  public static long[] InstalledLayouts() { int n = GetKeyboardLayoutList(0, null); var a = new IntPtr[n]; GetKeyboardLayoutList(n, a); var r = new long[n]; for (int i = 0; i < n; i++) r[i] = a[i].ToInt64() & 0xFFFFFFFFL; return r; }
+  [DllImport("user32.dll")] static extern int ToUnicodeEx(uint vk, uint sc, byte[] state, [MarshalAs(UnmanagedType.LPWStr)] StringBuilder buf, int len, uint flags, IntPtr hkl);
+  [DllImport("user32.dll")] static extern uint MapVirtualKeyEx(uint code, uint type, IntPtr hkl);
+  // The single character the key (virtual-key code, no modifiers) gives on the layout, or "" (dead key, no character, several characters).
+  public static string CharFor(uint vk, IntPtr hkl) { var st = new byte[256]; var sb = new StringBuilder(8); uint sc = MapVirtualKeyEx(vk, 0, hkl); int n = ToUnicodeEx(vk, sc, st, sb, 8, 4, hkl); return n == 1 ? sb.ToString(0, 1) : ""; }
+  [DllImport("user32.dll")] static extern IntPtr WindowFromPoint(POINT p);
+  [DllImport("user32.dll")] static extern IntPtr GetAncestor(IntPtr h, uint flags);
+  // The process id of the top-level window under a screen point (0 when there is none).
+  public static uint PidAt(int x, int y) { POINT p; p.X = x; p.Y = y; IntPtr h = WindowFromPoint(p); if (h == IntPtr.Zero) return 0; IntPtr top = GetAncestor(h, 2); if (top == IntPtr.Zero) top = h; uint pid; GetWindowThreadProcessId(top, out pid); return pid; }
+  // The process id and window of the foreground window.
+  public static uint ForegroundPid() { uint pid; GetWindowThreadProcessId(GetForegroundWindow(), out pid); return pid; }
+  public static IntPtr ForegroundWindow() { return GetForegroundWindow(); }
+  public static bool WindowRect(IntPtr h, out int l, out int t, out int r, out int b) { RECT rc; bool ok = GetWindowRect(h, out rc); l = rc.L; t = rc.T; r = rc.R; b = rc.B; return ok; }
   static void Down(byte vk, bool ext) { keybd_event(vk, 0, ext ? 1u : 0u, UIntPtr.Zero); }
   static void Up(byte vk, bool ext) { keybd_event(vk, 0, (ext ? 1u : 0u) | 2u, UIntPtr.Zero); }
   // Type one character with real key presses the way this layout needs it (Shift, or AltGr = Ctrl+right Alt). False if the layout has no key for it.
@@ -1799,6 +1813,265 @@ function Suite-AltMove {
   Check 'altmove' 'no start failures logged and the run finished' ((@($r | Where-Object { $_ -match 'FAILED to start' }).Count -eq 0) -and (@($r | Where-Object { $_ -match 'AUTOTEST: finished' }).Count -eq 1))
 }
 
+# ---- every other installed keyboard layout and IME (MANUAL: needs layouts the person added; not part of 'all') -------------------------------
+# For each installed layout other than US, German and French (those are in `kbd`): the keys of the layout are pressed for real and what the terminal
+# shows must be what Windows says the keys give on that layout (ToUnicodeEx). For input methods (Japanese, Chinese) a short phrase is typed in romaji
+# and committed: the terminal must show real Japanese / Chinese characters. The layout is switched in HUDshell's window only and put back.
+function Suite-KbdAny {
+  Write-Host "=== kbdany: other installed keyboard layouts and input methods, real key presses - do not touch mouse/keyboard ==="
+  $installed = @([GT]::InstalledLayouts())
+  # a layout handle is (layout / device id) << 16 | language id: US keyboards (0x0409 in the high half, whatever the language) and the German and French
+  # layouts (tested in `kbd`) are left out
+  $extra = @($installed | Where-Object { (($_ -band 0xFFFF) -notin 0x0407, 0x040C) -and ((($_ -shr 16) -band 0xFFFF) -ne 0x0409) })
+  Write-Host ("installed layouts: " + (($installed | ForEach-Object { '{0:X8}' -f $_ }) -join ', '))
+  if ($extra.Count -eq 0) { Warn 'kbdany' 'no keyboard layout besides US, German and French is installed: nothing to test'; return }
+  Stop-HUDshell
+  GTSave
+  $origLayout = [GT]::ForegroundLayout()
+  $p = $null
+  try {
+    $n = LineCount $log
+    $p = Start-Process $dbg -ArgumentList @('--term', '--inputtest', '--interactive', '--delay', '2') -PassThru
+    $h = [IntPtr]::Zero
+    for ($i = 0; $i -lt 40 -and $h -eq [IntPtr]::Zero; $i++) { Start-Sleep 1; if ($p.HasExited) { break }; $h = [GT]::Find([uint32]$p.Id) }
+    Start-Sleep 8
+    Check 'kbdany' 'window found' ($h -ne [IntPtr]::Zero)
+    if ($h -eq [IntPtr]::Zero) { return }
+    function Screen { Last-Screen @(Cut $log $n) }
+    function Grab { if (-not [GT]::IsFg($h)) { [GT]::Hotkey(0x47); Start-Sleep -Milliseconds 1500 } }
+    Grab
+    $startLayout = [GT]::FocusLayout()
+    $us = [GT]::LoadLayout('00000409')
+    $idx = 0
+    foreach ($l in $extra) {
+      $idx++
+      $lang = [int]($l -band 0xFFFF)
+      $hkl = [IntPtr][int64]$l
+      $tag = 'layout {0:X8}' -f $l
+      # the keys of this layout and what each gives (letters first; dead keys and keys without a single character are left out)
+      $keys = New-Object System.Collections.Generic.List[int]; $exp = ''
+      foreach ($vk in (0x41..0x5A)) { $c = [GT]::CharFor([uint32]$vk, $hkl); if ($c.Length -eq 1 -and -not [char]::IsControl($c[0]) -and $exp.IndexOf($c) -lt 0) { $keys.Add($vk); $exp += $c }; if ($keys.Count -ge 8) { break } }
+      if ($keys.Count -lt 4) { Warn 'kbdany' "$tag gives too few plain characters to compare: skipped"; continue }
+      $mark = "KA$idx-"
+      # the command word on the US layout, the layout's keys on the layout, Enter on the US layout again
+      [GT]::RequestLayout([IntPtr][int64]$startLayout); Start-Sleep -Milliseconds 1200
+      foreach ($ch in ("echo $mark").ToCharArray()) { [void][GT]::TypeChar($ch, $us); Start-Sleep -Milliseconds 40 }
+      [GT]::RequestLayout($hkl); Start-Sleep -Milliseconds 1500
+      $now = [GT]::FocusLayout()
+      $switched = (($now -band 0xFFFF) -eq $lang)
+      if (-not $switched) { Warn 'kbdany' "$tag could not be switched on in HUDshell without changing your settings: typing not tested"; [GT]::RequestLayout([IntPtr][int64]$startLayout); Start-Sleep -Milliseconds 1000; [GT]::Key(0x0D); continue }
+      foreach ($vk in $keys) { [GT]::Key([byte]$vk); Start-Sleep -Milliseconds 70 }
+      [GT]::RequestLayout([IntPtr][int64]$startLayout); Start-Sleep -Milliseconds 1200
+      [GT]::Key(0x0D); Start-Sleep -Milliseconds 2500
+      $screen = Screen
+      Check 'kbdany' "$tag`: $($keys.Count) real key presses give the characters Windows says this layout has on them ($exp)" ($screen.Contains($mark + $exp)) ("wanted $mark$exp")
+      # an input method: Japanese (0411), Chinese (0804, 0404): a phrase in romaji, converted and committed
+      $phrase = switch ($lang) { 0x0411 { 'nihongo' } 0x0804 { 'nihao' } 0x0404 { 'nihao' } default { '' } }
+      if ($phrase) {
+        [GT]::RequestLayout([IntPtr][int64]$startLayout); Start-Sleep -Milliseconds 1200
+        foreach ($ch in ("echo IME$idx-").ToCharArray()) { [void][GT]::TypeChar($ch, $us); Start-Sleep -Milliseconds 40 }
+        [GT]::RequestLayout($hkl); Start-Sleep -Milliseconds 1800
+        if ($lang -eq 0x0411) { [GT]::Key(0x16); Start-Sleep -Milliseconds 500 }   # VK_IME_ON: the Japanese IME starts in direct input
+        foreach ($ch in $phrase.ToCharArray()) { [GT]::Key([byte][char]::ToUpper($ch)); Start-Sleep -Milliseconds 120 }
+        Start-Sleep -Milliseconds 500
+        [GT]::Key(0x20); Start-Sleep -Milliseconds 700    # convert
+        [GT]::Key(0x0D); Start-Sleep -Milliseconds 700    # commit
+        [GT]::RequestLayout([IntPtr][int64]$startLayout); Start-Sleep -Milliseconds 1200
+        [GT]::Key(0x0D); Start-Sleep -Milliseconds 2500
+        $screen = Screen
+        $line = @($screen -split "`n" | Where-Object { $_ -match ("IME$idx-") }) | Select-Object -Last 1
+        $cjk = $line -match '[\u3040-\u30ff\u3400-\u9fff\uac00-\ud7af]'
+        if ($cjk) { Check 'kbdany' "$tag`: an IME phrase typed in romaji ($phrase) arrives as real Japanese / Chinese characters in the terminal" $true $line }
+        elseif ($line -match ("IME$idx-" + $phrase)) { Warn 'kbdany' "$tag`: the IME stayed in direct input mode (the romaji arrived as plain letters): composition not tested" $line }
+        else { Check 'kbdany' "$tag`: an IME phrase typed in romaji ($phrase) arrives as real Japanese / Chinese characters in the terminal" $false $line }
+      }
+      Grab
+    }
+    [GT]::RequestLayout([IntPtr][int64]$startLayout); Start-Sleep -Milliseconds 1200
+  } finally {
+    Stop-HUDshell
+    [GT]::RestoreCursor()
+    Start-Sleep -Milliseconds 800
+    for ($try = 0; $try -lt 3 -and [GT]::ForegroundLayout() -ne $origLayout; $try++) { [GT]::RestoreSystemLayout($origLayout); Start-Sleep -Milliseconds 1500 }
+    Check 'kbdany' 'your keyboard layout is back to what it was before the test' ([GT]::ForegroundLayout() -eq $origLayout) ('was {0:X8}, now {1:X8}' -f $origLayout, [GT]::ForegroundLayout())
+  }
+}
+
+# ---- a real game (MANUAL) -----------------------------------------------------------------------------------------------------------------------
+# HUDshell over a game that runs borderless (windowed fullscreen) on the main screen, with the game in front. The game is found by itself (the
+# foreground program that fills the main screen); its name is never written anywhere. The person keeps their hands off while it runs.
+
+# PresentMon (a free frame-time tool from Intel's GameTechDev, MIT) from its official GitHub release, kept in a git-ignored folder; the file's hash is
+# printed so it can be checked before it is run.
+function Get-PresentMon {
+  $dir = Join-Path $root '.claude\scratch-archive\tools'
+  New-Item -ItemType Directory -Force $dir | Out-Null
+  $exe = Get-ChildItem $dir -Filter 'PresentMon*.exe' -ErrorAction SilentlyContinue | Select-Object -First 1
+  if (-not $exe) {
+    try { & gh release download -R GameTechDev/PresentMon --pattern '*x64.exe' --dir $dir --clobber 2>&1 | Out-Null } catch { }
+    $exe = Get-ChildItem $dir -Filter 'PresentMon*.exe' -ErrorAction SilentlyContinue | Select-Object -First 1
+  }
+  if ($exe) { Write-Host ("PresentMon: {0} sha256 {1}" -f $exe.Name, (Get-FileHash $exe.FullName -Algorithm SHA256).Hash) }
+  return $exe
+}
+
+# mean frame time, mean frames per second and the 1% low (frames per second of the slowest 1% of frames) from a list of frame times in ms
+function Frame-Stats($ms) {
+  $a = @($ms | Where-Object { $_ -gt 0 })
+  if ($a.Count -lt 30) { return $null }
+  $mean = ($a | Measure-Object -Average).Average
+  $sorted = $a | Sort-Object -Descending
+  $k = [Math]::Max(1, [int]($a.Count * 0.01))
+  $worst = ($sorted | Select-Object -First $k | Measure-Object -Average).Average
+  [pscustomobject]@{ Frames = $a.Count; MeanMs = [Math]::Round($mean, 2); Fps = [Math]::Round(1000.0 / $mean, 1); Low1Fps = [Math]::Round(1000.0 / $worst, 1) }
+}
+
+function Suite-GameSession {
+  Write-Host "=== gamesession: HUDshell over a real game (borderless) - do not touch mouse/keyboard once the game is found ==="
+  $m = @(Get-Monitors) | Where-Object { $_.Primary } | Select-Object -First 1
+  $isGame = { $fg = [GT]::ForegroundWindow(); $pid_ = [GT]::ForegroundPid(); $l = 0; $t = 0; $r = 0; $b = 0; [void][GT]::WindowRect($fg, [ref]$l, [ref]$t, [ref]$r, [ref]$b); $pr = Get-Process -Id $pid_ -ErrorAction SilentlyContinue
+    $pr -and $pr.ProcessName -notmatch '^(hudshell|explorer|WindowsTerminal|pwsh|powershell|claude|conhost|OpenConsole|ApplicationFrameHost|SystemSettings|msedge|chrome|firefox)$' -and [Math]::Abs($l - $m.L) -le 2 -and [Math]::Abs($t - $m.T) -le 2 -and [Math]::Abs($r - $m.R) -le 2 -and [Math]::Abs($b - $m.B) -le 2 }
+  Say 'Start your game in BORDERLESS (windowed fullscreen) mode on the MAIN screen and get to a steady scene (a menu is fine). Leave it in front; then keep your hands off the keyboard and mouse.'
+  if (-not (Wait-Until $isGame 600)) { Warn 'gamesession' 'no borderless game was found in front on the main screen within 10 minutes: skipped'; return }
+  Start-Sleep 5
+  $gamePid = [GT]::ForegroundPid(); $gameWnd = [GT]::ForegroundWindow()
+  $gameProc = (Get-Process -Id $gamePid).ProcessName
+  Write-Host "a borderless game was found in front (process id $gamePid; its name is not recorded)"
+  Check 'gamesession' 'a borderless game fills the main screen and is in front' $true
+  $pm = Get-PresentMon
+  Stop-HUDshell
+  GTSave
+  $p = $null
+  try {
+    $n = LineCount $log
+    $at = "{0},{1}" -f ($m.L + 200), ($m.T + 200)
+    $p = Start-Process $dbg -ArgumentList @('--term', '--inputtest', '--interactive', '--size', '900,520', '--at', $at, '--delay', '2') -PassThru
+    $h = [IntPtr]::Zero
+    for ($i = 0; $i -lt 40 -and $h -eq [IntPtr]::Zero; $i++) { Start-Sleep 1; if ($p.HasExited) { break }; $h = [GT]::Find([uint32]$p.Id) }
+    Start-Sleep 8
+    Check 'gamesession' 'HUDshell started with the game running' ($h -ne [IntPtr]::Zero)
+    if ($h -eq [IntPtr]::Zero) { return }
+    $st = Last-State @(Cut $log $n)
+    $cx = [int](($st.L + $st.R) / 2); $cy = [int](($st.T + $st.B) / 2)
+    Check 'gamesession' 'HUDshell did not take the keyboard from the game when it appeared (the game is still in front)' ([GT]::ForegroundPid() -eq $gamePid)
+    # visible over the game: the pixels of its area differ from the same area with HUDshell hidden (Ctrl+Alt+V)
+    $grab = { param($r) $bmp = New-Object System.Drawing.Bitmap ($r[2] - $r[0]), ($r[3] - $r[1]); $g = [System.Drawing.Graphics]::FromImage($bmp); $g.CopyFromScreen($r[0], $r[1], 0, 0, (New-Object System.Drawing.Size ($r[2] - $r[0]), ($r[3] - $r[1]))); $g.Dispose(); $bmp }
+    $rect = @(($st.L + 40), ($st.T + 40), ($st.R - 40), ($st.B - 40))
+    $vis = & $grab $rect
+    [GT]::Hotkey(0x56); Start-Sleep -Milliseconds 1500
+    $hid = & $grab $rect
+    [GT]::Hotkey(0x56); Start-Sleep -Milliseconds 1500
+    $diff = 0; $cnt = 0
+    for ($x = 0; $x -lt $vis.Width; $x += [Math]::Max(1, [int]($vis.Width / 40))) { for ($y = 0; $y -lt $vis.Height; $y += [Math]::Max(1, [int]($vis.Height / 40))) { $a = $vis.GetPixel($x, $y); $b = $hid.GetPixel($x, $y); $diff += [Math]::Abs($a.R - $b.R) + [Math]::Abs($a.G - $b.G) + [Math]::Abs($a.B - $b.B); $cnt++ } }
+    $vis.Dispose(); $hid.Dispose()
+    $avg = [Math]::Round($diff / [Math]::Max(1, $cnt) / 3, 1)
+    Check 'gamesession' 'HUDshell is drawn over the game (its area looks different with it shown and hidden by Ctrl+Alt+V)' ($avg -gt 8) "mean difference $avg of 255 per colour"
+    Shot 'game-overlay' $st.L $st.T $st.R $st.B
+    Check 'gamesession' 'the show / hide hotkey worked while the game was in front, and the game kept the keyboard' ([GT]::ForegroundPid() -eq $gamePid)
+    # click-through: the window under HUDshell's own pixels is the game's
+    Check 'gamesession' 'click-through is on: the window under HUDshell''s pixels is the game''s, so clicks reach the game' ([GT]::PidAt($cx, $cy) -eq $gamePid) ("process under the point: " + $(if ([GT]::PidAt($cx, $cy) -eq $gamePid) { 'the game' } else { 'something else' }))
+    # grab and release: HUDshell takes the keyboard, then gives it back to the game
+    [GT]::Hotkey(0x47); Start-Sleep -Milliseconds 1800
+    $grabbed = [GT]::IsFg($h)
+    foreach ($ch in 'echo GAMEGRAB'.ToCharArray()) { [GT]::Key([byte][char]::ToUpper($ch)); Start-Sleep -Milliseconds 40 }
+    [GT]::Key(0x0D); Start-Sleep -Milliseconds 1500
+    $screen = Last-Screen @(Cut $log $n)
+    [GT]::Hotkey(0x47); Start-Sleep -Milliseconds 2000
+    Check 'gamesession' 'Ctrl+Alt+G takes the keyboard over the game: HUDshell is in front and typing reaches its terminal' ($grabbed -and $screen -match 'GAMEGRAB') $(if ($grabbed) { 'in front' } else { 'not in front' })
+    Check 'gamesession' 'Ctrl+Alt+G again gives the keyboard back to the game itself (the same game window is in front)' ([GT]::ForegroundWindow() -eq $gameWnd) $(if ([GT]::ForegroundWindow() -eq $gameWnd) { 'the game window' } else { 'another window' })
+    $nn = LineCount $log
+    [GT]::Hotkey(0x54); Start-Sleep -Milliseconds 1200; [GT]::Hotkey(0x54); Start-Sleep -Milliseconds 1200
+    Check 'gamesession' 'the click-through hotkey (Ctrl+Alt+T) works with the game in front, twice, and the game is still in front' ((@(Cut $log $nn | Where-Object { $_ -match 'click_through setting = ' }).Count -eq 2) -and ([GT]::ForegroundPid() -eq $gamePid))
+    # frame times with and without HUDshell (PresentMon needs administrator rights: one prompt, which the person accepts)
+    if ($pm) {
+      Write-Host ""
+      Say 'A Windows prompt will ask to allow PresentMon (frame-time tool). Accept it (Yes). Then keep your hands off while it measures: 3 x 60 seconds.'
+      $csv = Join-Path $scratch 'presentmon.csv'
+      Remove-Item -LiteralPath $csv -ErrorAction SilentlyContinue
+      Stop-HUDshell
+      $t0 = Get-Date
+      try { Start-Process -FilePath $pm.FullName -ArgumentList @('--process_id', "$gamePid", '--output_file', "`"$csv`"", '--timed', '230', '--terminate_after_timed', '--no_console_stats') -Verb RunAs -WindowStyle Hidden } catch { Warn 'gamesession' "PresentMon could not be started (the prompt was declined?): frame times not measured" }
+      $started = Wait-Until { Test-Path -LiteralPath $csv } 90
+      if ($started) {
+        $capT0 = Get-Date
+        # A: HUDshell not running (30 s lead-in, 60 s)
+        Start-Sleep 70
+        $aEnd = Get-Date
+        # B: HUDshell shown and idle
+        $null = Start-Process $dbg -ArgumentList @('--term', '--inputtest', '--interactive', '--size', '900,520', '--at', $at, '--delay', '2') -PassThru
+        Start-Sleep 12
+        $bStart = Get-Date; Start-Sleep 60; $bEnd = Get-Date
+        Stop-HUDshell
+        # C: HUDshell shown with a shell printing as fast as it can
+        $null = Start-Process $dbg -ArgumentList @('--term', '--inputtest', '--interactive', '--flood', '--size', '900,520', '--at', $at, '--delay', '2') -PassThru
+        Start-Sleep 12
+        $cStart = Get-Date; Start-Sleep 60; $cEnd = Get-Date
+        Stop-HUDshell
+        Start-Sleep 40
+        $rows = @(); try { $rows = @(Import-Csv -LiteralPath $csv) } catch { }
+        if ($rows.Count -gt 0) {
+          $cols = $rows[0].PSObject.Properties.Name
+          $ftCol = $cols | Where-Object { $_ -in 'MsBetweenPresents', 'FrameTime', 'msBetweenPresents' } | Select-Object -First 1
+          $tCol = $cols | Where-Object { $_ -in 'TimeInSeconds', 'CPUStartTime', 'Time' } | Select-Object -First 1
+          if ($ftCol -and $tCol) {
+            $slice = { param($from, $to) $f = ($from - $capT0).TotalSeconds; $e = ($to - $capT0).TotalSeconds; @($rows | Where-Object { [double]$_.$tCol -ge $f -and [double]$_.$tCol -le $e } | ForEach-Object { [double]$_.$ftCol }) }
+            $A = Frame-Stats (& $slice $capT0.AddSeconds(8) $aEnd); $B = Frame-Stats (& $slice $bStart $bEnd); $C = Frame-Stats (& $slice $cStart $cEnd)
+            $fmt = { param($x) if ($x) { "{0} fps mean, {1} fps 1% low, {2} ms mean ({3} frames)" -f $x.Fps, $x.Low1Fps, $x.MeanMs, $x.Frames } else { 'too few frames' } }
+            Check 'gamesession' ('frame times without HUDshell: ' + (& $fmt $A)) ($null -ne $A)
+            Check 'gamesession' ('frame times with HUDshell shown and idle: ' + (& $fmt $B)) ($null -ne $B)
+            Check 'gamesession' ('frame times with HUDshell shown and a shell printing flat out: ' + (& $fmt $C)) ($null -ne $C)
+            if ($A -and $B -and $C) {
+              $dB = [Math]::Round(100.0 * ($A.Fps - $B.Fps) / $A.Fps, 1); $dC = [Math]::Round(100.0 * ($A.Fps - $C.Fps) / $A.Fps, 1)
+              Check 'gamesession' "HUDshell idle costs $dB% of the game's frame rate (a sanity bound of 10%)" ($dB -lt 10) "mean fps $($A.Fps) -> $($B.Fps)"
+              Check 'gamesession' "HUDshell with heavy output costs $dC% (a sanity bound of 15%)" ($dC -lt 15) "mean fps $($A.Fps) -> $($C.Fps)"
+            }
+          } else { Warn 'gamesession' ("the PresentMon file has no frame-time / time column I know: " + ($cols -join ',')) }
+        } else { Warn 'gamesession' 'PresentMon wrote no frames (the prompt was declined, or the game is not presenting through a supported API): frame times not measured' }
+      } else { Warn 'gamesession' 'PresentMon did not start within 90 s (the prompt was declined?): frame times not measured' }
+    } else { Warn 'gamesession' 'PresentMon could not be downloaded: frame times not measured' }
+  } finally { Stop-HUDshell; [GT]::RestoreCursor() }
+}
+
+# ---- everything that needs a person or the computer's own state, in one sitting (MANUAL) ------------------------------------------------------
+# Order: layouts and IME, scaling 200% once more, sleep and resume, a real game with frame times, then (with -Sandbox) the real prompts through Claude
+# Code and Codex. The monitor unplug and the taskbar states were done already (`hardware`). Nothing here changes a setting by itself.
+function Suite-Everything {
+  Write-Host "=== everything: layouts and IME, scaling 200%, sleep and resume, a real game, real prompts ==="
+  $skip = @(($env:HUDSHELL_HW_SKIP -split ',') | ForEach-Object { $_.Trim().ToLower() } | Where-Object { $_ })
+  if ($skip -notcontains 'layouts') {
+    Write-Host ""
+    Write-Host "----- layouts and IME -----"
+    $before = @([GT]::InstalledLayouts()).Count
+    Write-Host "keyboard layouts installed now: $before"
+    Say 'Settings > Time & language > Language & region: add Japanese (Microsoft IME) and one more keyboard layout (for example Swedish or Russian). When done, wait: the script notices it. (If you want to skip this part, do nothing: it moves on after 10 minutes.)'
+    if (Wait-Until { @([GT]::InstalledLayouts()).Count -gt $before } 600) {
+      Start-Sleep 10
+      Write-Host "reached: more layouts installed (keep your hands off the keyboard and mouse from here on)"
+      Suite-KbdAny
+      Say 'The layout tests are done. You can remove the layouts you added now (Settings > Time & language > Language & region).'
+    } else { Warn 'everything' 'no layout was added within 10 minutes: layouts and IME were skipped' }
+  }
+  if ($skip -notcontains 'scaling') {
+    Hw-State 'primary scaling 200% (again)' 'Set the scaling of the MAIN screen to 200% (Settings > System > Display > Scale).' { (Get-PrimaryScale) -eq 200 } 300 { Suite-Place; Suite-Dpi }
+    Hw-State 'primary scaling back at 100%' 'Set the scaling of the MAIN screen back to 100%.' { (Get-PrimaryScale) -eq 100 } 300 { }
+  }
+  if ($skip -notcontains 'sleep') {
+    Write-Host ""
+    Write-Host "----- sleep and resume -----"
+    Suite-SleepResume
+  }
+  if ($skip -notcontains 'game') {
+    Write-Host ""
+    Write-Host "----- a real game -----"
+    Suite-GameSession
+  }
+  if ($skip -notcontains 'real') {
+    Write-Host ""
+    Write-Host "----- real prompts through Claude Code and Codex -----"
+    if ($Sandbox) { Suite-Real } else { Warn 'everything' 'the real-prompt suite needs -Sandbox <folder>: skipped' }
+  }
+}
+
 # ---- the hardware session (MANUAL, not part of 'all') -------------------------------------------------------------------
 # One sitting that covers everything that needs a person or the computer's own state: the taskbar shown and on each edge, other display scalings,
 # a monitor unplugged and plugged back, and sleep and resume. HUDshell is never asked to change any of this: the person changes the taskbar and the
@@ -2240,6 +2513,9 @@ foreach ($s in $want) {
     'maxwork' { Suite-MaxWork }
     'sleepresume' { Suite-SleepResume }
     'hardware' { Suite-Hardware }
+    'kbdany' { Suite-KbdAny }
+    'gamesession' { Suite-GameSession }
+    'everything' { Suite-Everything }
     'tabsui' { Suite-TabsUi }
     'windowsnap' { Suite-WindowSnap }
     'input' { Suite-Input }

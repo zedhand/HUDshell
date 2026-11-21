@@ -1305,6 +1305,10 @@ fn build_inputtest() -> &'static [(u64, &'static str)] {
         let size = args.iter().position(|a| a == "--size").and_then(|i| args.get(i + 1)).cloned().unwrap_or_else(|| "900,520".into());
         let resize: &'static str = Box::leak(format!("resize:{size}").into_boxed_str());
         let mut v: Vec<(u64, &'static str)> = vec![(1500, "cdp-focus"), (2000, resize)];
+        // --flood: shell 1 prints as fast as it can (to measure what heavy output costs a game next to it)
+        if args.iter().any(|a| a == "--flood") {
+            v.push((3000, "wto:1:1..3000000 | ForEach-Object { 'FLOOD ' + $_ + ' ' + ('x' * 60) }\r"));
+        }
         // --shells N opens N - 1 more shells first (for the tab strip tests)
         let extra: u64 = args.iter().position(|a| a == "--shells").and_then(|i| args.get(i + 1)).and_then(|n| n.parse().ok()).unwrap_or(1);
         for k in 1..extra {

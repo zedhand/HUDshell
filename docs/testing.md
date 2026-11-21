@@ -67,6 +67,16 @@ clipboard text and restores it. `scrollback`, `ghost` and `attention` send no OS
 | `soak` | five minutes of continuous output: memory stays flat |
 | `real` | real prompts in a sandbox folder through Claude Code and Codex: a tool task, a two-line Shift+Enter prompt, a long stream with a mid-stream resize and Esc interrupt, `/exit` |
 
+## The rest of the manual tests, in one sitting (`-Suite everything -Sandbox <folder>`)
+
+After the hardware session: **layouts and IME** (the person adds Japanese (Microsoft IME) and one more layout in Windows' settings, the script notices; `kbdany`: every other
+installed layout's keys are pressed for real and compared with what Windows says they give, and a romaji phrase through a Japanese or Chinese IME must arrive as real
+characters), **scaling 200% once more** (`place`, `dpi`), **sleep and resume** (`sleepresume`), **a real game** (`gamesession`: a borderless game found in front by itself,
+its name never recorded; HUDshell is drawn over it, does not take the keyboard, is click-through, Ctrl+Alt+G takes and gives back the keyboard to the very same game window,
+the hotkeys work with the game in front; then frame times from PresentMon with HUDshell not running, shown and idle, and shown with a shell printing flat out) and
+the **real prompts** through Claude Code and Codex (`real`). PresentMon is Intel's frame-time tool, downloaded from its official GitHub release into a git-ignored
+folder, its Authenticode signature and hash printed; it needs administrator rights, so Windows asks once. `HUDSHELL_HW_SKIP` takes `layouts`, `scaling`, `sleep`, `game`, `real`.
+
 ## The hardware session (manual, one sitting)
 
 Some things only a person or the computer's own state can change: the taskbar, display scaling, a monitor's cable, sleep. `scripts	est-all.ps1 -Suite hardware`
