@@ -33,7 +33,7 @@ New-Item -ItemType Directory -Force $scratch | Out-Null
 $env:HUDSHELL_TEST_DIR = $scratch
 if ($Sandbox) { $env:HUDSHELL_SANDBOX = $Sandbox } else { $env:HUDSHELL_SANDBOX = $scratch }
 $Suite = @($Suite | ForEach-Object { $_ -split ',' } | Where-Object { $_ })
-$want = if ($Suite -contains 'all') { @('static', 'keys', 'width', 'hideshow', 'clickfocus', 'clipboard', 'autotest', 'ui', 'scrollback', 'ghost', 'attention', 'policy', 'place', 'dpi', 'text', 'reload', 'restore', 'recover', 'windows', 'winrestore', 'winmove', 'costwin', 'qol', 'sessions', 'shells', 'layout', 'input', 'snap', 'windowsnap', 'kbd', 'cost', 'release', 'config', 'soak') + $(if ($Sandbox) { 'real' } else { @() }) } else { $Suite }
+$want = if ($Suite -contains 'all') { @('static', 'keys', 'width', 'hideshow', 'clickfocus', 'clipboard', 'autotest', 'ui', 'scrollback', 'ghost', 'attention', 'policy', 'place', 'dpi', 'text', 'reload', 'restore', 'recover', 'windows', 'winrestore', 'winmove', 'costwin', 'tileoff', 'qol', 'sessions', 'shells', 'layout', 'input', 'snap', 'windowsnap', 'kbd', 'cost', 'release', 'config', 'soak') + $(if ($Sandbox) { 'real' } else { @() }) } else { $Suite }
 
 $script:R = New-Object System.Collections.Generic.List[object]
 # Appended to every check name while a suite runs a second time on another monitor.
@@ -1751,6 +1751,37 @@ function Suite-CostWindows {
   } finally { Stop-HUDshell }
 }
 
+# edge_tiling = false: dropping the window on the edge of a screen does not tile it (real mouse, an outer edge of a screen).
+function Suite-TileOff {
+  Write-Host "=== tileoff: edge_tiling = false, real mouse drop on a screen edge - do not touch mouse/keyboard ==="
+  $mons = @(Get-Monitors)
+  $m = $mons | Where-Object { $_.Primary } | Select-Object -First 1
+  $dpr = $m.Dpi / 96.0
+  $ey = $m.T + [int](($m.B - $m.T) / 2)
+  # an edge of the primary monitor where no other monitor continues at that height
+  $right = -not (@($mons | Where-Object { $_.L -eq $m.R -and $_.T -le $ey -and $_.B -gt $ey }).Count)
+  $ex = if ($right) { $m.R - 1 } else { $m.L }
+  $side = if ($right) { 'right' } else { 'left' }
+  if (-not $right -and (@($mons | Where-Object { $_.R -eq $m.L -and $_.T -le $ey -and $_.B -gt $ey }).Count)) { Warn 'tileoff' 'no outer screen edge found on the primary monitor: not tested'; return }
+  Stop-HUDshell
+  GTSave
+  $p = $null
+  try {
+    $n = LineCount $log
+    $at = "{0},{1}" -f ($m.WL + 200), ($m.WT + 150)
+    $p = Start-Process $dbg -ArgumentList @('--term', '--inputtest', '--interactive', '--no-edge-tiling', '--size', '640,360', '--at', $at, '--delay', '2') -PassThru
+    $st = $null
+    for ($i = 0; $i -lt 40 -and -not $st; $i++) { Start-Sleep 1; $st = Last-State @(Cut $log $n) }
+    Check 'tileoff' 'the window started' ($null -ne $st)
+    if (-not $st) { return }
+    $w0 = $st.R - $st.L; $h0 = $st.B - $st.T
+    $gx = $st.L + [int](200 * $dpr); $gy = $st.T + [int](10 * $dpr)
+    Drag-Mouse $gx $gy $ex $ey
+    $s2 = Last-State @(Cut $log $n)
+    Check 'tileoff' "with edge_tiling off, dropping the window on the $side edge of the screen does not tile it" (([Math]::Abs(($s2.R - $s2.L) - $w0) -le 3) -and ([Math]::Abs(($s2.B - $s2.T) - $h0) -le 3) -and (@(Cut $log $n | Where-Object { $_ -match 'tiled to the' }).Count -eq 0)) ("window {0},{1},{2},{3}" -f $s2.L, $s2.T, $s2.R, $s2.B)
+  } finally { Stop-HUDshell; [GT]::RestoreCursor() }
+}
+
 function Tree-Memory([int]$rootPid) {
   $all = Get-CimInstance Win32_Process -Property ProcessId, ParentProcessId, Name
   $ids = New-Object System.Collections.Generic.HashSet[int]; [void]$ids.Add($rootPid)
@@ -1819,6 +1850,7 @@ foreach ($s in $want) {
     'winrestore' { Suite-WindowsRestore }
     'winmove' { Suite-WindowsMove }
     'costwin' { Suite-CostWindows }
+    'tileoff' { Suite-TileOff }
     'windowsnap' { Suite-WindowSnap }
     'input' { Suite-Input }
     'snap' { Suite-Snap }

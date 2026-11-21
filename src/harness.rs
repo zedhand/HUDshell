@@ -1881,6 +1881,9 @@ pub(crate) fn override_config(mut c: config::Config) -> config::Config {
     if args.iter().any(|a| a == "--copy-on-select") {
         c.copy_on_select = true;
     }
+    if args.iter().any(|a| a == "--no-edge-tiling") {
+        c.edge_tiling = false;
+    }
     if args.iter().any(|a| a == "--no-cue") {
         c.attention_cue = false;
     }

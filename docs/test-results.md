@@ -28,9 +28,10 @@ release 20, config 24, soak 4. Three displays, the second at 150%.
 - **Holding Shift while dragging a window of a touching pair** (`windowsnap`, real mouse): only the dragged window moves.
 - **Half-screen tiling** (`snap`, real mouse, every monitor): with the cursor dropped on the left or right edge of a screen the window fills that half
   of the monitor edge to edge with square corners, and dragging it away restores its size; on an edge where another monitor continues, nothing is
-  tiled. Screenshots were looked at (kept local, not committed). `edge_tiling = false` turns it off (not tested).
+  tiled. Screenshots were looked at (kept local, not committed). `edge_tiling = false` turns it off (`tileoff`, real mouse, 2 checks: the window dropped on an outer screen edge keeps its size and nothing is tiled).
 - **Settings-panel rows** (`ui`, real key presses): ghost opacity `[` `]`, tab style `t`, line height `;` `'`, letter spacing `n` `m`; each logs and
   saves. Their `[-]` / `[+]` buttons were not clicked by a test.
+- **`maximize_area = work` cannot be told apart from `monitor` on this machine:** the work area equals the full monitor on all three displays (the taskbar is hidden), so only its settings parsing is tested.
 - **`cargo clippy -D warnings`** is clean for the normal and the harness build (tests included) and now runs in CI.
 - **Code review** (the `/code-review` skill at high effort, on the changes): one real defect and four smaller ones, all fixed: a shell that was
   detached or moved lost its start profile; secondary windows overwrote the first window's saved position; "on screen" was judged against the
