@@ -10,7 +10,12 @@ pub const CLOSE_CONFIRM_MS: u64 = 3000;
 pub struct Entry {
     pub id: u32,
     pub profile: String,
+    /// A name the user gave the tab by hand (empty = none: the tab shows the program's title or the profile).
+    pub name: String,
 }
+
+/// The longest name a tab can be given.
+pub const MAX_NAME: usize = 40;
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum CloseStep {
@@ -74,7 +79,7 @@ impl Shells {
         }
         let id = self.next_id;
         self.next_id += 1;
-        self.order.push(Entry { id, profile: profile.to_string() });
+        self.order.push(Entry { id, profile: profile.to_string(), name: String::new() });
         if self.order.len() == 1 {
             self.active = id;
         }
@@ -84,12 +89,33 @@ impl Shells {
     /// Adopt an id that already exists elsewhere (session 1 is created by the page at start).
     pub fn adopt(&mut self, id: u32, profile: &str) {
         if self.position(id).is_none() && self.order.len() < MAX_SHELLS {
-            self.order.push(Entry { id, profile: profile.to_string() });
+            self.order.push(Entry { id, profile: profile.to_string(), name: String::new() });
             self.next_id = self.next_id.max(id + 1);
             if self.order.len() == 1 {
                 self.active = id;
             }
         }
+    }
+
+    /// Give a tab a name by hand (printable characters only, at most `MAX_NAME`, trimmed); an empty name takes it away again.
+    pub fn rename(&mut self, id: u32, name: &str) -> bool {
+        let clean: String = name.chars().filter(|c| !c.is_control()).collect::<String>().trim().chars().take(MAX_NAME).collect();
+        match self.order.iter_mut().find(|e| e.id == id) {
+            Some(e) => {
+                e.name = clean;
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Put a tab at position `to` (0-based, clamped to the last place); the active shell stays the active shell.
+    pub fn move_to(&mut self, id: u32, to: usize) -> bool {
+        let Some(from) = self.position(id) else { return false };
+        let e = self.order.remove(from);
+        let to = to.min(self.order.len());
+        self.order.insert(to, e);
+        true
     }
 
     pub fn activate(&mut self, id: u32) -> bool {
@@ -248,5 +274,27 @@ mod tests {
         assert_eq!(s.len(), 1);
         assert_eq!(s.add("pwsh"), Some(2));
         assert_eq!(s.profile_of(1), Some("pwsh"));
+    }
+
+    #[test]
+    fn a_tab_can_be_renamed_and_moved() {
+        let mut s = Shells::new();
+        for p in ["a", "b", "c"] {
+            s.add(p);
+        }
+        assert!(s.rename(2, "  build \u{7}server  "));
+        assert_eq!(s.entries()[1].name, "build server", "trimmed, control characters dropped");
+        assert!(s.rename(2, &"x".repeat(100)));
+        assert_eq!(s.entries()[1].name.chars().count(), MAX_NAME);
+        assert!(s.rename(2, ""));
+        assert_eq!(s.entries()[1].name, "", "an empty name takes it away");
+        assert!(!s.rename(9, "nope"));
+        s.activate(3);
+        assert!(s.move_to(3, 0));
+        assert_eq!(s.ids(), vec![3, 1, 2]);
+        assert_eq!(s.active(), 3, "the active shell stays active");
+        assert!(s.move_to(3, 99));
+        assert_eq!(s.ids(), vec![1, 2, 3], "past the end means last");
+        assert!(!s.move_to(7, 0));
     }
 }

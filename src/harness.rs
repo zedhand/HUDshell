@@ -1063,6 +1063,53 @@ fn build_dpitest() -> &'static [(u64, &'static str)] {
     })
 }
 
+/// `--gamepos` (with or without `--game-positions`): the program in front is faked; the window is placed while one is "in front" and must go back
+/// to that place when it is in front again. See Suite-GamePos.
+const GAMEPOS: &[(u64, &str)] = &[
+    (1500, "cdp-focus"),
+    (2000, "resize:700,420"),
+    (2500, "fgprobe"),
+    (3000, "fg:gamea.exe"),
+    (3500, "win:placeremember:300,300"),
+    (4500, "fg:gameb.exe"),
+    (5000, "win:placeremember:900,500"),
+    (6000, "fg:gamea.exe"),
+    (8000, "winstate:a-again"),
+    (9000, "fg:gameb.exe"),
+    (11000, "winstate:b-again"),
+    (12000, "fg:other.exe"),
+    (14000, "winstate:other"),
+    (14500, "fg:explorer.exe"),
+    (15000, "win:placeremember:500,700"),
+    (15500, "fg:gamea.exe"),
+    (17500, "winstate:explorer-not-kept"),
+    (18000, "quit"),
+];
+
+/// `--tabsedit` / `--tabsload` (run with `--test-profiles --restore-session shells --session-file <path>`): a tab is renamed by hand and another
+/// moved (through the same host code the page's messages reach), the labels are dumped, and the next start must bring the names and the order back.
+const TABS_EDIT: &[(u64, &str)] = &[
+    (1500, "cdp-focus"),
+    (2000, "resize:700,420"),
+    (3000, "shell:new:work"),
+    (7000, "shell:new:cmd"),
+    (10500, "tab:rename:2:build server"),
+    (11000, "tab:move:3:0"),
+    (12500, "dumps:1:te-labels"),
+    (13000, "tab:rename:2:"),
+    (14000, "dumps:1:te-cleared"),
+    (14500, "tab:rename:2:build server"),
+    (15000, "tab:rename:3:\x07x"),
+    (16000, "dumps:1:te-final"),
+    (16500, "quit"),
+];
+const TABS_LOAD: &[(u64, &str)] = &[
+    (1500, "cdp-focus"),
+    (2000, "resize:700,420"),
+    (20000, "dumps:1:tl-labels"),
+    (20500, "quit"),
+];
+
 /// `--costwindows`: four shells in one window, then the same four shells spread over four windows; the runner measures memory and idle CPU
 /// of the process tree in both states (Suite-CostWindows).
 const COST_WINDOWS: &[(u64, &str)] = &[
@@ -1085,11 +1132,14 @@ const WINDOWS_MOVE: &[(u64, &str)] = &[
     (1500, "cdp-focus"),
     (2000, "resize:700,420"),
     (3000, "shell:new"),
+    (4500, "wto:2:1..80 | ForEach-Object { 'SCROLL-LINE-' + $_ }\r"),
     (6000, "window:detach:2"),
+    (11500, "inwin:2:dumps:2:scroll-detached"),
     (12000, "theme:next"),
     (12600, "js:window.chrome.webview.postMessage(JSON.stringify({t:'note',k:'bg',v:getComputedStyle(document.documentElement).getPropertyValue('--bg').trim()}))"),
     (12800, "inwin:2:js:window.chrome.webview.postMessage(JSON.stringify({t:'note',k:'bg',v:getComputedStyle(document.documentElement).getPropertyValue('--bg').trim()}))"),
     (14000, "inwin:2:shell:new:work"),
+    (16500, "wto:3:1..80 | ForEach-Object { 'MOVE-LINE-' + $_ }\r"),
     (18000, "winstate:before-move"),
     (18500, "inwin:2:shell:move"),
     (22000, "winstate:after-move"),
@@ -1156,7 +1206,12 @@ fn build_inputtest() -> &'static [(u64, &'static str)] {
         let size = args.iter().position(|a| a == "--size").and_then(|i| args.get(i + 1)).cloned().unwrap_or_else(|| "900,520".into());
         let resize: &'static str = Box::leak(format!("resize:{size}").into_boxed_str());
         let mut v: Vec<(u64, &'static str)> = vec![(1500, "cdp-focus"), (2000, resize)];
-        let mut t = 6000u64;
+        // --shells N opens N - 1 more shells first (for the tab strip tests)
+        let extra: u64 = args.iter().position(|a| a == "--shells").and_then(|i| args.get(i + 1)).and_then(|n| n.parse().ok()).unwrap_or(1);
+        for k in 1..extra {
+            v.push((2500 + k * 2500, "shell:new"));
+        }
+        let mut t = 6000u64 + extra.saturating_sub(1) * 2500;
         while t <= 200000 {
             v.push((t, "state:m"));
             v.push((t + 100, "dump:m"));
@@ -1169,6 +1224,9 @@ fn build_inputtest() -> &'static [(u64, &'static str)] {
 
 fn scen() -> &'static [(u64, &'static str)] {
     match SCEN_SEL.load(Ordering::SeqCst) {
+        45 => GAMEPOS,
+        44 => TABS_LOAD,
+        43 => TABS_EDIT,
         42 => COST_WINDOWS,
         41 => WINDOWS_MOVE,
         40 => WINDOWS_LOAD,
@@ -1446,6 +1504,36 @@ unsafe fn run_action(hwnd: HWND, act: &str) {
         detach_shell(id.parse().unwrap_or(0));
     } else if act == "window:next" {
         next_window();
+    } else if act == "fgprobe" {
+        // the real lookup of the program in front: only its shape is logged, never the name
+        let f = foreground_app();
+        log(&format!(
+            "FGPROBE some={} exe={} clean={}",
+            f.is_some(),
+            f.as_deref().is_some_and(|n| n.ends_with(".exe")),
+            f.as_deref().is_some_and(|n| !n.contains(['\\', '/']) && n == n.to_lowercase())
+        ));
+    } else if let Some(name) = act.strip_prefix("fg:") {
+        *lock_or_recover(&FAKE_FOREGROUND) = Some(name.to_string());
+    } else if let Some(rest) = act.strip_prefix("win:placeremember:") {
+        // the window is placed as if the user moved it (a move, a corner hotkey): its place is remembered for the program in front
+        let mut p = rest.split(',');
+        let x: i32 = p.next().and_then(|v| v.parse().ok()).unwrap_or(0);
+        let y: i32 = p.next().and_then(|v| v.parse().ok()).unwrap_or(0);
+        let _ = unsafe { SetWindowPos(hwnd, None, x, y, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE) };
+        unsafe { save_geometry(hwnd) };
+    } else if let Some(rest) = act.strip_prefix("tab:rename:") {
+        // tab:rename:<shell>:<name>, as the page's rename message
+        if let Some((id, name)) = rest.split_once(':') {
+            wv::simulate_page_message(hwnd.0 as isize, &serde_json::json!({ "t": "rename", "s": id.parse::<u32>().unwrap_or(0), "name": name }).to_string());
+        }
+    } else if let Some(rest) = act.strip_prefix("tab:move:") {
+        if let Some((id, to)) = rest.split_once(':') {
+            wv::simulate_page_message(
+                hwnd.0 as isize,
+                &serde_json::json!({ "t": "reorder", "s": id.parse::<u32>().unwrap_or(0), "to": to.parse::<u32>().unwrap_or(0) }).to_string(),
+            );
+        }
     } else if let Some(id) = act.strip_prefix("spawnprofile:") {
         // which profile a shell would restart from (nothing about its content)
         let id: u32 = id.parse().unwrap_or(0);
@@ -1769,7 +1857,7 @@ const SCENARIO_FLAGS: &[&str] = &[
     "--autotest", "--keys", "--widthtest", "--probe", "--probe2", "--probe3", "--probe4", "--real",
     "--clickfocus", "--hideshow", "--clipboard", "--soak", "--scrolltest", "--ghosttest", "--attention",
     "--policytest", "--placetest", "--idletest", "--starttest", "--autostarttest", "--sessiontest", "--shellstest",
-    "--tabmodes", "--shellsfull", "--layouttest", "--layoutempty", "--layoutstart", "--layoutown", "--labeltest", "--inputtest", "--dpitest", "--texttest", "--reloadtest", "--sessionsave", "--sessionload", "--startfailtest", "--recovertest", "--windowstest", "--windowsnap", "--windowssave", "--windowsload", "--windowsmove", "--costwindows",
+    "--tabmodes", "--shellsfull", "--layouttest", "--layoutempty", "--layoutstart", "--layoutown", "--labeltest", "--inputtest", "--dpitest", "--texttest", "--reloadtest", "--sessionsave", "--sessionload", "--startfailtest", "--recovertest", "--windowstest", "--windowsnap", "--windowssave", "--windowsload", "--windowsmove", "--costwindows", "--tabsedit", "--tabsload", "--gamepos",
 ];
 
 pub(crate) fn is_test_mode() -> bool {
@@ -1842,7 +1930,7 @@ pub(crate) unsafe fn arm(hwnd: HWND) {
     if SCENARIO_FLAGS.iter().any(|f| any_scen(f)) {
         let args: Vec<String> = std::env::args().collect();
         SCEN_SEL.store(
-            if any_scen("--costwindows") { 42 } else if any_scen("--windowsmove") { 41 } else if any_scen("--windowsload") { 40 } else if any_scen("--windowssave") { 39 } else if any_scen("--windowsnap") { 38 } else if any_scen("--windowstest") { 37 } else if any_scen("--recovertest") { 36 } else if any_scen("--startfailtest") { 35 } else if any_scen("--sessionload") { 34 } else if any_scen("--sessionsave") { 33 } else if any_scen("--reloadtest") { 32 } else if any_scen("--texttest") { 31 } else if any_scen("--dpitest") { 30 } else if any_scen("--inputtest") { 29 } else if any_scen("--labeltest") { 28 } else if any_scen("--layoutown") { 27 } else if any_scen("--layoutstart") { 26 } else if any_scen("--layoutempty") { 25 } else if any_scen("--layouttest") { 24 } else if any_scen("--shellsfull") { 23 } else if any_scen("--tabmodes") { 22 } else if any_scen("--shellstest") { 21 } else if any_scen("--sessiontest") { 20 } else if any_scen("--autostarttest") { 19 } else if any_scen("--starttest") { 18 } else if any_scen("--idletest") { 17 } else if any_scen("--placetest") { 16 } else if any_scen("--policytest") { 15 } else if any_scen("--attention") { 14 } else if any_scen("--ghosttest") { 13 } else if any_scen("--scrolltest") { 12 } else if any_scen("--soak") { 11 } else if any_scen("--clipboard") { 10 } else if any_scen("--hideshow") { 9 } else if any_scen("--clickfocus") { 8 } else if any_scen("--real") { 7 } else if any_scen("--probe4") { 6 } else if any_scen("--probe3") { 5 } else if any_scen("--probe2") { 4 } else if any_scen("--probe") { 3 } else if any_scen("--widthtest") { 2 } else if any_scen("--keys") { 1 } else { 0 },
+            if any_scen("--gamepos") { 45 } else if any_scen("--tabsload") { 44 } else if any_scen("--tabsedit") { 43 } else if any_scen("--costwindows") { 42 } else if any_scen("--windowsmove") { 41 } else if any_scen("--windowsload") { 40 } else if any_scen("--windowssave") { 39 } else if any_scen("--windowsnap") { 38 } else if any_scen("--windowstest") { 37 } else if any_scen("--recovertest") { 36 } else if any_scen("--startfailtest") { 35 } else if any_scen("--sessionload") { 34 } else if any_scen("--sessionsave") { 33 } else if any_scen("--reloadtest") { 32 } else if any_scen("--texttest") { 31 } else if any_scen("--dpitest") { 30 } else if any_scen("--inputtest") { 29 } else if any_scen("--labeltest") { 28 } else if any_scen("--layoutown") { 27 } else if any_scen("--layoutstart") { 26 } else if any_scen("--layoutempty") { 25 } else if any_scen("--layouttest") { 24 } else if any_scen("--shellsfull") { 23 } else if any_scen("--tabmodes") { 22 } else if any_scen("--shellstest") { 21 } else if any_scen("--sessiontest") { 20 } else if any_scen("--autostarttest") { 19 } else if any_scen("--starttest") { 18 } else if any_scen("--idletest") { 17 } else if any_scen("--placetest") { 16 } else if any_scen("--policytest") { 15 } else if any_scen("--attention") { 14 } else if any_scen("--ghosttest") { 13 } else if any_scen("--scrolltest") { 12 } else if any_scen("--soak") { 11 } else if any_scen("--clipboard") { 10 } else if any_scen("--hideshow") { 9 } else if any_scen("--clickfocus") { 8 } else if any_scen("--real") { 7 } else if any_scen("--probe4") { 6 } else if any_scen("--probe3") { 5 } else if any_scen("--probe2") { 4 } else if any_scen("--probe") { 3 } else if any_scen("--widthtest") { 2 } else if any_scen("--keys") { 1 } else { 0 },
             Ordering::SeqCst,
         );
         let delay = args
@@ -1880,6 +1968,9 @@ pub(crate) fn override_config(mut c: config::Config) -> config::Config {
     }
     if args.iter().any(|a| a == "--copy-on-select") {
         c.copy_on_select = true;
+    }
+    if args.iter().any(|a| a == "--game-positions") {
+        c.game_positions = true;
     }
     if args.iter().any(|a| a == "--no-edge-tiling") {
         c.edge_tiling = false;

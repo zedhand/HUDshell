@@ -405,6 +405,10 @@ fn handle_term_message(hwnd: isize, m: &str) {
             }
         }
         Some("switch") => crate::switch_to(session_of(&v)),
+        Some("rename") => crate::on_tab_rename(session_of(&v), v["name"].as_str().unwrap_or("")),
+        Some("reorder") => crate::on_tab_reorder(session_of(&v), v["to"].as_u64().unwrap_or(0) as usize),
+        // the page's answer to "snapshot": the terminal text of a shell that is about to move into another window
+        Some("snap") => crate::on_snapshot(session_of(&v), v["data"].as_str().unwrap_or("")),
         // Shift+click on a tab: move that shell into a window of its own.
         // (posted: a window cannot be created from inside this callback)
         Some("detach") => {
@@ -484,8 +488,8 @@ fn handle_term_message(hwnd: isize, m: &str) {
         #[cfg(feature = "harness")]
         Some("dump") => {
             log(&format!(
-                "terminal dump: {}x{} buffer={} cursor={} unicode={} view={} cue={} fs={} modes={} s={} ui={}",
-                v["cols"], v["rows"], v["buf"], v["cursor"], v["unicode"], v["view"], v["cue"], v["fs"], v["modes"], v["s"], v["ui"]
+                "terminal dump: {}x{} buffer={} cursor={} unicode={} view={} cue={} fs={} modes={} s={} first={} ui={}",
+                v["cols"], v["rows"], v["buf"], v["cursor"], v["unicode"], v["view"], v["cue"], v["fs"], v["modes"], v["s"], v["first"], v["ui"]
             ));
             if let Some(lines) = v["lines"].as_array() {
                 if let Ok(mut d) = LAST_DUMP.lock() {
@@ -508,6 +512,12 @@ fn handle_term_message(hwnd: isize, m: &str) {
         }
         _ => {}
     }
+}
+
+/// Test only: deliver a message as if the page had sent it (without the page).
+#[cfg(feature = "harness")]
+pub fn simulate_page_message(hwnd: isize, json: &str) {
+    handle_term_message(hwnd, json);
 }
 
 pub fn post(json: &str) {

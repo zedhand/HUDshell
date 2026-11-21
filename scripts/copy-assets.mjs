@@ -13,6 +13,7 @@ const files = [
   ['node_modules/@xterm/xterm/lib/xterm.js', 'xterm.js'],
   ['node_modules/@xterm/xterm/css/xterm.css', 'xterm.css'],
   ['node_modules/@xterm/addon-fit/lib/addon-fit.js', 'addon-fit.js'],
+  ['node_modules/@xterm/addon-serialize/lib/addon-serialize.js', 'addon-serialize.js'],
   ['node_modules/@xterm/addon-unicode11/lib/addon-unicode11.js', 'addon-unicode11.js'],
   ['node_modules/@xterm/addon-unicode-graphemes/lib/addon-unicode-graphemes.js', 'addon-unicode-graphemes.js'],
   ['web/index.html', 'index.html'],

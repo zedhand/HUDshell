@@ -30,6 +30,8 @@ pub struct Session {
     pub groups: Vec<Vec<usize>>,
     /// Where the window was (x, y, width, height in physical pixels); `None` in files from before several windows.
     pub rect: Option<[i32; 4]>,
+    /// The names given to tabs by hand, parallel to `shells` (empty strings for none); empty in files from before tab names.
+    pub names: Vec<String>,
     /// The other windows (first window's session only): each one is a session of its own without further windows.
     pub windows: Vec<Session>,
 }
@@ -46,6 +48,7 @@ impl Default for Session {
             focus: 0,
             groups: Vec::new(),
             rect: None,
+            names: Vec::new(),
             windows: Vec::new(),
         }
     }
@@ -82,6 +85,7 @@ impl Session {
             focus: l.focus(),
             groups,
             rect: None,
+            names: Vec::new(),
             windows: Vec::new(),
         }
     }
@@ -117,6 +121,9 @@ impl Session {
             return false;
         }
         if s.rect.is_some_and(|r| r[2] < 50 || r[3] < 50) {
+            return false;
+        }
+        if !s.names.is_empty() && s.names.len() != s.shells.len() {
             return false;
         }
         true
@@ -186,6 +193,16 @@ mod tests {
         assert_eq!(s.groups, vec![vec![0usize], vec![1, 2]]);
         let r = s.resolve(&[7, 8, 9]).unwrap();
         assert_eq!(r.groups, vec![vec![7u32], vec![8, 9]]);
+    }
+
+    #[test]
+    fn tab_names_round_trip_and_must_fit_the_shells() {
+        let mut s = Session { shells: vec!["a".into(), "b".into()], ..Session::default() };
+        s.names = vec!["".into(), "build".into()];
+        let back = Session::parse(&serde_json::to_string(&s).unwrap()).unwrap();
+        assert_eq!(back.names, vec!["", "build"]);
+        s.names = vec!["only one".into()];
+        assert!(Session::parse(&serde_json::to_string(&s).unwrap()).is_none(), "one name for two shells does not fit");
     }
 
     #[test]

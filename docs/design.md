@@ -157,7 +157,7 @@ which ids it shows.
 - **Detaching.** `detach_shell` creates the new window first (`create_window`: placed 36 px off the old one, same pointer mode, page started with the
   shell's id through `window.__hudshell.first`), then takes the shell out of the old window (`remove_shell_from_window`, the part of closing a shell
   that is not killing it). The new page has no history of the shell, so the shell is made to repaint: `pty::redraw` resizes it one column narrower
-  and back. The scrollback of the old view is lost. At most four windows; a window's only shell cannot be detached; closing the last shell of a
+  and back. The old page hands over a snapshot first (`snapshot` message, answered by the serialize addon with the screen and the scrollback as terminal text, 1.5 s timeout), which the new page writes before the shell's repaint. At most four windows; a window's only shell cannot be detached; closing the last shell of a
   window closes the window when another is open (with one window it still starts a fresh shell).
 - **Hotkeys and the tray.** The hotkeys and the tray icon belong to the first window; when it closes they move to the next (`window_gone`). A
   hotkey acts on the active window (`ACTIVE_WINDOW`: the one that last had the keyboard, was clicked or dragged, or was made). The tray menu

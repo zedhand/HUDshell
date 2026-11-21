@@ -25,6 +25,7 @@ pub static ASSETS: &[Asset] = &[
     asset!("/xterm.js", "text/javascript; charset=utf-8", "xterm.js"),
     asset!("/xterm.css", "text/css; charset=utf-8", "xterm.css"),
     asset!("/addon-fit.js", "text/javascript; charset=utf-8", "addon-fit.js"),
+    asset!("/addon-serialize.js", "text/javascript; charset=utf-8", "addon-serialize.js"),
     asset!("/addon-unicode11.js", "text/javascript; charset=utf-8", "addon-unicode11.js"),
     asset!("/addon-unicode-graphemes.js", "text/javascript; charset=utf-8", "addon-unicode-graphemes.js"),
 ];

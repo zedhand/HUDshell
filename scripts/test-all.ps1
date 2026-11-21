@@ -33,7 +33,7 @@ New-Item -ItemType Directory -Force $scratch | Out-Null
 $env:HUDSHELL_TEST_DIR = $scratch
 if ($Sandbox) { $env:HUDSHELL_SANDBOX = $Sandbox } else { $env:HUDSHELL_SANDBOX = $scratch }
 $Suite = @($Suite | ForEach-Object { $_ -split ',' } | Where-Object { $_ })
-$want = if ($Suite -contains 'all') { @('static', 'keys', 'width', 'hideshow', 'clickfocus', 'clipboard', 'autotest', 'ui', 'scrollback', 'ghost', 'attention', 'policy', 'place', 'dpi', 'text', 'reload', 'restore', 'recover', 'windows', 'winrestore', 'winmove', 'costwin', 'tileoff', 'qol', 'sessions', 'shells', 'layout', 'input', 'snap', 'windowsnap', 'kbd', 'cost', 'release', 'config', 'soak') + $(if ($Sandbox) { 'real' } else { @() }) } else { $Suite }
+$want = if ($Suite -contains 'all') { @('static', 'keys', 'width', 'hideshow', 'clickfocus', 'clipboard', 'autotest', 'ui', 'scrollback', 'ghost', 'attention', 'policy', 'place', 'dpi', 'text', 'reload', 'restore', 'recover', 'windows', 'winrestore', 'winmove', 'costwin', 'tileoff', 'tabsedit', 'tabsui', 'gamepos', 'qol', 'sessions', 'shells', 'layout', 'input', 'snap', 'windowsnap', 'kbd', 'cost', 'release', 'config', 'soak') + $(if ($Sandbox) { 'real' } else { @() }) } else { $Suite }
 
 $script:R = New-Object System.Collections.Generic.List[object]
 # Appended to every check name while a suite runs a second time on another monitor.
@@ -237,7 +237,7 @@ function Suite-Static {
   $exeText = $lat.GetString($b)
   $dist = Join-Path $root 'web\dist'
   $bad = @()
-  foreach ($f in 'index.html', 'app.js', 'xterm.js', 'xterm.css', 'addon-fit.js', 'addon-unicode11.js', 'addon-unicode-graphemes.js') {
+  foreach ($f in 'index.html', 'app.js', 'xterm.js', 'xterm.css', 'addon-fit.js', 'addon-serialize.js', 'addon-unicode11.js', 'addon-unicode-graphemes.js') {
     $bytes = [IO.File]::ReadAllBytes((Join-Path $dist $f))
     if (-not $exeText.Contains($lat.GetString($bytes))) { $bad += $f }
   }
@@ -1429,6 +1429,16 @@ function Suite-Windows {
 }
 
 # Moving a shell into another window, the theme reaching every window, and a window rescued after a display change (no OS input).
+# The scrollback length (the page's baseY) in the dump with a label.
+function Dump-Base($run, [string]$label) {
+  for ($k = 0; $k -lt $run.Count; $k++) {
+    if ($run[$k] -match ('DUMP label=' + [regex]::Escape($label) + '(\s|$)')) {
+      for ($j = $k + 1; $j -lt [Math]::Min($k + 6, $run.Count); $j++) { if ($run[$j] -match 'terminal dump:.*view=\[(\d+),(\d+)\]') { return [int]$Matches[2] } }
+    }
+  }
+  return -1
+}
+
 function Suite-WindowsMove {
   Write-Host "=== winmove: a shell moved into another window, theme in every window, a window off every screen comes back (no OS input) ==="
   $r = Run-Scenario @('--term', '--windowsmove', '--test-profiles', '--delay', '2') 120000
@@ -1441,6 +1451,9 @@ function Suite-WindowsMove {
   Check 'winmove' 'the moved shell kept running: what is typed into it shows up in its new window' (Dump-Has $r 'moved-three' 'MOVED-THREE')
   Check 'winmove' "moving a window's only shell takes the window with it: one window is left, holding 1, 3 and 2" ($l -and $l.N -eq 1 -and $l.Wins[0].Shells -eq '1,3,2') $(if ($l) { "n=$($l.N) [$($l.Wins[0].Shells)]" } else { 'no state' })
   Check 'winmove' 'that shell kept running too' (Dump-Has $r 'moved-two' 'MOVED-TWO')
+  $b1 = Dump-Base $r 'scroll-detached'; $b2 = Dump-Base $r 'moved-three'
+  Check 'winmove' 'a detached shell takes its scrollback along: 80 numbered lines were printed before the detach, and the new window has them (scrollback of at least 50 lines)' ($b1 -ge 50 -and (Dump-Has $r 'scroll-detached' 'SCROLL-LINE-80')) "scrollback lines in the new window: $b1"
+  Check 'winmove' 'a shell moved into an existing window takes its scrollback along too (at least 50 lines)' ($b2 -ge 50) "scrollback lines after the move: $b2"
   $mons = @(Get-Monitors); $vl = ($mons | Measure-Object -Property L -Minimum).Minimum; $vr = ($mons | Measure-Object -Property R -Maximum).Maximum
   Check 'winmove' 'a window put far off every screen comes back onto a screen after a display change message' ($o -and $o.Wins[0].L -ge $vl -and $o.Wins[0].R -le $vr -and (@($r | Where-Object { $_ -match 'display changed: the window was off every screen' }).Count -ge 1)) $(if ($o) { "left $($o.Wins[0].L), screens $vl..$vr" } else { 'no state' })
   Check 'winmove' 'no start failures logged and the run finished' ((@($r | Where-Object { $_ -match 'FAILED to start' }).Count -eq 0) -and (@($r | Where-Object { $_ -match 'AUTOTEST: finished' }).Count -eq 1))
@@ -1751,6 +1764,86 @@ function Suite-CostWindows {
   } finally { Stop-HUDshell }
 }
 
+# game_positions: the window goes back to where it was put while a given program was in front. The program in front is faked (no OS input).
+function Suite-GamePos {
+  Write-Host "=== gamepos: window places per program (the foreground program is faked; no OS input) ==="
+  $r = Run-Scenario @('--term', '--gamepos', '--game-positions', '--delay', '2') 90000
+  $a = Get-Windows $r 'a-again'; $b = Get-Windows $r 'b-again'; $o = Get-Windows $r 'other'; $x = Get-Windows $r 'explorer-not-kept'
+  $at = { param($w, $px, $py) $w -and $w.Wins.Count -eq 1 -and [Math]::Abs($w.Wins[0].L - $px) -le 2 -and [Math]::Abs($w.Wins[0].T - $py) -le 2 }
+  $pos = { param($w) if ($w) { "{0},{1}" -f $w.Wins[0].L, $w.Wins[0].T } else { 'no state' } }
+  Check 'gamepos' 'program A in front again: the window goes back to the place it was given while A was in front (300,300)' (& $at $a 300 300) (& $pos $a)
+  Check 'gamepos' 'program B in front: the window goes to B''s place (900,500)' (& $at $b 900 500) (& $pos $b)
+  Check 'gamepos' 'a program with no remembered place leaves the window where it is' (& $at $o 900 500) (& $pos $o)
+  Check 'gamepos' 'the desktop shell is not a program to remember: a move made while it was in front is not kept (A still goes to 300,300)' (& $at $x 300 300) (& $pos $x)
+  $fp = @($r | Where-Object { $_ -match 'FGPROBE some=' }) | Select-Object -Last 1
+  Check 'gamepos' 'the real lookup of the program in front gives a clean executable name (lower case, no folder) or nothing' ($fp -and (($fp -match 'some=false') -or ($fp -match 'exe=true clean=true'))) ($fp -replace '^\d+ ', '')
+  $named = @($r | Where-Object { ($_ -notmatch 'AUTOTEST t=') -and ($_ -match 'gamea|gameb|other\.exe') })
+  Check 'gamepos' 'the names of the programs are not written to the log' ($named.Count -eq 0) ($named | Select-Object -First 1)
+  $off = Run-Scenario @('--term', '--gamepos', '--delay', '2') 90000
+  $oa = Get-Windows $off 'a-again'; $ob = Get-Windows $off 'b-again'
+  Check 'gamepos' 'with game_positions off (the default) nothing is remembered and the window is never moved by the program in front' ((& $at $oa 900 500) -and (& $at $ob 900 500) -and (@($off | Where-Object { $_ -match 'game positions:' }).Count -eq 0)) ((& $pos $oa) + ' / ' + (& $pos $ob))
+  Check 'gamepos' 'no start failures logged' ((@($r + $off) | Where-Object { $_ -match 'FAILED to start' }).Count -eq 0)
+}
+
+# Tabs named by hand and moved: the host side (no OS input), and that they come back at the next start.
+function Suite-TabsEdit {
+  Write-Host "=== tabsedit: renaming and moving tabs, saved and restored (no OS input) ==="
+  $file = Join-Path $scratch 'session-tabs.json'
+  Remove-Item -LiteralPath $file -ErrorAction SilentlyContinue
+  $args2 = @('--test-profiles', '--restore-session', 'shells', '--session-file', $file, '--delay', '2')
+  $r = Run-Scenario (@('--term', '--tabsedit') + $args2) 90000
+  $l = Get-Ui $r 'te-labels'; $c = Get-Ui $r 'te-cleared'; $f = Get-Ui $r 'te-final'
+  Check 'tabsedit' 'after naming tab 2 "build server" and moving shell 3 to the front: shell 3 first, the named tab last' ($l -and $l.labels.Count -eq 3 -and $l.labels[2] -like '3 build server*' -and $l.labels[0] -notlike '*build*') $(if ($l) { $l.labels -join ' | ' } else { 'no dump' })
+  Check 'tabsedit' 'an empty name takes the name away again (the automatic label is back)' ($c -and $c.labels.Count -eq 3 -and ((@($c.labels | Where-Object { $_ -like '*build*' })).Count -eq 0)) $(if ($c) { $c.labels -join ' | ' } else { 'no dump' })
+  Check 'tabsedit' 'a name with a control character is cleaned (BEL dropped, "x" kept)' ($f -and (@($f.labels | Where-Object { $_ -match '^\d x(\s|$)' }).Count -eq 1)) $(if ($f) { $f.labels -join ' | ' } else { 'no dump' })
+  $j = $null
+  if (Test-Path -LiteralPath $file) { try { $j = Get-Content -LiteralPath $file -Raw | ConvertFrom-Json } catch { } }
+  Check 'tabsedit' 'the session file keeps the names in tab order' ($j -and @($j.names).Count -eq 3 -and $j.names[0] -ceq 'x' -and $j.names[2] -ceq 'build server') $(if ($j) { (@($j.names) -join ' | ') } else { 'no file' })
+  $r2 = Run-Scenario (@('--term', '--tabsload') + $args2) 90000
+  $u = Get-Ui $r2 'tl-labels'
+  Check 'tabsedit' 'the next start brings the names back on the same tabs' ($u -and $u.labels.Count -eq 3 -and $u.labels[0] -like '1 x*' -and $u.labels[2] -like '3 build server*') $(if ($u) { $u.labels -join ' | ' } else { 'no dump' })
+  Check 'tabsedit' 'no start failures logged' ((@($r + $r2) | Where-Object { $_ -match 'FAILED to start' }).Count -eq 0)
+}
+
+# Real mouse and keys on the tab strip: drag a tab to another place, double-click to rename.
+function Suite-TabsUi {
+  Write-Host "=== tabsui: real mouse drag of a tab and a double-click rename - do not touch mouse/keyboard ==="
+  $m = @(Get-Monitors) | Where-Object { $_.Primary } | Select-Object -First 1
+  Stop-HUDshell
+  GTSave
+  $p = $null
+  try {
+    $n = LineCount $log
+    $at = "{0},{1}" -f ($m.WL + 200), ($m.WT + 150)
+    $p = Start-Process $dbg -ArgumentList @('--term', '--inputtest', '--interactive', '--tabs', 'always', '--shells', '3', '--size', '900,520', '--at', $at, '--delay', '2') -PassThru
+    $u = $null; $st = $null
+    for ($i = 0; $i -lt 60 -and -not ($u -and @($u.rects.tabs).Count -eq 3); $i++) { Start-Sleep 1; $u = Last-Ui @(Cut $log $n); $st = Last-State @(Cut $log $n) }
+    Check 'tabsui' 'three tabs are on screen' ($u -and @($u.rects.tabs).Count -eq 3)
+    if (-not ($u -and @($u.rects.tabs).Count -eq 3)) { return }
+    $dpr = $u.rects.dpr
+    $center = { param($tab) @(($st.L + [int](($tab.r[0] + $tab.r[2] / 2) * $dpr)), ($st.T + [int](($tab.r[1] + $tab.r[3] / 2) * $dpr))) }
+    $ids0 = (@($u.rects.tabs) | ForEach-Object { $_.id }) -join ','
+    # drag the third tab onto the left half of the first
+    $a = & $center $u.rects.tabs[2]; $b = & $center $u.rects.tabs[0]
+    Drag-Mouse $a[0] $a[1] ($b[0] - [int]($u.rects.tabs[0].r[2] * $dpr / 4)) $b[1]
+    Start-Sleep 1
+    $u = Last-Ui @(Cut $log $n)
+    $ids1 = (@($u.rects.tabs) | ForEach-Object { $_.id }) -join ','
+    Check 'tabsui' 'dragging the third tab onto the first moves it to the front' ($ids0 -eq '1,2,3' -and $ids1 -eq '3,1,2') "tab order $ids0 -> $ids1"
+    # double-click the second tab and type a name
+    $c = & $center $u.rects.tabs[1]
+    [GT]::Move($c[0], $c[1]); Start-Sleep -Milliseconds 400
+    [GT]::MouseDown(); Start-Sleep -Milliseconds 80; [GT]::MouseUp(); Start-Sleep -Milliseconds 120
+    [GT]::MouseDown(); Start-Sleep -Milliseconds 80; [GT]::MouseUp(); Start-Sleep -Milliseconds 800
+    [GT]::Key(0x41); Start-Sleep -Milliseconds 150; [GT]::Key(0x42); Start-Sleep -Milliseconds 150; [GT]::Key(0x43); Start-Sleep -Milliseconds 300
+    Shot 'tabs-rename-typing' $st.L $st.T $st.R ($st.T + [int](80 * $dpr))
+    [GT]::Key(0x0D); Start-Sleep -Milliseconds 1500
+    $u = Last-Ui @(Cut $log $n)
+    Check 'tabsui' 'double-clicking a tab and typing a name renames it (abc)' ($u -and @($u.labels | Where-Object { $_ -match '^\d abc' }).Count -eq 1) $(if ($u) { $u.labels -join ' | ' } else { 'no dump' })
+    Check 'tabsui' 'no start failures logged' (@(Cut $log $n | Where-Object { $_ -match 'FAILED to start' }).Count -eq 0)
+  } finally { Stop-HUDshell; [GT]::RestoreCursor() }
+}
+
 # edge_tiling = false: dropping the window on the edge of a screen does not tile it (real mouse, an outer edge of a screen).
 function Suite-TileOff {
   Write-Host "=== tileoff: edge_tiling = false, real mouse drop on a screen edge - do not touch mouse/keyboard ==="
@@ -1851,6 +1944,9 @@ foreach ($s in $want) {
     'winmove' { Suite-WindowsMove }
     'costwin' { Suite-CostWindows }
     'tileoff' { Suite-TileOff }
+    'tabsedit' { Suite-TabsEdit }
+    'gamepos' { Suite-GamePos }
+    'tabsui' { Suite-TabsUi }
     'windowsnap' { Suite-WindowSnap }
     'input' { Suite-Input }
     'snap' { Suite-Snap }

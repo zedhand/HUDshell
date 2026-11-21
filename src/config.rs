@@ -192,6 +192,11 @@ pub struct Config {
     /// What maximizing (drag to the top edge, double-click the top strip) fills: `monitor` = the whole monitor, over the taskbar;
     /// `work` = the usable area, leaving the taskbar visible.
     pub maximize_area: String,
+    /// Remember the first window's place for each program that was in front when it was moved, and put it back when that program is in front
+    /// again. Opt in: it reads the name of the foreground program's executable (never window titles); the names stay in this file.
+    pub game_positions: bool,
+    /// The places `game_positions` keeps (written by HUDshell).
+    pub game_places: Vec<crate::gamepos::Place>,
     /// Dropping the window with the cursor on the left or right edge of a screen makes it fill that half of the screen (like a normal window).
     pub edge_tiling: bool,
     /// Size presets [width, height] in 96-dpi pixels for the size hotkey.
@@ -268,6 +273,8 @@ impl Default for Config {
             snap_margin: 8,
             maximize_area: "monitor".into(),
             edge_tiling: true,
+            game_positions: false,
+            game_places: Vec::new(),
             sizes: vec![[640, 360], [900, 520], [1280, 720]],
             active_opacity: None,
             idle_dim_seconds: 0,
@@ -340,6 +347,7 @@ pub fn path() -> PathBuf {
 pub const MIN_OPACITY: u32 = 20;
 
 fn validate(cfg: &mut Config) {
+    crate::gamepos::sanitize(&mut cfg.game_places);
     cfg.font_size = cfg.font_size.clamp(8, 48);
     cfg.text_scale = cfg.text_scale.clamp(50, 300);
     cfg.ui_scale = cfg.ui_scale.clamp(50, 300);

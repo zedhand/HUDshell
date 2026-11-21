@@ -11,7 +11,29 @@ suite had been run on it. CI (the `static` suite on GitHub's `windows-latest`) f
 wrong pane order. After the fix (00765f1) CI passed: **66 unit tests pass** and the release exe is 1.19 MB. That was **all** that had run for
 these features at the time; the desktop suites were run afterwards (see the latest full run below).
 
-## Extras after several windows (2026-11-21): final full run 501 pass, 0 fail, 3 warnings
+## Scrollback on moves, tab names and order, window places per program (2026-11-21): full run 528 pass, 0 fail, 3 warnings
+
+Full run (`scripts/test-all.ps1`, no sandbox) on the build with these three features: **528 pass, 0 fail, 3 warnings** (the two intentional `autotest`
+skips and the AltGr+Q limit). New or changed suites: tabsedit 6, tabsui 4, gamepos 8, winmove 11, costwin 5, tileoff 2; 77 unit tests; `cargo clippy -D warnings`
+clean for both builds. The `real` suite was not re-run after these three features.
+
+- **A moved shell takes its screen and scrollback along (`winmove`):** 80 numbered lines were printed in a shell before it was detached into a new window,
+  and the new window had at least 50 lines of scrollback with the last line on screen; the same for a shell moved into an existing window. This uses
+  the official `@xterm/addon-serialize` 0.14.0 (MIT, from the xterm.js project; pinned exactly, integrity hash in `package-lock.json`, the only change to the
+  lockfile). Not tried: a full-screen program (alternate screen) running in the moved shell; a very large scrollback (the limit is the `scrollback` setting).
+- **Tabs named by hand and moved (`tabsedit`, no OS input; `tabsui`, real mouse and keys):** a name given to a tab shows instead of the program's title; an empty
+  name brings the automatic label back; control characters are dropped and the length is capped at 40; names and tab order are saved in the session and
+  come back at the next start on the same tabs. With the real mouse, dragging the third tab onto the first moved it to the front, and a double-click on a
+  tab followed by typing a name and Enter renamed it. **Two defects were found by the real-mouse test and fixed:** the browser never delivered a
+  double-click because the tab strip is drawn again after the first press (now detected by hand), and the terminal took the keyboard back as soon as the
+  click grabbed it, closing the name box (now it leaves an open name box alone). With per-pane shell lists dragging a tab does nothing (it says so).
+- **Window places per program (`gamepos`, the program in front is faked; no OS input):** with `game_positions` on, a place given while program A was in front
+  is applied again when A comes back (300,300), B has its own (900,500), a program with no place and the desktop shell leave the window alone, no program
+  name is written to the log, and with the setting off (the default) nothing is remembered or moved. The real lookup of the program in front was checked for its
+  shape only (a lower-case executable name without a folder). Not tested with a real game; only the first window is moved.
+- **Cost of the extra window** (`costwin`) and **`edge_tiling = false`** (`tileoff`) are described above.
+
+## Extras after several windows (2026-11-21): earlier full run 501 pass, 0 fail, 3 warnings
 
 Built and tested after the several-windows work, then one full run on the final build (`scripts/test-all.ps1`, no sandbox): **501 pass, 0 fail,
 3 warnings** (the two intentional `autotest` skips and the AltGr+Q limit). Per suite: static 16 (72 unit tests), keys 6, width 3, hideshow 3,

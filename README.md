@@ -15,7 +15,8 @@ click-through by default, an explicit keyboard-focus toggle, and an adjustable o
 - **Grab / release keyboard focus** with a hotkey, or click the terminal while it is interactive.
 - **Opacity** from 20% to 100% (hotkeys, settings panel, or `config.json`).
 - **Several shells in one window** (up to 9): visible tabs, a compact overlay-only list, switch hotkeys that work while the game has the keyboard, tab names taken from each program's own window title (like a normal terminal tab), a label when a tab runs Claude Code, Codex or a similar tool, a mark on tabs with unseen output, and profiles (start folder, start command, accent colour).
-- **Several windows** (up to 4): move a shell into a window of its own (Shift+click on its tab, or a hotkey); the shell keeps running and is repainted there. Each window has its own shells (up to 9), layout, opacity and pointer mode. The hotkeys act on the window that was last active (a hotkey switches between windows), the tray menu has "all windows" items (ghost, show / hide), windows snap flush against each other and touching windows move together (hold Shift while dragging to move one alone), closing the last shell of a window closes it, and `restore_session` brings all windows back where they were.
+- **Tabs by hand**: double-click a tab to give it a name (Enter keeps it, Esc cancels, an empty name goes back to the automatic one); drag a tab sideways to move it in the strip. Names and order are part of the saved session.
+- **Several windows** (up to 4): move a shell into a window of its own (Shift+click on its tab, or a hotkey); the shell keeps running and takes its screen and scrollback along. Each window has its own shells (up to 9), layout, opacity and pointer mode. The hotkeys act on the window that was last active (a hotkey switches between windows), the tray menu has "all windows" items (ghost, show / hide), windows snap flush against each other and touching windows move together (hold Shift while dragging to move one alone), closing the last shell of a window closes it, and `restore_session` brings all windows back where they were.
 - **Split panes**: show two shells side by side or stacked, or four in a 2 x 2 grid, in the same window; a hotkey moves the keyboard between panes and another zooms one pane to the whole window. A window too small for the layout shows fewer panes. Equal halves by default; uneven splits, draggable dividers and a separate list of shells per pane are options.
 - **Text size**: each terminal keeps its own text size (bigger / smaller / reset hotkeys act on the focused one), plus a global percent scale, a scale for HUDshell's own text (tabs, pane names, overlays), line height and letter spacing; all optional settings, all off at their defaults.
 - **Moving**: drag the slim strip along the top edge (resize from any edge or corner); the window snaps magnetically to screen edges, **dropping it near a corner pulls it flush into the corner (corners square, no gap)**, **drag it to the top edge of a screen to maximize it** (over the taskbar by default; `maximize_area`), drag the strip of a maximized window to restore it, or double-click the strip to maximize / restore.
@@ -111,6 +112,8 @@ values are range-checked, and an unreadable file is kept as `config.json.bad-N` 
 | `right_click` | `"off"` | `"paste"`: right-click copies a selection, or pastes when nothing is selected |
 | `osc52` | `"off"` | `"write"`: let programs set the clipboard (OSC 52). Reads are never answered |
 | `snap_distance` / `snap_margin` | `16` / `8` | pixels (96-dpi): dragging this close to a screen edge snaps to it (0 = off); gap kept from the edge. Within 3 x `snap_distance` + `snap_margin` of a corner the window goes flush into the corner instead (no gap) |
+| `game_positions` | `false` | opt in: HUDshell remembers where the first window was put while a given program was in front, and puts it back there when that program comes to the front again (looks only at the program's executable name, never window titles; the names are kept in `game_places` in this file and never logged) |
+| `game_places` | `[]` | the places `game_positions` keeps, written by HUDshell: `{ "app": "game.exe", "rect": [x, y, width, height] }` |
 | `edge_tiling` | `true` | dropping the window with the cursor on the left or right edge of a screen makes it fill that half (drag it away to restore its size); the top edge maximizes |
 | `maximize_area` | `monitor` | what maximizing fills: `monitor` = the whole screen, over the taskbar; `work` = the usable area, taskbar left visible |
 | `sizes` | `[[640,360],[900,520],[1280,720]]` | size presets (96-dpi pixels) for the size hotkey |
@@ -147,7 +150,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Third-party components
 
-[xterm.js](https://github.com/xtermjs/xterm.js) 6.0.0 and its fit / Unicode addons (MIT), the Rust crates in
+[xterm.js](https://github.com/xtermjs/xterm.js) 6.0.0 and its fit / serialize / Unicode addons (MIT), the Rust crates in
 `Cargo.lock`, and the Microsoft Edge WebView2 Runtime.
 
 ## Licence

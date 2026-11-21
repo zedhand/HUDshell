@@ -32,6 +32,8 @@
                flex: 0 1 auto; min-width: 0; max-width: 40ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   #tabs .tab.on { opacity: 1; border-bottom-color: var(--accent, var(--fg)); }
   #tabs .tab .mark { margin-left: 6px; }
+  #tabs .tab.drop { box-shadow: inset 2px 0 0 var(--fg); }
+  #tabs .tab input { font: inherit; color: inherit; background: transparent; border: 0; border-bottom: 1px solid var(--fg); outline: 0; width: 12em; padding: 0; }
   #tabs .tab .mark.bang { font-weight: 700; }
   /* Shell list overlay (quick glance) and profile picker: plain text boxes like the settings panel. */
   #shells, #picker { display: none; position: absolute; top: 34px; left: 50%; transform: translateX(-50%); z-index: 12; margin: 0;
@@ -80,6 +82,7 @@
 <div id="settings"></div>
 <script src="xterm.js"></script>
 <script src="addon-fit.js"></script>
+<script src="addon-serialize.js"></script>
 <script src="addon-unicode11.js"></script>
 <script src="addon-unicode-graphemes.js"></script>
 <script src="app.js"></script>

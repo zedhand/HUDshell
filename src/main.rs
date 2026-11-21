@@ -18,6 +18,7 @@
 
 mod assets;
 mod config;
+mod gamepos;
 #[cfg(feature = "harness")]
 mod harness;
 mod layout;
@@ -84,6 +85,8 @@ const WM_TRAY: u32 = 0x8000 + 3;
 const WM_APP_RESTORE_WINDOWS: u32 = 0x8000 + 10;
 /// Posted to a window: move shell `wparam` of that window into a window of its own (the page asked, with Shift+click on its tab).
 pub const WM_APP_DETACH: u32 = 0x8000 + 11;
+/// Posted to a window when the page has handed over the snapshot of a shell that is about to move (wparam = the shell).
+const WM_APP_MOVE_READY: u32 = 0x8000 + 12;
 /// Height of the slim drag strip along the top edge, in 96-dpi pixels (scaled per monitor).
 const DRAG_STRIP_PX: i32 = 22;
 /// Width of the invisible resize border on every edge, in 96-dpi pixels.
@@ -1294,6 +1297,16 @@ unsafe fn apply_config_change(hwnd: HWND, new: &config::Config, changed: &[Strin
             let _ = unsafe { KillTimer(Some(hwnd), 4) };
         }
     }
+    if has("game_positions")
+        && let Some((_, first)) = perwin::all().first().copied()
+    {
+        let h = HWND(first as *mut std::ffi::c_void);
+        if new.game_positions {
+            let _ = unsafe { SetTimer(Some(h), 7, 1000, None) };
+        } else {
+            let _ = unsafe { KillTimer(Some(h), 7) };
+        }
+    }
     if has("click_through") {
         CLICK_THROUGH.store(new.click_through, Ordering::SeqCst);
         unsafe { refresh_pointer_style(hwnd) };
@@ -1389,6 +1402,10 @@ fn save_session() {
             (sh.entries().iter().map(|e| (e.id, e.profile.clone())).collect(), sh.active())
         };
         let mut s = session::Session::capture(&entries, active, &layout_lock());
+        let names: Vec<String> = shells_lock().entries().iter().map(|e| e.name.clone()).collect();
+        if names.iter().any(|n| !n.is_empty()) {
+            s.names = names;
+        }
         let mut r = RECT::default();
         if unsafe { GetWindowRect(HWND(h as *mut std::ffi::c_void), &mut r) }.is_ok() {
             if MAXIMIZED.load(Ordering::SeqCst)
@@ -1423,6 +1440,11 @@ fn restore_session(sess: session::Session) {
         new_shell(Some(name));
     }
     let ids = shells_lock().ids();
+    if sess.names.len() == ids.len() {
+        for (id, name) in ids.iter().zip(&sess.names) {
+            shells_lock().rename(*id, name);
+        }
+    }
     match sess.resolve(&ids) {
         Some(r) => {
             layout_lock().restore(r.preset, r.split, r.slots, r.groups, r.focus, &ids);
@@ -1598,7 +1620,7 @@ unsafe fn save_geometry(hwnd: HWND) {
     if perwin::all().first().map(|(_, h)| *h) != Some(hwnd.0 as isize) {
         return;
     }
-    if !PERSIST.load(Ordering::SeqCst) || !VISIBLE.load(Ordering::SeqCst) {
+    if !VISIBLE.load(Ordering::SeqCst) {
         return;
     }
     let mut r = RECT::default();
@@ -1607,10 +1629,86 @@ unsafe fn save_geometry(hwnd: HWND) {
             && let Some(rr) = *lock_or_recover(&RESTORE_RECT) {
                 r = rr;
             }
+        remember_game_place(&r);
+        if !PERSIST.load(Ordering::SeqCst) {
+            return;
+        }
         cfg_update(|c| {
             c.window = Some(config::Geometry { x: r.left, y: r.top, w: r.right - r.left, h: r.bottom - r.top })
         });
     }
+}
+
+// ---- window places per program (config game_positions) ----------------------------------------------------------
+
+/// The program in front (the file name of its executable, lower case), or None when it is HUDshell itself, the desktop shell or unknown.
+/// Window titles are never read, and the name is never written to the log.
+fn foreground_app() -> Option<String> {
+    #[cfg(feature = "harness")]
+    if let Some(f) = lock_or_recover(&FAKE_FOREGROUND).clone() {
+        return if gamepos::ignored(&f) { None } else { Some(f) };
+    }
+    use windows::Win32::System::Threading::{GetCurrentProcessId, OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION};
+    unsafe {
+        let fg = GetForegroundWindow();
+        if fg.0.is_null() {
+            return None;
+        }
+        let mut pid = 0u32;
+        GetWindowThreadProcessId(fg, Some(&mut pid));
+        if pid == 0 || pid == GetCurrentProcessId() {
+            return None;
+        }
+        let h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).ok()?;
+        let mut buf = [0u16; 520];
+        let mut n = buf.len() as u32;
+        let ok = QueryFullProcessImageNameW(h, PROCESS_NAME_WIN32, windows::core::PWSTR(buf.as_mut_ptr()), &mut n).is_ok();
+        let _ = windows::Win32::Foundation::CloseHandle(h);
+        if !ok {
+            return None;
+        }
+        let app = gamepos::app_key(&String::from_utf16_lossy(&buf[..n as usize]));
+        if gamepos::ignored(&app) { None } else { Some(app) }
+    }
+}
+
+#[cfg(feature = "harness")]
+static FAKE_FOREGROUND: Mutex<Option<String>> = Mutex::new(None);
+/// The program whose saved place was applied last (so a place is applied when the program comes to the front, not every second).
+static LAST_GAME: Mutex<Option<String>> = Mutex::new(None);
+
+/// The first window was placed (moved, docked, resized): with `game_positions` on, remember it for the program in front.
+fn remember_game_place(r: &RECT) {
+    if !cfg().game_positions {
+        return;
+    }
+    let Some(app) = foreground_app() else { return };
+    cfg_update(|c| gamepos::remember(&mut c.game_places, &app, [r.left, r.top, r.right - r.left, r.bottom - r.top]));
+    *lock_or_recover(&LAST_GAME) = Some(app); // it is where the user put it now
+    log("game positions: the window's place was remembered for the program in front");
+}
+
+/// Every second (timer 7, only with `game_positions` on): when a program with a remembered place comes to the front, the first window goes there.
+unsafe fn poll_game_places() {
+    let c = cfg();
+    if !c.game_positions {
+        return;
+    }
+    let Some(app) = foreground_app() else { return };
+    if lock_or_recover(&LAST_GAME).as_deref() == Some(app.as_str()) {
+        return;
+    }
+    *lock_or_recover(&LAST_GAME) = Some(app.clone());
+    let Some([x, y, w, h]) = gamepos::lookup(&c.game_places, &app) else { return };
+    let Some((_, first)) = perwin::all().first().copied() else { return };
+    if lock_or_recover(&SNAP_DRAG).is_some() || !on_screen(&config::Geometry { x, y, w, h }) {
+        return;
+    }
+    let hwnd = HWND(first as *mut std::ffi::c_void);
+    let _w = perwin::enter(perwin::all()[0].0);
+    unsafe { restore_window(hwnd, None) };
+    let _ = unsafe { SetWindowPos(hwnd, None, x, y, w, h, SWP_NOZORDER | SWP_NOACTIVATE) };
+    log("game positions: the window went to the place remembered for the program in front");
 }
 
 // ---- tray icon -----------------------------------------------------------------------------
@@ -1684,7 +1782,7 @@ pub fn push_tabs() {
     let list: Vec<serde_json::Value> = sh
         .entries()
         .iter()
-        .map(|e| serde_json::json!({ "id": e.id, "profile": e.profile, "color": profile_named(&e.profile).color }))
+        .map(|e| serde_json::json!({ "id": e.id, "profile": e.profile, "name": e.name, "color": profile_named(&e.profile).color }))
         .collect();
     let names: Vec<String> = c.profiles.iter().map(|p| p.name.clone()).collect();
     wv::post(
@@ -1713,6 +1811,26 @@ pub fn push_layout() {
         })
         .to_string(),
     );
+}
+
+/// The user named a tab by hand (double-click on it in the tab strip, then type); an empty name goes back to the automatic one.
+pub fn on_tab_rename(id: u32, name: &str) {
+    if shells_lock().rename(id, name) {
+        log(&format!("tab {id} renamed by hand"));
+        push_tabs();
+    }
+}
+
+/// A tab was dragged to another place in the tab strip. With per-pane lists the strip shows one pane's own shells, so it keeps its order.
+pub fn on_tab_reorder(id: u32, to: usize) {
+    if layout_lock().own() {
+        wv::post("{\"t\":\"flash\",\"text\":\"tabs keep their order with per-pane shell lists\"}");
+        return;
+    }
+    if shells_lock().move_to(id, to) {
+        log(&format!("tab {id} moved to place {}", to + 1));
+        push_tabs();
+    }
 }
 
 /// The focused pane changed: its shell (if any) becomes the active one.
@@ -2540,9 +2658,84 @@ unsafe fn create_window(id: u32, profile: &str, at: Option<[i32; 4]>) -> Option<
     Some(serial)
 }
 
-/// Move shell `id` of the current window into a window of its own. The shell keeps running; the new window starts with a blank view, so the
-/// shell is asked to repaint (see `pty::redraw`).
+#[derive(Clone, Copy, PartialEq)]
+enum MoveKind {
+    Detach,
+    ToNext,
+}
+
+/// Moves waiting for the page's snapshot of the shell: (shell, kind, window it leaves, when asked).
+static PENDING_MOVES: Mutex<Vec<(u32, MoveKind, u32, std::time::Instant)>> = Mutex::new(Vec::new());
+/// The terminal text (screen and scrollback) a page handed over for a shell that is moving, until the shell's new page is ready.
+static SNAPSHOTS: Mutex<Vec<(u32, String)>> = Mutex::new(Vec::new());
+const SNAPSHOT_WAIT_MS: u64 = 1500;
+
+/// A shell is about to move into another window: ask its page for a snapshot of the screen and scrollback first (the new page has no history
+/// of it). The move itself happens when the snapshot arrives (`on_snapshot`), or after `SNAPSHOT_WAIT_MS` without it.
+fn begin_move(id: u32, kind: MoveKind) {
+    if id == 0 || PENDING_MOVES.lock().unwrap_or_else(|p| p.into_inner()).iter().any(|(i, ..)| *i == id) {
+        return;
+    }
+    PENDING_MOVES.lock().unwrap_or_else(|p| p.into_inner()).push((id, kind, perwin::current(), std::time::Instant::now()));
+    wv::post(&serde_json::json!({ "t": "snapshot", "s": id }).to_string());
+    let hwnd = perwin::current_hwnd();
+    if hwnd != 0 {
+        let _ = unsafe { SetTimer(Some(HWND(hwnd as *mut std::ffi::c_void)), 8, SNAPSHOT_WAIT_MS as u32, None) };
+    }
+}
+
+/// The page handed over the snapshot of shell `id`: keep it and let the window that is waiting carry the move out.
+pub fn on_snapshot(id: u32, data: &str) {
+    let from = PENDING_MOVES.lock().unwrap_or_else(|p| p.into_inner()).iter().find(|(i, ..)| *i == id).map(|(_, _, f, _)| *f);
+    let Some(from) = from else { return };
+    if !data.is_empty() {
+        let mut s = SNAPSHOTS.lock().unwrap_or_else(|p| p.into_inner());
+        s.retain(|(i, _)| *i != id);
+        s.push((id, data.to_string()));
+    }
+    if let Some(h) = perwin::hwnd_of(from) {
+        // posted: a window cannot be created from inside the page's message callback
+        let _ = unsafe { PostMessageW(Some(HWND(h as *mut std::ffi::c_void)), WM_APP_MOVE_READY, WPARAM(id as usize), LPARAM(0)) };
+    }
+}
+
+/// Carry out a move that was waiting for its snapshot (the current window is the one the shell leaves).
+fn finish_move(id: u32) {
+    let kind = {
+        let mut p = PENDING_MOVES.lock().unwrap_or_else(|p| p.into_inner());
+        let Some(i) = p.iter().position(|(s, ..)| *s == id) else { return };
+        p.remove(i).1
+    };
+    match kind {
+        MoveKind::Detach => detach_shell_now(id),
+        MoveKind::ToNext => move_shell_now(id),
+    }
+}
+
+/// Timer 8 of a window: moves whose snapshot never came go ahead without it.
+fn finish_overdue_moves() {
+    let me = perwin::current();
+    let due: Vec<u32> = PENDING_MOVES
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .iter()
+        .filter(|(_, _, from, at)| *from == me && at.elapsed().as_millis() as u64 >= SNAPSHOT_WAIT_MS - 100)
+        .map(|(i, ..)| *i)
+        .collect();
+    for id in due {
+        log(&format!("move of shell {id}: no snapshot came, going ahead without its scrollback"));
+        finish_move(id);
+    }
+}
+
+/// Move shell `id` of the current window into a window of its own (it keeps its screen and scrollback: see `begin_move`).
 pub fn detach_shell(id: u32) {
+    begin_move(id, MoveKind::Detach);
+}
+
+/// The detach itself. The shell keeps running; the new window starts with a blank view, which the snapshot fills, and the shell is asked to
+/// repaint (see `pty::redraw`).
+fn detach_shell_now(id: u32) {
     if shells_lock().len() <= 1 {
         log("detach refused: a window's only shell stays where it is");
         wv::post("{\"t\":\"flash\",\"text\":\"a window needs at least one shell\"}");
@@ -2587,6 +2780,14 @@ pub fn redraw_moved_shell(id: u32, cols: i64, rows: i64) {
     if let Some(i) = p.iter().position(|s| *s == id) {
         p.remove(i);
         drop(p);
+        // the scrollback and screen the old page handed over come first, then the shell repaints itself over the screen part
+        let snap = {
+            let mut s = SNAPSHOTS.lock().unwrap_or_else(|p| p.into_inner());
+            s.iter().position(|(i, _)| *i == id).map(|k| s.remove(k).1)
+        };
+        if let Some(data) = snap {
+            wv::post(&serde_json::json!({ "t": "restore", "s": id, "data": data }).to_string());
+        }
         pty::redraw(id, cols, rows);
         log(&format!("shell {id}: asked to repaint in its new window ({cols}x{rows})"));
     }
@@ -2608,11 +2809,19 @@ fn move_active_shell_to_next_window() {
         wv::post("{\"t\":\"flash\",\"text\":\"there is only one window\"}");
         return;
     }
-    let id = shells_lock().active();
+    begin_move(shells_lock().active(), MoveKind::ToNext);
+}
+
+/// The move into the next window itself (after the snapshot, see `begin_move`).
+fn move_shell_now(id: u32) {
+    let all = perwin::all();
+    if all.len() < 2 {
+        return;
+    }
     let from = perwin::current();
     let Some(i) = all.iter().position(|(s, _)| *s == from) else { return };
     let (to, _) = all[(i + 1) % all.len()];
-    if id == 0 {
+    if id == 0 || shells_lock().position(id).is_none() {
         return;
     }
     {
@@ -2933,6 +3142,10 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 detach_shell(wparam.0 as u32);
                 LRESULT(0)
             }
+            WM_APP_MOVE_READY => {
+                finish_move(wparam.0 as u32);
+                LRESULT(0)
+            }
             pty::WM_APP_PTY_EXIT => {
                 pump_all_windows();
                 wv::notify_exit(wparam.0 as pty::SessionId);
@@ -2946,6 +3159,11 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             WM_TIMER => {
                 if wparam.0 == 4 {
                     idle_tick(hwnd);
+                } else if wparam.0 == 7 {
+                    poll_game_places();
+                } else if wparam.0 == 8 {
+                    let _ = KillTimer(Some(hwnd), 8);
+                    finish_overdue_moves();
                 } else if wparam.0 == 5 {
                     poll_programs();
                 } else if wparam.0 == 6 {
@@ -3217,6 +3435,9 @@ fn main() -> windows::core::Result<()> {
                     }
                     if PERSIST.load(Ordering::SeqCst) {
                         let _ = SetTimer(Some(hwnd), 6, 1500, None); // watch config.json for edits
+                    }
+                    if loaded.game_positions {
+                        let _ = SetTimer(Some(hwnd), 7, 1000, None);
                     }
                     #[cfg(feature = "harness")]
                     harness::arm(hwnd);

@@ -107,6 +107,9 @@
     });
     const fit = new FitAddon.FitAddon();
     term.loadAddon(fit);
+    // Serialize: lets a shell that moves into another window take its screen and scrollback along (see the 'snapshot' message).
+    const ser = new SerializeAddon.SerializeAddon();
+    term.loadAddon(ser);
     try {
       if (uni === '11') {
         term.loadAddon(new Unicode11Addon.Unicode11Addon());
@@ -118,7 +121,7 @@
     } catch (e) {
       send({ t: 'jserror', where: 'unicode-addon', msg: String(e) });
     }
-    const v = { id, term, fit, pane, label, base: curBase, exited: false, lastSize: '', kitty: { flags: 0, stack: [] },
+    const v = { id, term, fit, ser, pane, label, base: curBase, exited: false, lastSize: '', kitty: { flags: 0, stack: [] },
                title: '', prog: '', unread: false, attn: false, profile: '', color: '' };
     // The program's own window title (OSC 0 / 2) names the tab; control characters are never shown.
     term.onTitleChange((t) => {
@@ -433,6 +436,7 @@
   // What the tab says: the program's own title (like a normal terminal tab), else the profile name; with the
   // program running in it in front when the host recognised one (config tab_program).
   const labelOf = (e) => {
+    if (e.name) return String(e.name).slice(0, 40); // a name the user gave the tab by hand wins over everything
     const v = views.get(e.id);
     const t = v && v.title && !isExePath(v.title) ? v.title : '';
     const base = (t || e.profile || ('shell ' + e.id)).slice(0, 40);
@@ -447,7 +451,9 @@
     return tabs.list;
   }
   const stripWanted = () => tabs.mode === 'always' || (tabs.mode === 'auto' && stripList().length > 1);
+  let renaming = false; // a tab name is being typed: the strip is not drawn again and the terminal does not take the keyboard
   function renderTabs() {
+    if (renaming) return;
     tabsEl.textContent = '';
     stripList().forEach((e, i) => {
       const d = document.createElement('div');
@@ -466,11 +472,59 @@
     }
     updateLabels();
   }
+  // Press on a tab: Shift+click moves that shell into a window of its own, a plain click switches to it. Dragging a tab sideways moves it to
+  // another place in the strip (the tab under the cursor when the button is released); a double-click renames it.
+  let tabDrag = null;
   tabsEl.addEventListener('mousedown', (e) => {
+    if (e.target.tagName === 'INPUT') return;
     const t = e.target.closest('.tab');
-    // Shift+click moves that shell into a window of its own; a plain click switches to it.
-    if (t) send({ t: e.shiftKey ? 'detach' : 'switch', s: Number(t.dataset.id) });
+    if (!t) return;
+    const id = Number(t.dataset.id);
+    if (e.button === 0 && !e.shiftKey) {
+      // two presses on the same tab in quick succession = double-click: rename (the strip is drawn again after the first press, so the
+      // browser's own dblclick never sees one element)
+      const now = Date.now();
+      if (lastTabPress.id === id && now - lastTabPress.at < 450) { lastTabPress = { id: 0, at: 0 }; tabDrag = null; e.preventDefault(); startRename(id); return; }
+      lastTabPress = { id, at: now };
+      tabDrag = { id, x: e.clientX, moved: false };
+    }
+    send({ t: e.shiftKey ? 'detach' : 'switch', s: id });
   });
+  let lastTabPress = { id: 0, at: 0 };
+  function tabIndexAt(x) {
+    const tabsNow = [...tabsEl.querySelectorAll('.tab')];
+    let best = tabsNow.length - 1;
+    for (let i = 0; i < tabsNow.length; i++) { const r = tabsNow[i].getBoundingClientRect(); if (x < r.left + r.width / 2) { best = i; break; } }
+    return Math.max(0, best);
+  }
+  window.addEventListener('mousemove', (e) => {
+    if (!tabDrag) return;
+    if (!tabDrag.moved && Math.abs(e.clientX - tabDrag.x) < 8) return;
+    tabDrag.moved = true;
+    const at = tabIndexAt(e.clientX);
+    [...tabsEl.querySelectorAll('.tab')].forEach((el, i) => el.classList.toggle('drop', i === at));
+  });
+  window.addEventListener('mouseup', (e) => {
+    const d = tabDrag; tabDrag = null;
+    [...tabsEl.querySelectorAll('.tab')].forEach((el) => el.classList.remove('drop'));
+    if (d && d.moved) { const ids = stripList().map((x) => x.id); const to = tabIndexAt(e.clientX); if (ids[to] !== d.id) send({ t: 'reorder', s: d.id, to }); }
+  });
+  function startRename(id) {
+    const t = tabsEl.querySelector('.tab[data-id="' + id + '"]');
+    if (!t) return;
+    renaming = true;
+    const entry = tabs.list.find((x) => x.id === id);
+    const input = document.createElement('input');
+    input.value = entry && entry.name ? entry.name : '';
+    input.placeholder = 'name (empty = automatic)';
+    input.maxLength = 40;
+    t.textContent = '';
+    t.appendChild(input);
+    input.focus();
+    const done = (commit) => { if (!renaming) return; renaming = false; if (commit) send({ t: 'rename', s: id, name: input.value }); renderTabs(); const a = active(); if (a) a.term.focus(); };
+    input.addEventListener('keydown', (k) => { k.stopPropagation(); if (k.key === 'Enter') done(true); else if (k.key === 'Escape') done(false); });
+    input.addEventListener('blur', () => done(false));
+  }
   let overlayTimer;
   function listText() {
     return stripList().map((e, i) => (e.id === activeId ? '\u25b6 ' : '  ') + (i + 1) + ' ' + labelOf(e) + (markOf(e) ? '  ' + markOf(e) : '')).join('\n');
@@ -522,6 +576,17 @@
       }
       case 'show':
         showView(sid);
+        break;
+      case 'snapshot': {
+        // The host is about to move this shell into another window: hand over its screen and scrollback as terminal text.
+        let data = '';
+        try { if (v) data = v.ser.serialize(); } catch (e) { send({ t: 'jserror', where: 'serialize', msg: String(e) }); }
+        sendS(sid, { t: 'snap', data });
+        break;
+      }
+      case 'restore':
+        // What the old window's page serialized: written before the shell repaints itself, so the scrollback comes along.
+        if (v && typeof m.data === 'string' && m.data) v.term.write(m.data);
         break;
       case 'close': closeView(sid); renderTabs(); break;
       case 'layout':
@@ -578,7 +643,7 @@
           v.term.write('\r\n[session ended - press Enter to start a new shell, or Ctrl+Alt+Q to quit HUDshell]\r\n');
         }
         break;
-      case 'focus': { const a = active(); if (a) a.term.focus(); break; }
+      case 'focus': { const a = active(); if (a && !renaming) a.term.focus(); break; } // (not while a tab is being renamed)
       case 'cue':
         pulseCue();
         break;
@@ -652,7 +717,8 @@
           const l = b.getLine(b.viewportY + i);
           lines.push(l ? l.translateToString(true) : '');
         }
-        send({ t: 'dump', s: d.id, cols: term.cols, rows: term.rows, buf: b.type, modes: term.modes,
+        const top = b.getLine(0);
+        send({ t: 'dump', s: d.id, cols: term.cols, rows: term.rows, buf: b.type, modes: term.modes, first: top ? top.translateToString(true) : '',
                cursor: [b.cursorX, b.cursorY], unicode: uni, view: [b.viewportY, b.baseY],
                cue: document.body.classList.contains('cue'), fs: term.options.fontSize,
                ui: { strip: document.body.classList.contains('tabs-on'), active: activeId,
@@ -812,7 +878,7 @@
     send({ t: 'click' });
   }, true);
 
-  window.addEventListener('focus', () => { const a = active(); if (a) a.term.focus(); });
+  window.addEventListener('focus', () => { const a = active(); if (a && !renaming) a.term.focus(); });
 
   // ---- start: session 1 exists from the beginning ------------------------------------------------
   const first = createView(firstId);
