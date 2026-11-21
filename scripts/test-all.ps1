@@ -97,6 +97,8 @@ public static class GT {
   // WM_INPUTLANGCHANGEREQUEST (0x50) to the window that has the keyboard focus, as the language bar would send it.
   public static void RequestLayout(IntPtr hkl) { IntPtr f = FocusHwnd(); if (f != IntPtr.Zero) PostMessage(f, 0x50, IntPtr.Zero, hkl); }
   public static int ScanKey(char c, IntPtr hkl) { return VkKeyScanEx(c, hkl); }
+  [DllImport("user32.dll")] static extern bool UnloadKeyboardLayout(IntPtr h);
+  public static bool UnloadLayout(IntPtr h) { return UnloadKeyboardLayout(h); }
   [DllImport("user32.dll")] static extern int GetKeyboardLayoutList(int n, IntPtr[] list);
   public static long[] InstalledLayouts() { int n = GetKeyboardLayoutList(0, null); var a = new IntPtr[n]; GetKeyboardLayoutList(n, a); var r = new long[n]; for (int i = 0; i < n; i++) r[i] = a[i].ToInt64() & 0xFFFFFFFFL; return r; }
   [DllImport("user32.dll")] static extern int ToUnicodeEx(uint vk, uint sc, byte[] state, [MarshalAs(UnmanagedType.LPWStr)] StringBuilder buf, int len, uint flags, IntPtr hkl);
@@ -1819,6 +1821,11 @@ function Suite-AltMove {
 # and committed: the terminal must show real Japanese / Chinese characters. The layout is switched in HUDshell's window only and put back.
 function Suite-KbdAny {
   Write-Host "=== kbdany: other installed keyboard layouts and input methods, real key presses - do not touch mouse/keyboard ==="
+  # layouts that need no language pack: loaded for this session only (the language list is not touched) and unloaded again at the end
+  $loaded = New-Object System.Collections.Generic.List[IntPtr]
+  $before = @([GT]::InstalledLayouts())
+  foreach ($klid in '00000419', '0000041D', '00000411', '00000804', '00000412') { $h0 = [GT]::LoadLayout($klid); if ($h0 -ne [IntPtr]::Zero -and ($before -notcontains ($h0.ToInt64() -band 0xFFFFFFFF))) { $loaded.Add($h0) } }
+  if ($script:ImeHkl) { $h0 = [GT]::LoadLayout($script:ImeHkl); if ($h0 -ne [IntPtr]::Zero -and ($before -notcontains ($h0.ToInt64() -band 0xFFFFFFFF))) { $loaded.Add($h0) } }
   $installed = @([GT]::InstalledLayouts())
   # a layout handle is (layout / device id) << 16 | language id: US keyboards (0x0409 in the high half, whatever the language) and the German and French
   # layouts (tested in `kbd`) are left out
@@ -1894,7 +1901,178 @@ function Suite-KbdAny {
     Start-Sleep -Milliseconds 800
     for ($try = 0; $try -lt 3 -and [GT]::ForegroundLayout() -ne $origLayout; $try++) { [GT]::RestoreSystemLayout($origLayout); Start-Sleep -Milliseconds 1500 }
     Check 'kbdany' 'your keyboard layout is back to what it was before the test' ([GT]::ForegroundLayout() -eq $origLayout) ('was {0:X8}, now {1:X8}' -f $origLayout, [GT]::ForegroundLayout())
+    foreach ($h0 in $loaded) { [void][GT]::UnloadLayout($h0) }
+    Check 'kbdany' 'the layouts the test loaded were unloaded again (your list of layouts is as before)' (@([GT]::InstalledLayouts()).Count -eq $before.Count) ("{0} -> {1}" -f $before.Count, @([GT]::InstalledLayouts()).Count)
   }
+}
+
+# ---- display scaling, set by the script (and always put back) -----------------------------------------------------------------------------------
+# Windows has no documented call for this; Settings uses DisplayConfigSetDeviceInfo with an undocumented request type, which is what this does. The scaling of
+# every screen is read first and put back in a finally block, and checked.
+function Ensure-DispCfg {
+  if (([System.Management.Automation.PSTypeName]'DispCfg').Type) { return }
+  Add-Type -TypeDefinition @'
+using System; using System.Runtime.InteropServices; using System.Collections.Generic;
+public static class DispCfg {
+  [StructLayout(LayoutKind.Sequential)] public struct LUID { public uint Low; public int High; }
+  [StructLayout(LayoutKind.Sequential)] struct SRC { public LUID adapter; public uint id; public uint modeIdx; public uint status; }
+  [StructLayout(LayoutKind.Sequential)] struct RAT { public uint n, d; }
+  [StructLayout(LayoutKind.Sequential)] struct TGT { public LUID adapter; public uint id; public uint modeIdx; public uint tech; public uint rot; public uint scaling; public RAT rate; public uint order; public int avail; public uint status; }
+  [StructLayout(LayoutKind.Sequential)] struct PATH { public SRC src; public TGT tgt; public uint flags; }
+  [StructLayout(LayoutKind.Explicit, Size = 64)] struct MODE { [FieldOffset(0)] public uint type; [FieldOffset(4)] public uint id; [FieldOffset(8)] public LUID adapter; [FieldOffset(16)] public uint w; [FieldOffset(20)] public uint h; [FieldOffset(24)] public uint fmt; [FieldOffset(28)] public int px; [FieldOffset(32)] public int py; }
+  [StructLayout(LayoutKind.Sequential)] struct HDR { public int type; public uint size; public LUID adapter; public uint id; }
+  [StructLayout(LayoutKind.Sequential)] struct GETD { public HDR h; public int min, cur, max; }
+  [StructLayout(LayoutKind.Sequential)] struct SETD { public HDR h; public int rel; }
+  [DllImport("user32.dll")] static extern int GetDisplayConfigBufferSizes(uint flags, out uint np, out uint nm);
+  [DllImport("user32.dll")] static extern int QueryDisplayConfig(uint flags, ref uint np, [Out] PATH[] paths, ref uint nm, [Out] MODE[] modes, IntPtr topo);
+  [DllImport("user32.dll", EntryPoint = "DisplayConfigGetDeviceInfo")] static extern int GetInfo(ref GETD d);
+  [DllImport("user32.dll", EntryPoint = "DisplayConfigSetDeviceInfo")] static extern int SetInfo(ref SETD d);
+  static readonly int[] Vals = { 100, 125, 150, 175, 200, 225, 250, 300, 350, 400, 450, 500 };
+  struct Item { public LUID adapter; public uint id; public int px, py; public uint w, h; }
+  static List<Item> Sources() {
+    uint np, nm; GetDisplayConfigBufferSizes(2, out np, out nm);
+    var paths = new PATH[np]; var modes = new MODE[nm];
+    if (QueryDisplayConfig(2, ref np, paths, ref nm, modes, IntPtr.Zero) != 0) return new List<Item>();
+    var list = new List<Item>(); var seen = new HashSet<string>();
+    for (int i = 0; i < np; i++) {
+      var s = paths[i].src; string key = s.adapter.Low + ":" + s.adapter.High + ":" + s.id; if (!seen.Add(key)) continue;
+      var it = new Item { adapter = s.adapter, id = s.id };
+      if (s.modeIdx < nm && modes[s.modeIdx].type == 1) { it.px = modes[s.modeIdx].px; it.py = modes[s.modeIdx].py; it.w = modes[s.modeIdx].w; it.h = modes[s.modeIdx].h; }
+      list.Add(it);
+    }
+    return list;
+  }
+  static bool Get(Item it, out int rec, out int cur, out int max) {
+    var d = new GETD(); d.h.type = -3; d.h.size = (uint)Marshal.SizeOf(typeof(GETD)); d.h.adapter = it.adapter; d.h.id = it.id;
+    rec = cur = max = 0; if (GetInfo(ref d) != 0) return false;
+    rec = -d.min; cur = rec + d.cur; max = rec + d.max; return true;
+  }
+  // one line per screen: x,y,width,height,current percent,recommended percent,highest percent
+  public static string[] List() {
+    var r = new List<string>();
+    foreach (var it in Sources()) { int rec, cur, max; if (!Get(it, out rec, out cur, out max)) continue; r.Add(it.px + "," + it.py + "," + it.w + "," + it.h + "," + Vals[Math.Max(0, Math.Min(cur, Vals.Length - 1))] + "," + Vals[Math.Max(0, Math.Min(rec, Vals.Length - 1))] + "," + Vals[Math.Max(0, Math.Min(max, Vals.Length - 1))]); }
+    return r.ToArray();
+  }
+  // set the scaling of the screen whose top-left is (px, py); 0 = done, 1 = no such screen, 2 = that percentage is not offered, other = Windows' error
+  public static int Set(int px, int py, int percent) {
+    foreach (var it in Sources()) {
+      if (it.px != px || it.py != py) continue;
+      int rec, cur, max; if (!Get(it, out rec, out cur, out max)) return 3;
+      int idx = Array.IndexOf(Vals, percent); if (idx < 0 || idx > max || idx < rec - 4) return 2;
+      var d = new SETD(); d.h.type = -4; d.h.size = (uint)Marshal.SizeOf(typeof(SETD)); d.h.adapter = it.adapter; d.h.id = it.id; d.rel = idx - rec;
+      return SetInfo(ref d);
+    }
+    return 1;
+  }
+}
+'@
+}
+
+function Get-DisplayScales {
+  Ensure-DispCfg
+  foreach ($l in [DispCfg]::List()) { $v = $l -split ','; [pscustomobject]@{ X = [int]$v[0]; Y = [int]$v[1]; W = [int]$v[2]; H = [int]$v[3]; Percent = [int]$v[4]; Recommended = [int]$v[5]; Max = [int]$v[6] } }
+}
+
+function Set-DisplayScale([int]$x, [int]$y, [int]$percent) {
+  Ensure-DispCfg
+  $rc = [DispCfg]::Set($x, $y, $percent)
+  if ($rc -ne 0) { Write-Host "set scale $percent% at $x,$y -> code $rc"; return $false }
+  # the new scaling is in force when the monitor list reports it
+  $want = [int]($percent * 96 / 100)
+  return (Wait-Until { $m = @(Get-Monitors) | Where-Object { $_.L -eq $x -and $_.T -eq $y } | Select-Object -First 1; $m -and $m.Dpi -eq $want } 25)
+}
+
+# One scaling state of the main screen, set by the script: its tests run, and the original scaling is put back and checked.
+function Auto-Scale([int]$percent, [scriptblock]$tests) {
+  $primary = @(Get-Monitors) | Where-Object { $_.Primary } | Select-Object -First 1
+  $orig = Get-DisplayScales | Where-Object { $_.X -eq $primary.L -and $_.Y -eq $primary.T } | Select-Object -First 1
+  if (-not $orig) { Warn 'scaling' "the scaling of the main screen could not be read: $percent% skipped"; return }
+  if ($orig.Max -lt $percent) { Warn 'scaling' "$percent% is not offered for the main screen (up to $($orig.Max)%): skipped"; return }
+  Write-Host ""
+  Write-Host "----- main screen scaling $percent% (set by the script; it is $($orig.Percent)% now and will be put back) -----"
+  try {
+    if (-not (Set-DisplayScale $primary.L $primary.T $percent)) { Warn 'scaling' "the main screen did not switch to $percent%: its tests were skipped"; return }
+    Write-Host "reached: $percent% (letting Windows settle for 8 s)"
+    Start-Sleep 8
+    $script:CheckTag = " [main screen $percent%]"
+    try { & $tests } finally { $script:CheckTag = '' }
+  } finally {
+    [void](Set-DisplayScale $primary.L $primary.T $orig.Percent)
+    Start-Sleep 5
+    $now = Get-DisplayScales | Where-Object { $_.X -eq $primary.L -and $_.Y -eq $primary.T } | Select-Object -First 1
+    Check 'scaling' "the main screen's scaling is back at $($orig.Percent)% after the $percent% tests" ($now -and $now.Percent -eq $orig.Percent) $(if ($now) { "now $($now.Percent)%" } else { 'unknown' })
+  }
+}
+
+# ---- the taskbar edge, set by the script through the registry (and always put back) -------------------------------------------------------------------
+# StuckRects3 holds the taskbar's edge (byte 12: 0 left, 1 top, 2 right, 3 bottom) and auto-hide (byte 8, bit 0). The original value is copied to a backup file first
+# and put back (and Explorer restarted) in a finally block. A Windows version that ignores the setting is reported as such, not as a failure.
+function Set-TaskbarEdge([int]$edge, [bool]$hide) {
+  $k = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\StuckRects3'
+  $b = [byte[]](Get-ItemProperty $k).Settings
+  $b[12] = [byte]$edge
+  if ($hide) { $b[8] = [byte]($b[8] -bor 1) } else { $b[8] = [byte]($b[8] -band 0xFE) }
+  Set-ItemProperty -Path $k -Name Settings -Value $b
+  Stop-Process -Name explorer -Force -ErrorAction SilentlyContinue
+  Start-Sleep 4
+  if (-not (Get-Process explorer -ErrorAction SilentlyContinue)) { Start-Process explorer.exe }
+  Start-Sleep 6
+}
+
+function Auto-Taskbar([string]$tag, [int]$edge, [scriptblock]$tests) {
+  $k = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\StuckRects3'
+  $orig = [byte[]](Get-ItemProperty $k).Settings
+  $backup = Join-Path $root '.claude\scratch-archive\taskbar-settings-backup.txt'
+  New-Item -ItemType Directory -Force (Split-Path $backup) | Out-Null
+  [IO.File]::WriteAllText($backup, ([BitConverter]::ToString($orig)))
+  Write-Host ""
+  Write-Host "----- taskbar $tag (set by the script through the registry; the original setting is backed up and will be put back) -----"
+  try {
+    Set-TaskbarEdge $edge $false
+    $want = @('left', 'top', 'right', 'bottom')[$edge]
+    if (-not (Wait-Until { (Get-TaskbarEdge) -eq $want } 20)) { Warn 'taskbar' "this Windows does not move the taskbar to the $want edge through the registry (the work area did not change): its tests were skipped"; return }
+    Write-Host "reached: taskbar $tag (letting Windows settle for 8 s)"
+    Start-Sleep 8
+    $script:CheckTag = " [taskbar $tag]"
+    try { & $tests } finally { $script:CheckTag = '' }
+  } finally {
+    Set-ItemProperty -Path $k -Name Settings -Value $orig
+    Stop-Process -Name explorer -Force -ErrorAction SilentlyContinue
+    Start-Sleep 4
+    if (-not (Get-Process explorer -ErrorAction SilentlyContinue)) { Start-Process explorer.exe }
+    Start-Sleep 6
+    $nowB = [byte[]](Get-ItemProperty $k).Settings
+    Check 'taskbar' 'the taskbar setting is back exactly as it was' ([BitConverter]::ToString($nowB) -eq [BitConverter]::ToString($orig)) ''
+  }
+}
+
+# ---- the Japanese input method, installed for the test and removed again (two elevated prompts the person accepts) --------------------------------------
+function Install-ImeForTest {
+  $script:ImeOrigObj = Get-WinUserLanguageList
+  $script:ImeOrigList = @($script:ImeOrigObj | ForEach-Object { $_.LanguageTag })
+  Write-Host "language list now: $($script:ImeOrigList -join ', ')"
+  $ps1 = Join-Path $scratch 'ime-install.ps1'
+  Set-Content -LiteralPath $ps1 -Value 'try { Install-Language -Language ja-JP -ErrorAction Stop | Out-String | Set-Content (Join-Path $env:TEMP "hudshell-ime-install.txt"); "done" | Add-Content (Join-Path $env:TEMP "hudshell-ime-install.txt") } catch { "error: $_" | Set-Content (Join-Path $env:TEMP "hudshell-ime-install.txt") }'
+  Remove-Item (Join-Path $env:TEMP 'hudshell-ime-install.txt') -ErrorAction SilentlyContinue
+  Say 'A Windows prompt will ask to allow a PowerShell window (it installs the Japanese language feature for the IME test). Accept it (Yes).'
+  try { Start-Process powershell -Verb RunAs -WindowStyle Hidden -Wait -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "`"$ps1`"") } catch { Warn 'ime' 'the install prompt was declined: no IME test'; return $false }
+  $res = if (Test-Path (Join-Path $env:TEMP 'hudshell-ime-install.txt')) { Get-Content (Join-Path $env:TEMP 'hudshell-ime-install.txt') -Raw } else { '' }
+  if ($res -notmatch 'done') { Warn 'ime' ("installing the Japanese language feature did not work: " + ($res -replace '\s+', ' ')); return $false }
+  # add Japanese to the language list (it is put back exactly afterwards)
+  $l = Get-WinUserLanguageList; $l.Add('ja-JP'); Set-WinUserLanguageList $l -Force
+  Start-Sleep 5
+  return $true
+}
+
+function Remove-ImeAfterTest {
+  if ($script:ImeOrigObj) { Set-WinUserLanguageList $script:ImeOrigObj -Force }
+  $ps1 = Join-Path $scratch 'ime-uninstall.ps1'
+  Set-Content -LiteralPath $ps1 -Value 'try { Uninstall-Language -Language ja-JP -ErrorAction Stop | Out-Null; "done" | Set-Content (Join-Path $env:TEMP "hudshell-ime-uninstall.txt") } catch { "error: $_" | Set-Content (Join-Path $env:TEMP "hudshell-ime-uninstall.txt") }'
+  Remove-Item (Join-Path $env:TEMP 'hudshell-ime-uninstall.txt') -ErrorAction SilentlyContinue
+  Say 'A Windows prompt will ask once more to remove the Japanese language feature again. Accept it (Yes).'
+  try { Start-Process powershell -Verb RunAs -WindowStyle Hidden -Wait -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "`"$ps1`"") } catch { Warn 'ime' 'the removal prompt was declined: the Japanese language feature is still installed (remove it in Settings > Time & language)' }
+  $now = @((Get-WinUserLanguageList) | ForEach-Object { $_.LanguageTag })
+  Check 'ime' 'your language list is back to what it was before the test' (($now -join ',') -eq ($script:ImeOrigList -join ',')) ("was " + ($script:ImeOrigList -join ',') + ", now " + ($now -join ','))
 }
 
 # ---- a real game (MANUAL) -----------------------------------------------------------------------------------------------------------------------
@@ -2036,24 +2214,31 @@ function Suite-GameSession {
 # Order: layouts and IME, scaling 200% once more, sleep and resume, a real game with frame times, then (with -Sandbox) the real prompts through Claude
 # Code and Codex. The monitor unplug and the taskbar states were done already (`hardware`). Nothing here changes a setting by itself.
 function Suite-Everything {
-  Write-Host "=== everything: layouts and IME, scaling 200%, sleep and resume, a real game, real prompts ==="
+  Write-Host "=== everything: layouts and IME, scalings, taskbar edges, sleep and resume, a real game, real prompts ==="
   $skip = @(($env:HUDSHELL_HW_SKIP -split ',') | ForEach-Object { $_.Trim().ToLower() } | Where-Object { $_ })
   if ($skip -notcontains 'layouts') {
     Write-Host ""
-    Write-Host "----- layouts and IME -----"
-    $before = @([GT]::InstalledLayouts()).Count
-    Write-Host "keyboard layouts installed now: $before"
-    Say 'Settings > Time & language > Language & region: add Japanese (Microsoft IME) and one more keyboard layout (for example Swedish or Russian). When done, wait: the script notices it. (If you want to skip this part, do nothing: it moves on after 10 minutes.)'
-    if (Wait-Until { @([GT]::InstalledLayouts()).Count -gt $before } 600) {
-      Start-Sleep 10
-      Write-Host "reached: more layouts installed (keep your hands off the keyboard and mouse from here on)"
-      Suite-KbdAny
-      Say 'The layout tests are done. You can remove the layouts you added now (Settings > Time & language > Language & region).'
-    } else { Warn 'everything' 'no layout was added within 10 minutes: layouts and IME were skipped' }
+    Write-Host "----- keyboard layouts (loaded for the test only) -----"
+    Suite-KbdAny
+  }
+  if ($skip -notcontains 'ime') {
+    Write-Host ""
+    Write-Host "----- Japanese input method (installed for the test, then removed) -----"
+    $installed = $false
+    try {
+      $installed = Install-ImeForTest
+      if ($installed) {
+        $script:ImeHkl = 'E0010411'
+        Suite-KbdAny
+      }
+    } finally { $script:ImeHkl = $null; if ($installed) { Remove-ImeAfterTest } }
   }
   if ($skip -notcontains 'scaling') {
-    Hw-State 'primary scaling 200% (again)' 'Set the scaling of the MAIN screen to 200% (Settings > System > Display > Scale).' { (Get-PrimaryScale) -eq 200 } 300 { Suite-Place; Suite-Dpi }
-    Hw-State 'primary scaling back at 100%' 'Set the scaling of the MAIN screen back to 100%.' { (Get-PrimaryScale) -eq 100 } 300 { }
+    foreach ($pct in 175, 200, 225) { Auto-Scale $pct { Suite-Place; Suite-Dpi } }
+  }
+  if ($skip -notcontains 'taskbar') {
+    Auto-Taskbar 'on the left' 0 { Suite-MaxWork; Suite-Place; Suite-Snap }
+    Auto-Taskbar 'on the top' 1 { Suite-MaxWork; Suite-Place; Suite-Snap }
   }
   if ($skip -notcontains 'sleep') {
     Write-Host ""
@@ -2516,6 +2701,15 @@ foreach ($s in $want) {
     'kbdany' { Suite-KbdAny }
     'gamesession' { Suite-GameSession }
     'everything' { Suite-Everything }
+    'scaleprobe' {
+      Write-Host '=== scaleprobe: the display scaling Windows reports (read only), and a write of the same value back (no change) ==='
+      $d = @(Get-DisplayScales)
+      $d | ForEach-Object { Write-Host ("screen at {0},{1} {2}x{3}: {4}% (recommended {5}%, up to {6}%)" -f $_.X, $_.Y, $_.W, $_.H, $_.Percent, $_.Recommended, $_.Max) }
+      Check 'scaleprobe' 'the scaling of every screen can be read' ($d.Count -ge 1)
+      $m = @(Get-Monitors) | Where-Object { $_.Primary } | Select-Object -First 1
+      $cur = $d | Where-Object { $_.X -eq $m.L -and $_.Y -eq $m.T } | Select-Object -First 1
+      if ($cur) { $ok = Set-DisplayScale $m.L $m.T $cur.Percent; Check 'scaleprobe' "writing the main screen's current scaling ($($cur.Percent)%) back is accepted and changes nothing" $ok }
+    }
     'tabsui' { Suite-TabsUi }
     'windowsnap' { Suite-WindowSnap }
     'input' { Suite-Input }

@@ -69,13 +69,17 @@ clipboard text and restores it. `scrollback`, `ghost` and `attention` send no OS
 
 ## The rest of the manual tests, in one sitting (`-Suite everything -Sandbox <folder>`)
 
-After the hardware session: **layouts and IME** (the person adds Japanese (Microsoft IME) and one more layout in Windows' settings, the script notices; `kbdany`: every other
-installed layout's keys are pressed for real and compared with what Windows says they give, and a romaji phrase through a Japanese or Chinese IME must arrive as real
-characters), **scaling 200% once more** (`place`, `dpi`), **sleep and resume** (`sleepresume`), **a real game** (`gamesession`: a borderless game found in front by itself,
-its name never recorded; HUDshell is drawn over it, does not take the keyboard, is click-through, Ctrl+Alt+G takes and gives back the keyboard to the very same game window,
-the hotkeys work with the game in front; then frame times from PresentMon with HUDshell not running, shown and idle, and shown with a shell printing flat out) and
-the **real prompts** through Claude Code and Codex (`real`). PresentMon is Intel's frame-time tool, downloaded from its official GitHub release into a git-ignored
-folder, its Authenticode signature and hash printed; it needs administrator rights, so Windows asks once. `HUDSHELL_HW_SKIP` takes `layouts`, `scaling`, `sleep`, `game`, `real`.
+After the hardware session, and without the person changing any setting by hand (the script does it and puts everything back): **keyboard layouts** (Russian, Swedish,
+Japanese, Chinese and Korean layouts are loaded for the test only, with no change to the language list; `kbdany` presses each layout's keys for real and compares what
+the terminal shows with what Windows says they give), the **Japanese input method** (installed through an elevated prompt the person accepts, tested with a romaji phrase that must
+arrive as real characters, then the language list is restored exactly and the feature removed through a second prompt), **display scalings** (the main screen set to
+175%, 200% and 225% through Windows' display-configuration call, `place` and `dpi` at each, the original scaling put back and checked), **the taskbar on the left and top**
+(set through the registry value `StuckRects3` with a backup file, Explorer restarted, `maxwork`, `place` and `snap`, the original value put back and checked; a Windows that ignores
+the registry setting is reported as such), **sleep and resume** (`sleepresume`), **a real game** (`gamesession`: a borderless game found in front by itself, its name never recorded; HUDshell
+is drawn over it, does not take the keyboard, is click-through, Ctrl+Alt+G takes the keyboard and gives it back to the very same game window, the hotkeys work with the game in front;
+then frame times from PresentMon with HUDshell not running, shown and idle, and shown with a shell printing flat out) and the **real prompts** through Claude Code and Codex (`real`).
+PresentMon is Intel's frame-time tool, downloaded from its official GitHub release into a git-ignored folder, its Authenticode signature and hash printed; it needs administrator
+rights, so Windows asks once. `HUDSHELL_HW_SKIP` takes `layouts`, `ime`, `scaling`, `taskbar`, `sleep`, `game`, `real`. `-Suite scaleprobe` shows each screen's scaling (read only).
 
 ## The hardware session (manual, one sitting)
 
