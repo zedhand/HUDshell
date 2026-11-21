@@ -687,7 +687,8 @@
   // ---- settings panel (text-mode box) ----------------------------------------------------------
   const panel = document.getElementById('settings');
   const sset = (o) => send(Object.assign({ t: 'settings' }, o));
-  const S = { opacity: 100, min: 20, theme: '', themes: [], text: 100, ui: 100 };
+  const S = { opacity: 100, min: 20, theme: '', themes: [], text: 100, ui: 100, ghost: 40, tabs: 'auto', lh: 100, ls: 0 };
+  const TAB_MODES = ['auto', 'always', 'overlay'];
   const BAR = 20;
   const esc = (s) => s.replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
   function render() {
@@ -695,13 +696,17 @@
     const filled = Math.round(((S.opacity - S.min) / (100 - S.min)) * BAR);
     let bar = '';
     for (let i = 0; i < BAR; i++) bar += '<span class="c" data-i="' + i + '">' + (i < filled ? '#' : '-') + '</span>';
-    let out = 'hudshell settings\n' + '─'.repeat(W) + '\n';
+    let out = 'hudshell settings  <span class="k">&larr;/&rarr; opacity</span>\n' +'─'.repeat(W) + '\n';
+    const btn = (attr, v) => '<span class="c" data-' + attr + '="' + v + '">' + (v < 0 ? '[-]' : '[+]') + '</span>';
     out += 'opacity  [' + bar + '] ' + String(S.opacity).padStart(3) + '%\n';
-    out += 'colours  <span class="c" data-d="-1">&lt;</span> <span class="on">' + esc(S.theme.padEnd(14)) + '</span> <span class="c" data-d="1">&gt;</span>\n';
-    out += 'text     <span class="c" data-t="-1">[-]</span> ' + String(S.text).padStart(3) + '% <span class="c" data-t="1">[+]</span>\n';
-    out += 'ui text  <span class="c" data-u="-1">[-]</span> ' + String(S.ui).padStart(3) + '% <span class="c" data-u="1">[+]</span>\n';
-    out += '\n<span class="k">left/right  opacity\nup/down     colours\n- / =       text size\n, / .       ui text size</span>\n';
-    out += '<span class="k">esc</span> or <span class="c" id="sx">[close]</span>';
+    out += 'colours  <span class="c" data-d="-1">&lt;</span> <span class="on">' + esc(S.theme.padEnd(14)) + '</span> <span class="c" data-d="1">&gt;</span> <span class="k">&uarr;/&darr;</span>\n';
+    out += 'text     ' + btn('t', -1) + ' ' + String(S.text).padStart(3) + '% ' + btn('t', 1) + '  <span class="k">- =</span>\n';
+    out += 'ui text  ' + btn('u', -1) + ' ' + String(S.ui).padStart(3) + '% ' + btn('u', 1) + '  <span class="k">, .</span>\n';
+    out += 'ghost    ' + btn('g', -1) + ' ' + String(S.ghost).padStart(3) + '% ' + btn('g', 1) + '  <span class="k">[ ]</span>\n';
+    out += 'tabs     <span class="c" data-m="-1">&lt;</span> <span class="on">' + esc(S.tabs.padEnd(8)) + '</span> <span class="c" data-m="1">&gt;</span>  <span class="k">t</span>\n';
+    out += 'line     ' + btn('l', -1) + ' ' + String(S.lh).padStart(3) + '% ' + btn('l', 1) + '  <span class="k">; &#39;</span>\n';
+    out += 'spacing  ' + btn('s', -1) + ' ' + String(S.ls).padStart(3) + 'px ' + btn('s', 1) + ' <span class="k">n m</span>\n';
+    out += '\n<span class="k">esc</span> or <span class="c" id="sx">[close]</span>';
     panel.innerHTML = out;
   }
   function closePanel() {
@@ -714,6 +719,10 @@
     S.opacity = m.opacity; S.min = m.minOpacity; S.theme = m.theme; S.themes = m.themes;
     if (m.textScale) S.text = m.textScale;
     if (m.uiScale) S.ui = m.uiScale;
+    if (m.ghost) S.ghost = m.ghost;
+    if (m.tabs) S.tabs = m.tabs;
+    if (m.lineHeight) S.lh = m.lineHeight;
+    if (m.letterSpacing !== undefined) S.ls = m.letterSpacing;
     render();
     if (m.open) panel.classList.add('open');
   }
@@ -725,6 +734,11 @@
   const clampPct = (v) => Math.max(50, Math.min(300, Math.round(v / 10) * 10));
   function stepText(d) { S.text = clampPct(S.text + d * 10); render(); textScale = S.text; for (const o of views.values()) o.term.options.fontSize = effSize(o.base); fitShown(); sset({ a: 'textscale', v: S.text }); }
   function stepUi(d) { S.ui = clampPct(S.ui + d * 10); render(); document.documentElement.style.setProperty('--ui', String(S.ui / 100)); sset({ a: 'uiscale', v: S.ui }); }
+  // the host clamps and saves these (ghost 20-100, line height 100-200, letter spacing 0-10) and applies them to every window
+  function stepGhost(d) { S.ghost = Math.max(S.min, Math.min(100, S.ghost + d * 10)); render(); sset({ a: 'ghost', v: S.ghost }); }
+  function stepTabs(d) { const i = TAB_MODES.indexOf(S.tabs); S.tabs = TAB_MODES[(i + d + TAB_MODES.length) % TAB_MODES.length]; render(); sset({ a: 'tabs', v: S.tabs }); }
+  function stepLine(d) { S.lh = Math.max(100, Math.min(200, S.lh + d * 5)); render(); sset({ a: 'lineheight', v: S.lh }); }
+  function stepSpacing(d) { S.ls = Math.max(0, Math.min(10, S.ls + d)); render(); sset({ a: 'spacing', v: S.ls }); }
   function stepTheme(d) { const i = S.themes.indexOf(S.theme); setTheme(S.themes[(i + d + S.themes.length) % S.themes.length]); }
   function setTheme(n) { S.theme = n; render(); sset({ a: 'theme', v: n }); }
   let dragging = false;
@@ -738,6 +752,10 @@
     else if (t.dataset && t.dataset.d) stepTheme(Number(t.dataset.d));
     else if (t.dataset && t.dataset.t) stepText(Number(t.dataset.t));
     else if (t.dataset && t.dataset.u) stepUi(Number(t.dataset.u));
+    else if (t.dataset && t.dataset.g) stepGhost(Number(t.dataset.g));
+    else if (t.dataset && t.dataset.m) stepTabs(Number(t.dataset.m));
+    else if (t.dataset && t.dataset.l) stepLine(Number(t.dataset.l));
+    else if (t.dataset && t.dataset.s) stepSpacing(Number(t.dataset.s));
     else if (t.id === 'sx') closePanel();
   });
   panel.addEventListener('mouseover', (e) => {
@@ -757,6 +775,13 @@
     else if (e.key === '=' || e.key === '+') stepText(1);
     else if (e.key === ',') stepUi(-1);
     else if (e.key === '.') stepUi(1);
+    else if (e.key === '[') stepGhost(-1);
+    else if (e.key === ']') stepGhost(1);
+    else if (e.key === 't' || e.key === 'T') stepTabs(1);
+    else if (e.key === ';') stepLine(-1);
+    else if (e.key === "'") stepLine(1);
+    else if (e.key === 'n' || e.key === 'N') stepSpacing(-1);
+    else if (e.key === 'm' || e.key === 'M') stepSpacing(1);
     else return;
     e.preventDefault(); e.stopPropagation();
   }, true);

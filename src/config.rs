@@ -56,6 +56,12 @@ pub struct Hotkeys {
     pub window_detach: String,
     /// Make the next HUDshell window the one the hotkeys act on.
     pub window_next: String,
+    /// Move the active shell into the next window (a window's only shell takes its window with it).
+    pub shell_move: String,
+    /// Ghost mode for every window at once (the same hotkey again leaves it).
+    pub ghost_all: String,
+    /// Hide every window, or show them all again.
+    pub show_hide_all: String,
 }
 
 impl Default for Hotkeys {
@@ -89,6 +95,9 @@ impl Default for Hotkeys {
             pane_next: "Ctrl+Alt+O".into(),
             window_detach: "Ctrl+Alt+D".into(),
             window_next: "Ctrl+Alt+Shift+W".into(),
+            shell_move: "Ctrl+Alt+Shift+D".into(),
+            ghost_all: "Ctrl+Alt+Shift+X".into(),
+            show_hide_all: "Ctrl+Alt+Shift+V".into(),
         }
     }
 }
@@ -183,6 +192,8 @@ pub struct Config {
     /// What maximizing (drag to the top edge, double-click the top strip) fills: `monitor` = the whole monitor, over the taskbar;
     /// `work` = the usable area, leaving the taskbar visible.
     pub maximize_area: String,
+    /// Dropping the window with the cursor on the left or right edge of a screen makes it fill that half of the screen (like a normal window).
+    pub edge_tiling: bool,
     /// Size presets [width, height] in 96-dpi pixels for the size hotkey.
     pub sizes: Vec<[u32; 2]>,
     /// Opacity used while HUDshell holds the keyboard. `null` = same as `opacity`.
@@ -256,6 +267,7 @@ impl Default for Config {
             snap_distance: 16,
             snap_margin: 8,
             maximize_area: "monitor".into(),
+            edge_tiling: true,
             sizes: vec![[640, 360], [900, 520], [1280, 720]],
             active_opacity: None,
             idle_dim_seconds: 0,
@@ -301,11 +313,10 @@ pub fn is_hex_colour(s: &str) -> bool {
 
 /// Resolved colours for the current theme setting.
 pub fn colours_for(cfg: &Config) -> Colours {
-    if cfg.theme == "custom" {
-        if let Some(cc) = &cfg.custom_colours {
+    if cfg.theme == "custom"
+        && let Some(cc) = &cfg.custom_colours {
             return cc.clone();
         }
-    }
     let all = presets();
     all.iter().find(|(n, _)| *n == cfg.theme).unwrap_or(&all[0]).1.clone()
 }
@@ -439,6 +450,9 @@ fn validate(cfg: &mut Config) {
         ("pane_next", &mut cfg.hotkeys.pane_next, def.pane_next),
         ("window_detach", &mut cfg.hotkeys.window_detach, def.window_detach),
         ("window_next", &mut cfg.hotkeys.window_next, def.window_next),
+        ("shell_move", &mut cfg.hotkeys.shell_move, def.shell_move),
+        ("ghost_all", &mut cfg.hotkeys.ghost_all, def.ghost_all),
+        ("show_hide_all", &mut cfg.hotkeys.show_hide_all, def.show_hide_all),
     ] {
         if parse_hotkey(hk).is_none() {
             crate::notice(&format!("Hotkey '{hk}' for {name} is not valid; using {fallback}"));
@@ -658,7 +672,7 @@ mod tests {
         let h = Hotkeys::default();
         let all = [&h.click_through, &h.grab_focus, &h.show_hide, &h.cycle_colours, &h.opacity_up, &h.opacity_down, &h.settings, &h.quit, &h.ghost, &h.corner_next, &h.corner_prev, &h.size_cycle, &h.font_bigger, &h.font_smaller, &h.font_reset,
             &h.shell_next, &h.shell_prev, &h.shell_new, &h.shell_close, &h.shell_list, &h.shell_picker, &h.shell_attention,
-            &h.layout_cycle, &h.pane_zoom, &h.pane_next, &h.window_detach, &h.window_next];
+            &h.layout_cycle, &h.pane_zoom, &h.pane_next, &h.window_detach, &h.window_next, &h.shell_move, &h.ghost_all, &h.show_hide_all];
         let mut seen = std::collections::HashSet::new();
         for s in all {
             let parsed = parse_hotkey(s).unwrap_or_else(|| panic!("default hotkey {s} must parse"));
@@ -819,6 +833,7 @@ mod tests {
             ("single", "new", false, [50, 50], false, [30, 6]), "defaults are the recommended behaviour");
         assert_eq!(d.pane_shells, "shared");
         assert_eq!(d.maximize_area, "monitor");
+        assert!(d.edge_tiling);
         assert_eq!(d.restore_session, "off", "restoring is opt-in");
         let mut r = Config { restore_session: "x".into(), ..Config::default() };
         validate(&mut r);

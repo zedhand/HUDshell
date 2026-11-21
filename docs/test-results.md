@@ -11,6 +11,34 @@ suite had been run on it. CI (the `static` suite on GitHub's `windows-latest`) f
 wrong pane order. After the fix (00765f1) CI passed: **66 unit tests pass** and the release exe is 1.19 MB. That was **all** that had run for
 these features at the time; the desktop suites were run afterwards (see the latest full run below).
 
+## Extras after several windows (2026-11-21): final full run 501 pass, 0 fail, 3 warnings
+
+Built and tested after the several-windows work, then one full run on the final build (`scripts/test-all.ps1`, no sandbox): **501 pass, 0 fail,
+3 warnings** (the two intentional `autotest` skips and the AltGr+Q limit). Per suite: static 16 (72 unit tests), keys 6, width 3, hideshow 3,
+clickfocus 3, clipboard 3, autotest 22 (+2 skips), ui 33, scrollback 8, ghost 14, attention 10, policy 12, place 24, dpi 8, text 13, reload 9,
+restore 7, recover 6, windows 19, winrestore 9, winmove 9, qol 16, sessions 12, shells 34, layout 35, input 26, snap 64, windowsnap 10, kbd 14, cost 5,
+release 20, config 24, soak 4. Three displays, the second at 150%.
+
+- **Hotkeys for "ghost all windows" and "show / hide all windows"** (`windows` suite): every window goes ghost / hidden and back.
+- **Moving a shell into another existing window** (`winmove`): the active shell leaves window 2 for window 1 and keeps running (typed output shows
+  there); a window's only shell takes its window with it; the shell keeps its start profile (a defect found by the code review below).
+- **A window off every screen after a display change** (`winmove`, by a simulated `WM_DISPLAYCHANGE`): it comes back onto a screen. **Not tested with a
+  real monitor unplugged.** A saved window whose place is on no screen (`winrestore`, a hand-edited session file) opens on a screen with its shells.
+- **The colour theme reaches every window** (`winmove`): both pages report the same new background.
+- **Holding Shift while dragging a window of a touching pair** (`windowsnap`, real mouse): only the dragged window moves.
+- **Half-screen tiling** (`snap`, real mouse, every monitor): with the cursor dropped on the left or right edge of a screen the window fills that half
+  of the monitor edge to edge with square corners, and dragging it away restores its size; on an edge where another monitor continues, nothing is
+  tiled. Screenshots were looked at (kept local, not committed). `edge_tiling = false` turns it off (not tested).
+- **Settings-panel rows** (`ui`, real key presses): ghost opacity `[` `]`, tab style `t`, line height `;` `'`, letter spacing `n` `m`; each logs and
+  saves. Their `[-]` / `[+]` buttons were not clicked by a test.
+- **`cargo clippy -D warnings`** is clean for the normal and the harness build (tests included) and now runs in CI.
+- **Code review** (the `/code-review` skill at high effort, on the changes): one real defect and four smaller ones, all fixed: a shell that was
+  detached or moved lost its start profile; secondary windows overwrote the first window's saved position; "on screen" was judged against the
+  bounding box of all monitors; tiling happened at an edge where another monitor continues; windows dragged along as a group stayed displaced when the
+  drop became a tile. One finding was not acted on: the `ui` checks send US-layout key codes (as the older checks already do).
+- **Real prompts (`real`, run once after the full run, sandbox folder):** real prompts went through Claude Code and Codex CLI in HUDshell. The suite's own two checks passed (the run reached the end; it never aborted for a missing prompt). That run was started on the build with several windows, tiling and the new panel rows, so the two CLIs ran in a build with those features; the screen dumps were not re-read line by line this time, so only what the suite checks is claimed.
+- **A test fault found on the way:** the `--inputtest` scenario quit by itself after 80 s, in the middle of the longer `snap` run; it now runs for 200 s.
+
 ## Several windows (2026-11-21, built and tested step by step)
 
 Built in six steps; the full suite (`scripts/test-all.ps1`, no sandbox, real-prompt suite not run) was run after steps 1 and 2, and a final full run

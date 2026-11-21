@@ -434,13 +434,11 @@ fn handle_term_message(hwnd: isize, m: &str) {
         }
         Some("panefocus") => crate::on_pane_focus(v["i"].as_u64().unwrap_or(99) as usize),
         Some("in") => {
-            if let Some(d) = v["d"].as_str() {
-                if d.len() <= 2_000_000 {
-                    if let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(d) {
+            if let Some(d) = v["d"].as_str()
+                && d.len() <= 2_000_000
+                    && let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(d) {
                         pty::write_to(session_of(&v), bytes);
                     }
-                }
-            }
         }
         Some("click") => crate::on_page_click(hwnd),
         Some("nc") => {

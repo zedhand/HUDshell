@@ -13,6 +13,8 @@
 // Win32/WebView2 calls are wrapped in explicit unsafe blocks even inside unsafe functions (Rust 2024),
 // which makes some nested blocks redundant; they are kept so each unsafe call stays visibly marked.
 #![allow(unused_unsafe)]
+// The Win32 structs (NOTIFYICONDATAW and the like) are filled in field by field after `Default::default()`, which is how their sizes and flags are set.
+#![allow(clippy::field_reassign_with_default)]
 
 mod assets;
 mod config;
@@ -71,6 +73,9 @@ const HK_SHELL_PICKER: i32 = 25;
 const HK_SHELL_ATTN: i32 = 26;
 const HK_WINDOW_DETACH: i32 = 27;
 const HK_WINDOW_NEXT: i32 = 28;
+const HK_SHELL_MOVE: i32 = 19;
+const HK_GHOST_ALL: i32 = 29;
+const HK_SHOWHIDE_ALL: i32 = 39;
 /// Jump hotkeys use ids 30..=38 for shells 1..=9.
 const HK_SHELL_JUMP: i32 = 30;
 const WM_TRAY: u32 = 0x8000 + 3;
@@ -153,7 +158,7 @@ fn log(msg: &str) {
     let line = format!("{} {}", now_ms(), msg);
     // Cheap size check at start-up and then every 500 lines (not in test builds, which keep everything).
     #[cfg(not(feature = "harness"))]
-    if WRITES.fetch_add(1, Ordering::Relaxed) % 500 == 0 {
+    if WRITES.fetch_add(1, Ordering::Relaxed).is_multiple_of(500) {
         rotate_log_if_large();
     }
     #[cfg(feature = "harness")]
@@ -446,14 +451,13 @@ fn cfg() -> config::Config {
 }
 
 fn cfg_update(f: impl FnOnce(&mut config::Config)) {
-    if let Ok(mut g) = CFG.lock() {
-        if let Some(c) = g.as_mut() {
+    if let Ok(mut g) = CFG.lock()
+        && let Some(c) = g.as_mut() {
             f(c);
             if PERSIST.load(Ordering::SeqCst) {
                 config::save(c);
             }
         }
-    }
 }
 
 fn theme_json(c: &config::Config) -> serde_json::Value {
@@ -673,11 +677,10 @@ unsafe fn set_opacity(hwnd: HWND, pct: u32, save: bool) {
     if save {
         cfg_update(write);
         log(&format!("opacity -> {pct}%"));
-    } else if let Ok(mut g) = CFG.lock() {
-        if let Some(c) = g.as_mut() {
+    } else if let Ok(mut g) = CFG.lock()
+        && let Some(c) = g.as_mut() {
             write(c); // keep memory current while dragging; written on release
         }
-    }
     unsafe { refresh_opacity(hwnd) };
 }
 
@@ -697,6 +700,7 @@ fn push_settings(open: bool) {
         &serde_json::json!({
             "t": "settings", "open": open, "opacity": base_opacity(), "minOpacity": config::MIN_OPACITY,
             "theme": c.theme, "themes": themes, "textScale": c.text_scale, "uiScale": c.ui_scale,
+            "ghost": c.ghost_opacity, "tabs": c.tabs, "lineHeight": c.line_height, "letterSpacing": c.letter_spacing,
         })
         .to_string(),
     );
@@ -721,13 +725,12 @@ pub fn on_settings_message(hwnd_i: isize, v: &serde_json::Value) {
                 }
             }
             Some("theme") => {
-                if let Some(name) = v["v"].as_str() {
-                    if config::presets().iter().any(|(n, _)| *n == name) {
+                if let Some(name) = v["v"].as_str()
+                    && config::presets().iter().any(|(n, _)| *n == name) {
                         cfg_update(|c| c.theme = name.to_string());
                         log(&format!("colour theme -> {name} (settings panel)"));
                         push_theme();
                     }
-                }
             }
             Some("textscale") => {
                 if let Some(p) = v["v"].as_u64() {
@@ -743,6 +746,44 @@ pub fn on_settings_message(hwnd_i: isize, v: &serde_json::Value) {
                     cfg_update(|c| c.ui_scale = pct);
                     log(&format!("ui scale -> {pct}% (settings panel)"));
                     post_all(&serde_json::json!({ "t": "uiscale", "pct": pct }).to_string());
+                }
+            }
+            Some("ghost") => {
+                if let Some(p) = v["v"].as_u64() {
+                    let pct = (p as u32).clamp(config::MIN_OPACITY, 100);
+                    cfg_update(|c| c.ghost_opacity = pct);
+                    log(&format!("ghost opacity -> {pct}% (settings panel)"));
+                    for (serial, h) in perwin::all() {
+                        let _w = perwin::enter(serial);
+                        refresh_opacity(HWND(h as *mut std::ffi::c_void));
+                    }
+                }
+            }
+            Some("tabs") => {
+                if let Some(m) = v["v"].as_str().filter(|m| matches!(*m, "auto" | "always" | "overlay")) {
+                    let m = m.to_string();
+                    cfg_update(|c| c.tabs = m.clone());
+                    log(&format!("tabs -> {m} (settings panel)"));
+                    for (serial, _) in perwin::all() {
+                        let _w = perwin::enter(serial);
+                        push_tabs();
+                    }
+                }
+            }
+            Some("lineheight") => {
+                if let Some(p) = v["v"].as_u64() {
+                    let pct = (p as u32).clamp(100, 200);
+                    cfg_update(|c| c.line_height = pct);
+                    log(&format!("line height -> {pct}% (settings panel)"));
+                    push_page_cfg();
+                }
+            }
+            Some("spacing") => {
+                if let Some(p) = v["v"].as_u64() {
+                    let px = (p as u32).min(10);
+                    cfg_update(|c| c.letter_spacing = px);
+                    log(&format!("letter spacing -> {px} px (settings panel)"));
+                    push_page_cfg();
                 }
             }
             Some("close") => {
@@ -1038,11 +1079,10 @@ fn altgr_clashes(specs: &[String]) -> Vec<(String, char)> {
         // flag 4: do not change the keyboard state (a dead key stays pending as it was)
         let n = unsafe { ToUnicodeEx(vk, sc, &state, &mut buf, 4, Some(hkl)) };
         // exactly one printable character (a layout without AltGr gives nothing or a control character)
-        if n == 1 && buf[0] >= 0x20 && buf[0] != 0x7f {
-            if let Some(ch) = char::from_u32(buf[0] as u32) {
+        if n == 1 && buf[0] >= 0x20 && buf[0] != 0x7f
+            && let Some(ch) = char::from_u32(buf[0] as u32) {
                 out.push((spec.clone(), ch));
             }
-        }
     }
     out
 }
@@ -1096,6 +1136,9 @@ unsafe fn register_hotkeys(hwnd: HWND, hk: &config::Hotkeys) -> Vec<String> {
             (HK_PANE_NEXT, &hk.pane_next, "next pane"),
             (HK_WINDOW_DETACH, &hk.window_detach, "detach shell into its own window"),
             (HK_WINDOW_NEXT, &hk.window_next, "next window"),
+            (HK_SHELL_MOVE, &hk.shell_move, "move shell to the next window"),
+            (HK_GHOST_ALL, &hk.ghost_all, "ghost all windows"),
+            (HK_SHOWHIDE_ALL, &hk.show_hide_all, "show / hide all windows"),
         ] {
             match config::parse_hotkey(spec) {
                 Some((mods, vk)) => match RegisterHotKey(Some(hwnd), id, HOT_KEY_MODIFIERS(mods), vk) {
@@ -1136,7 +1179,7 @@ unsafe fn register_hotkeys(hwnd: HWND, hk: &config::Hotkeys) -> Vec<String> {
 
 /// Give back every hotkey id HUDshell uses (before registering a changed set).
 unsafe fn unregister_hotkeys(hwnd: HWND) {
-    for id in (1..=18).chain(20..=28).chain(30..=38) {
+    for id in 1..=39 {
         let _ = unsafe { UnregisterHotKey(Some(hwnd), id) };
     }
 }
@@ -1225,6 +1268,19 @@ unsafe fn reload_with(hwnd: HWND, mut new: config::Config, manual: bool) {
     unsafe { flush_notices(hwnd) };
 }
 
+/// Send the settings the pages apply themselves (text, spacing, scrollback, clipboard policy) to every window.
+fn push_page_cfg() {
+    let new = cfg();
+    post_all(
+        &serde_json::json!({
+            "t": "cfg", "fontSize": new.font_size, "fontFamily": new.font_family, "textScale": new.text_scale, "uiScale": new.ui_scale,
+            "lineHeight": new.line_height as f64 / 100.0, "letterSpacing": new.letter_spacing, "scrollback": new.scrollback,
+            "copyOnSelect": new.copy_on_select, "rightClick": new.right_click, "osc52": new.osc52,
+        })
+        .to_string(),
+    );
+}
+
 unsafe fn apply_config_change(hwnd: HWND, new: &config::Config, changed: &[String]) {
     let has = |k: &str| changed.iter().any(|c| c == k);
     log(&format!("config reload: changed {}", changed.join(", ")));
@@ -1279,14 +1335,7 @@ unsafe fn apply_config_change(hwnd: HWND, new: &config::Config, changed: &[Strin
         "right_click", "osc52",
     ];
     if page_keys.iter().any(|k| has(k)) {
-        post_all(
-            &serde_json::json!({
-                "t": "cfg", "fontSize": new.font_size, "fontFamily": new.font_family, "textScale": new.text_scale, "uiScale": new.ui_scale,
-                "lineHeight": new.line_height as f64 / 100.0, "letterSpacing": new.letter_spacing, "scrollback": new.scrollback,
-                "copyOnSelect": new.copy_on_select, "rightClick": new.right_click, "osc52": new.osc52,
-            })
-            .to_string(),
-        );
+        push_page_cfg();
     }
     // what is only read at start
     let restart: Vec<&str> = ["shell", "unicode", "shift_enter", "pane_shells", "layout", "start_hidden", "start_ghost"]
@@ -1342,11 +1391,10 @@ fn save_session() {
         let mut s = session::Session::capture(&entries, active, &layout_lock());
         let mut r = RECT::default();
         if unsafe { GetWindowRect(HWND(h as *mut std::ffi::c_void), &mut r) }.is_ok() {
-            if MAXIMIZED.load(Ordering::SeqCst) {
-                if let Some(rr) = *lock_or_recover(&RESTORE_RECT) {
+            if MAXIMIZED.load(Ordering::SeqCst)
+                && let Some(rr) = *lock_or_recover(&RESTORE_RECT) {
                     r = rr;
                 }
-            }
             s.rect = Some([r.left, r.top, r.right - r.left, r.bottom - r.top]);
         }
         if !s.shells.is_empty() {
@@ -1422,10 +1470,19 @@ pub fn toggle_maximize(hwnd_i: isize) {
     }
 }
 
+/// The window being dragged becomes a maximized or tiled window: the windows that followed it during the drag go back where they were.
+fn restore_drag_group() {
+    for (h, r) in lock_or_recover(&DRAG_GROUP).iter() {
+        let _ = unsafe {
+            SetWindowPos(HWND(*h as *mut std::ffi::c_void), None, r.left, r.top, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE)
+        };
+    }
+}
+
 /// A move drag ended: if the cursor is on the top edge of a monitor, the window fills that monitor's work area, like a normal window.
 unsafe fn after_move_drag(hwnd: HWND) {
     use windows::Win32::Foundation::POINT;
-    use windows::Win32::Graphics::Gdi::{GetMonitorInfoW, MonitorFromPoint, MONITORINFO, MONITOR_DEFAULTTONEAREST};
+    use windows::Win32::Graphics::Gdi::{GetMonitorInfoW, MonitorFromPoint, MONITORINFO, MONITOR_DEFAULTTONEAREST, MONITOR_DEFAULTTONULL};
     let mut pt = POINT::default();
     if unsafe { GetCursorPos(&mut pt) }.is_err() {
         return;
@@ -1436,9 +1493,28 @@ unsafe fn after_move_drag(hwnd: HWND) {
         return;
     }
     let slack = unsafe { scaled(hwnd, 2) };
-    if pt.y <= mi.rcMonitor.top + slack && !MAXIMIZED.load(Ordering::SeqCst) {
-        let before = *lock_or_recover(&DRAG_START);
-        unsafe { maximize_window(hwnd, if cfg().maximize_area == "work" { mi.rcWork } else { mi.rcMonitor }, before) };
+    if MAXIMIZED.load(Ordering::SeqCst) {
+        return;
+    }
+    let c = cfg();
+    let area = if c.maximize_area == "work" { mi.rcWork } else { mi.rcMonitor };
+    let before = *lock_or_recover(&DRAG_START);
+    // an edge where another monitor continues is not a place to tile: the cursor simply crosses over to it
+    let neighbour = |x: i32| unsafe { !MonitorFromPoint(POINT { x, y: pt.y }, MONITOR_DEFAULTTONULL).0.is_null() };
+    if pt.y <= mi.rcMonitor.top + slack {
+        restore_drag_group();
+        unsafe { maximize_window(hwnd, area, before) };
+    } else if c.edge_tiling && pt.x <= mi.rcMonitor.left + slack && !neighbour(mi.rcMonitor.left - 1) {
+        // left half of the screen
+        let half = RECT { left: area.left, top: area.top, right: area.left + (area.right - area.left) / 2, bottom: area.bottom };
+        log("tiled to the left half of the screen");
+        restore_drag_group();
+        unsafe { maximize_window(hwnd, half, before) };
+    } else if c.edge_tiling && pt.x >= mi.rcMonitor.right - 1 - slack && !neighbour(mi.rcMonitor.right) {
+        let half = RECT { left: area.right - (area.right - area.left) / 2, top: area.top, right: area.right, bottom: area.bottom };
+        log("tiled to the right half of the screen");
+        restore_drag_group();
+        unsafe { maximize_window(hwnd, half, before) };
     }
 }
 
@@ -1498,30 +1574,39 @@ fn apply_font(delta: Option<i32>) {
     }
 }
 
+/// The rectangle shows at least 100 x 50 pixels on some real monitor (not merely inside the bounding box of all of them: with monitors
+/// in an L shape the gap is not a screen).
 fn on_screen(g: &config::Geometry) -> bool {
-    let (vx, vy, vw, vh) = unsafe {
-        (
-            GetSystemMetrics(SM_XVIRTUALSCREEN),
-            GetSystemMetrics(SM_YVIRTUALSCREEN),
-            GetSystemMetrics(SM_CXVIRTUALSCREEN),
-            GetSystemMetrics(SM_CYVIRTUALSCREEN),
-        )
-    };
-    g.x + 100 > vx && g.x < vx + vw - 100 && g.y + 50 > vy && g.y < vy + vh - 50
+    use windows::Win32::Graphics::Gdi::{GetMonitorInfoW, MonitorFromRect, MONITORINFO, MONITOR_DEFAULTTONULL};
+    let r = RECT { left: g.x, top: g.y, right: g.x + g.w.max(1), bottom: g.y + g.h.max(1) };
+    let mon = unsafe { MonitorFromRect(&r, MONITOR_DEFAULTTONULL) };
+    if mon.0.is_null() {
+        return false;
+    }
+    let mut mi = MONITORINFO { cbSize: std::mem::size_of::<MONITORINFO>() as u32, ..Default::default() };
+    if !unsafe { GetMonitorInfoW(mon, &mut mi) }.as_bool() {
+        return false;
+    }
+    let w = r.right.min(mi.rcMonitor.right) - r.left.max(mi.rcMonitor.left);
+    let h = r.bottom.min(mi.rcMonitor.bottom) - r.top.max(mi.rcMonitor.top);
+    w >= 100.min(g.w) && h >= 50.min(g.h)
 }
 
 /// Remember where the window is (physical pixels). Skipped when hidden or in test modes.
 unsafe fn save_geometry(hwnd: HWND) {
+    // `window` in the settings is the first window's place; the other windows' places are kept in the session file
+    if perwin::all().first().map(|(_, h)| *h) != Some(hwnd.0 as isize) {
+        return;
+    }
     if !PERSIST.load(Ordering::SeqCst) || !VISIBLE.load(Ordering::SeqCst) {
         return;
     }
     let mut r = RECT::default();
     if unsafe { GetWindowRect(hwnd, &mut r) }.is_ok() {
-        if MAXIMIZED.load(Ordering::SeqCst) {
-            if let Some(rr) = *lock_or_recover(&RESTORE_RECT) {
+        if MAXIMIZED.load(Ordering::SeqCst)
+            && let Some(rr) = *lock_or_recover(&RESTORE_RECT) {
                 r = rr;
             }
-        }
         cfg_update(|c| {
             c.window = Some(config::Geometry { x: r.left, y: r.top, w: r.right - r.left, h: r.bottom - r.top })
         });
@@ -2047,6 +2132,9 @@ fn close_shell(id: u32) {
     }
     pty::close(id);
     remove_shell_from_window(id);
+    if let Ok(mut l) = SPAWN_PROFILES.lock() {
+        l.retain(|(i, _)| *i != id);
+    }
     log(&format!("shell {id} closed"));
 }
 
@@ -2054,9 +2142,7 @@ fn close_shell(id: u32) {
 /// caller's business, and detaching it leaves it running for another window.
 fn remove_shell_from_window(id: u32) {
     let next = shells_lock().remove(id);
-    if let Ok(mut l) = SPAWN_PROFILES.lock() {
-        l.retain(|(i, _)| *i != id);
-    }
+    // (the shell's start profile stays: a shell that only changes window must still restart from it)
     if let Ok(mut l) = FONT_SIZES.lock() {
         l.retain(|(i, _)| *i != id);
     }
@@ -2482,11 +2568,10 @@ pub fn detach_shell(id: u32) {
     }
     {
         let _w = perwin::enter(new_serial);
-        if had_own_size {
-            if let Ok(mut l) = FONT_SIZES.lock() {
+        if had_own_size
+            && let Ok(mut l) = FONT_SIZES.lock() {
                 l.push((id, size));
             }
-        }
         pty::set_active(id);
     }
     PENDING_REDRAW.lock().unwrap_or_else(|p| p.into_inner()).push(id);
@@ -2512,6 +2597,83 @@ fn detach_active_shell() {
     if id != 0 {
         detach_shell(id);
     }
+}
+
+/// Move the active shell into the next window. It keeps running; the other window's page has no history of it, so it repaints (see
+/// `pty::redraw`). When it is its window's only shell, that window closes with it.
+fn move_active_shell_to_next_window() {
+    let all = perwin::all();
+    if all.len() < 2 {
+        log("move refused: there is only one window");
+        wv::post("{\"t\":\"flash\",\"text\":\"there is only one window\"}");
+        return;
+    }
+    let id = shells_lock().active();
+    let from = perwin::current();
+    let Some(i) = all.iter().position(|(s, _)| *s == from) else { return };
+    let (to, _) = all[(i + 1) % all.len()];
+    if id == 0 {
+        return;
+    }
+    {
+        let _w = perwin::enter(to);
+        if shells_lock().len() >= shells::MAX_SHELLS {
+            log("move refused: the other window already holds the most shells");
+            return;
+        }
+    }
+    let Some(profile) = shells_lock().profile_of(id).map(|p| p.to_string()) else { return };
+    let size = font_size_of(id);
+    let had_own_size = FONT_SIZES.lock().map(|l| l.iter().any(|(i, _)| *i == id)).unwrap_or(false);
+    let only = shells_lock().len() <= 1;
+    if only {
+        shells_lock().remove(id); // its window closes below; the shell is not closed with it
+    } else {
+        remove_shell_from_window(id);
+    }
+    {
+        let _w = perwin::enter(to);
+        shells_lock().adopt(id, &profile);
+        shells_lock().activate(id);
+        layout_lock().place_new(id);
+        pty::set_active(id);
+        if had_own_size
+            && let Ok(mut l) = FONT_SIZES.lock() {
+                l.push((id, size));
+            }
+        push_layout();
+        wv::post(&serde_json::json!({ "t": "open", "s": id }).to_string());
+        push_tabs();
+        note_active_window();
+    }
+    PENDING_REDRAW.lock().unwrap_or_else(|p| p.into_inner()).push(id);
+    log(&format!("shell {id} moved from window {from} to window {to}"));
+    if only {
+        let hwnd = perwin::hwnd_of(from).unwrap_or(0);
+        if hwnd != 0 {
+            let _ = unsafe { PostMessageW(Some(HWND(hwnd as *mut std::ffi::c_void)), WM_CLOSE, WPARAM(0), LPARAM(0)) };
+        }
+    }
+}
+
+/// After a display change (a monitor unplugged, the resolution or arrangement changed): a window that is no longer on any screen goes back
+/// into the work area of the nearest monitor.
+unsafe fn keep_on_screen(hwnd: HWND) {
+    let mut r = RECT::default();
+    if unsafe { GetWindowRect(hwnd, &mut r) }.is_err() {
+        return;
+    }
+    let g = config::Geometry { x: r.left, y: r.top, w: r.right - r.left, h: r.bottom - r.top };
+    if on_screen(&g) {
+        return;
+    }
+    let work = unsafe { work_area(hwnd) };
+    let margin = unsafe { scaled(hwnd, cfg().snap_margin) };
+    let (w, h) = (g.w.min(work.w()), g.h.min(work.h()));
+    let (x, y) = place::corner_pos(0, w, h, work, margin);
+    let _ = unsafe { SetWindowPos(hwnd, None, x, y, w, h, SWP_NOZORDER | SWP_NOACTIVATE) };
+    log(&format!("display changed: the window was off every screen; moved to {x},{y}"));
+    unsafe { save_geometry(hwnd) };
 }
 
 /// Make the next window the one the hotkeys act on, and say which it is.
@@ -2617,6 +2779,9 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                     HK_SHELL_ATTN => wv::post("{\"t\":\"attentionnext\"}"),
                     HK_WINDOW_DETACH => detach_active_shell(),
                     HK_WINDOW_NEXT => next_window(),
+                    HK_SHELL_MOVE => move_active_shell_to_next_window(),
+                    HK_GHOST_ALL => ghost_all(),
+                    HK_SHOWHIDE_ALL => show_hide_all(),
                     n if (HK_SHELL_JUMP..HK_SHELL_JUMP + 9).contains(&n) => shell_jump((n - HK_SHELL_JUMP + 1) as usize),
                     HK_QUIT => {
                         log("quit requested");
@@ -2702,6 +2867,10 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                     _ => {}
                 }
                 LRESULT(0)
+            }
+            WM_DISPLAYCHANGE => {
+                keep_on_screen(hwnd);
+                DefWindowProcW(hwnd, msg, wparam, lparam)
             }
             WM_DPICHANGED => {
                 // The window was moved to a monitor with another scaling. Keep its size in logical (scaled) terms:
@@ -2830,11 +2999,11 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 log("WM_EXITSIZEMOVE");
                 foreground_note("at size/move end");
                 *lock_or_recover(&SNAP_DRAG) = None;
-                lock_or_recover(&DRAG_GROUP).clear();
                 lock_or_recover(&DRAG_OTHERS).clear();
                 if DRAG_IS_MOVE.swap(false, Ordering::SeqCst) && DRAG_MOVED.load(Ordering::SeqCst) {
                     after_move_drag(hwnd);
                 }
+                lock_or_recover(&DRAG_GROUP).clear();
                 *lock_or_recover(&DRAG_START) = None;
                 save_geometry(hwnd);
                 DefWindowProcW(hwnd, msg, wparam, lparam)

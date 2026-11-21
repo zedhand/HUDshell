@@ -36,6 +36,12 @@ jobs:
       - name: Build harness
         run: cargo build --features harness
 
+      # Lints: every warning is an error, for the normal build and for the harness build (test code included).
+      - name: Clippy
+        run: |
+          cargo clippy --all-targets -- -D warnings
+          cargo clippy --all-targets --features harness -- -D warnings
+
       # Unit tests and release-binary checks. The desktop suites need a real interactive
       # session (hotkeys, mouse, clipboard, WebView2 window) and are run locally.
       - name: Static suite

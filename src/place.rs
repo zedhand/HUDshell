@@ -141,14 +141,14 @@ pub fn snap_to_rects(win: Rect, others: &[Rect], distance: i32) -> Rect {
     for (i, o) in others.iter().enumerate() {
         if near_v(o) {
             for (d, x) in [((win.l - o.r).abs(), o.r), ((win.r - o.l).abs(), o.l - w)] {
-                if d <= distance && x_adj.map_or(true, |(bd, _, _)| d < bd) {
+                if d <= distance && x_adj.is_none_or(|(bd, _, _)| d < bd) {
                     x_adj = Some((d, x, i));
                 }
             }
         }
         if near_h(o) {
             for (d, y) in [((win.t - o.b).abs(), o.b), ((win.b - o.t).abs(), o.t - h)] {
-                if d <= distance && y_adj.map_or(true, |(bd, _, _)| d < bd) {
+                if d <= distance && y_adj.is_none_or(|(bd, _, _)| d < bd) {
                     y_adj = Some((d, y, i));
                 }
             }
@@ -396,7 +396,7 @@ mod tests {
     fn dragging_near_an_edge_snaps_without_resizing() {
         let near_left_top = Rect::new(12, 14, 912, 534);
         assert_eq!(snap_rect(near_left_top, WORK, 16, 8), Rect::new(8, 8, 908, 528));
-        let near_right_bottom = Rect::new(1000, 506, 1912 + 4, 1040 - 8 + 4 + 0);
+        let near_right_bottom = Rect::new(1000, 506, 1912 + 4, 1040 - 8 + 4);
         let s = snap_rect(near_right_bottom, WORK, 16, 8);
         assert_eq!((s.r, s.b), (1920 - 8, 1040 - 8));
         assert_eq!((s.w(), s.h()), (near_right_bottom.w(), near_right_bottom.h()));

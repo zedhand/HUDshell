@@ -395,7 +395,7 @@ unsafe fn spawn_inner(hwnd: isize, id: SessionId, cols: i16, rows: i16, opts: &S
         let (path, pi) = match launched {
             Some(x) => x,
             None => {
-                let _ = ClosePseudoConsole(hpc);
+                ClosePseudoConsole(hpc);
                 return Err(format!("no shell could be started (last: {last_err})"));
             }
         };
@@ -530,11 +530,10 @@ pub fn write_to(id: SessionId, bytes: Vec<u8>) {
         let hex: Vec<String> = bytes.iter().take(64).map(|b| format!("{b:02x}")).collect();
         log(&format!("PTY-IN {} byte(s): {}", bytes.len(), hex.join(" ")));
     }
-    if let Ok(s) = SESSIONS.lock() {
-        if let Some(s) = s.iter().find(|s| s.id == id) {
+    if let Ok(s) = SESSIONS.lock()
+        && let Some(s) = s.iter().find(|s| s.id == id) {
             let _ = s.tx.send(bytes);
         }
-    }
 }
 
 /// Make the shell of session `id` repaint its screen: the pseudoconsole redraws when its size changes, so it is made one column narrower and
@@ -548,8 +547,8 @@ pub fn redraw(id: SessionId, cols: i64, rows: i64) {
 pub fn resize(id: SessionId, cols: i64, rows: i64) {
     let cols = cols.clamp(1, 500) as i16;
     let rows = rows.clamp(1, 300) as i16;
-    if let Ok(mut list) = SESSIONS.lock() {
-        if let Some(s) = list.iter_mut().find(|s| s.id == id) {
+    if let Ok(mut list) = SESSIONS.lock()
+        && let Some(s) = list.iter_mut().find(|s| s.id == id) {
             if s.cols == cols && s.rows == rows {
                 return; // drop no-op resizes
             }
@@ -564,7 +563,6 @@ pub fn resize(id: SessionId, cols: i64, rows: i64) {
             s.cols = cols;
             s.rows = rows;
         }
-    }
 }
 
 /// Release one session: kill its process tree (job close), close its pseudoconsole on a worker thread

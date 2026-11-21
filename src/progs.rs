@@ -58,11 +58,10 @@ pub fn label_for(all: &[Proc], root: u32, mode: &str) -> String {
     if let Some(k) = KNOWN.iter().find(|k| d.iter().any(|p| is_known(&p.name, k))) {
         return k.to_string();
     }
-    if mode == "all" {
-        if let Some(p) = d.iter().rev().find(|p| !p.name.is_empty() && !IGNORE.contains(&p.name.as_str())) {
+    if mode == "all"
+        && let Some(p) = d.iter().rev().find(|p| !p.name.is_empty() && !IGNORE.contains(&p.name.as_str())) {
             return p.name.clone();
         }
-    }
     String::new()
 }
 

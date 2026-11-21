@@ -127,7 +127,7 @@ Key decisions and why:
   behaviour). Reset goes back to the `font_size` of the start. A terminal opened later starts at the common size.
 - `line_height` and `letter_spacing` are xterm.js options of every terminal. `ui_scale` sets one CSS variable that HUDshell's own text and
   the tab strip height are multiples of; at 100 the pixel values are exactly what they were before the setting existed.
-- The settings panel has two rows for the scales (`text_scale` and `ui_scale`, steps of 10%, live and saved); the other text settings have no row and there is no live config reload (config is read at start); both are planned.
+- The settings panel has rows for `text_scale` and `ui_scale` (steps of 10%), `ghost_opacity` (10), `tabs` (auto / always / overlay), `line_height` (5) and `letter_spacing` (1 px), all live, saved and sent to every window; every row has a key as well as buttons (the keys are listed in the README). The panel keeps 12 lines and the width of its opacity bar, so the real-mouse checks that aim at it keep their positions. A config file edited by hand is reloaded while running (see Live settings).
 
 ## Session restore
 

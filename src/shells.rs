@@ -144,12 +144,11 @@ impl Shells {
     /// The close hotkey: the first press asks for confirmation, a second press on the same shell within
     /// `CLOSE_CONFIRM_MS` closes it. A press for a different shell starts over.
     pub fn request_close(&mut self, id: u32, now_ms: u64) -> CloseStep {
-        if let Some((p, t)) = self.pending_close {
-            if p == id && now_ms.saturating_sub(t) <= CLOSE_CONFIRM_MS {
+        if let Some((p, t)) = self.pending_close
+            && p == id && now_ms.saturating_sub(t) <= CLOSE_CONFIRM_MS {
                 self.pending_close = None;
                 return CloseStep::Close;
             }
-        }
         self.pending_close = Some((id, now_ms));
         CloseStep::Confirm
     }

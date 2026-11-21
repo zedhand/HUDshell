@@ -33,7 +33,7 @@ New-Item -ItemType Directory -Force $scratch | Out-Null
 $env:HUDSHELL_TEST_DIR = $scratch
 if ($Sandbox) { $env:HUDSHELL_SANDBOX = $Sandbox } else { $env:HUDSHELL_SANDBOX = $scratch }
 $Suite = @($Suite | ForEach-Object { $_ -split ',' } | Where-Object { $_ })
-$want = if ($Suite -contains 'all') { @('static', 'keys', 'width', 'hideshow', 'clickfocus', 'clipboard', 'autotest', 'ui', 'scrollback', 'ghost', 'attention', 'policy', 'place', 'dpi', 'text', 'reload', 'restore', 'recover', 'windows', 'winrestore', 'qol', 'sessions', 'shells', 'layout', 'input', 'snap', 'windowsnap', 'kbd', 'cost', 'release', 'config', 'soak') + $(if ($Sandbox) { 'real' } else { @() }) } else { $Suite }
+$want = if ($Suite -contains 'all') { @('static', 'keys', 'width', 'hideshow', 'clickfocus', 'clipboard', 'autotest', 'ui', 'scrollback', 'ghost', 'attention', 'policy', 'place', 'dpi', 'text', 'reload', 'restore', 'recover', 'windows', 'winrestore', 'winmove', 'qol', 'sessions', 'shells', 'layout', 'input', 'snap', 'windowsnap', 'kbd', 'cost', 'release', 'config', 'soak') + $(if ($Sandbox) { 'real' } else { @() }) } else { $Suite }
 
 $script:R = New-Object System.Collections.Generic.List[object]
 # Appended to every check name while a suite runs a second time on another monitor.
@@ -81,6 +81,8 @@ public static class GT {
   public static void RestoreCursor() { SetCursorPos(Saved.X, Saved.Y); }
   public static void Hotkey(byte vk) { keybd_event(0x11,0,0,UIntPtr.Zero); keybd_event(0x12,0,0,UIntPtr.Zero); keybd_event(vk,0,0,UIntPtr.Zero); keybd_event(vk,0,2,UIntPtr.Zero); keybd_event(0x12,0,2,UIntPtr.Zero); keybd_event(0x11,0,2,UIntPtr.Zero); }
   public static void Key(byte vk) { keybd_event(vk,0,0,UIntPtr.Zero); keybd_event(vk,0,2,UIntPtr.Zero); }
+  public static void ShiftDown() { keybd_event(0x10,0,0,UIntPtr.Zero); }
+  public static void ShiftUp() { keybd_event(0x10,0,2,UIntPtr.Zero); }
   public static void MoveTo(int x, int y) { SetCursorPos(x, y); }
   public static void MouseDown() { mouse_event(0x2,0,0,0,UIntPtr.Zero); }
   public static void MouseUp() { mouse_event(0x4,0,0,0,UIntPtr.Zero); }
@@ -399,6 +401,17 @@ function Suite-Ui {
     Check 'ui' 'Left x2 lowers opacity by 10%' ([GT]::Alpha($h) -eq 229) ([GT]::Alpha($h))
     [GT]::Key(0x28); [GT]::Key(0x28); Start-Sleep -Milliseconds 700
     Check 'ui' 'Down x2 moves the colour theme two steps' (@(Cut $log $n | Where-Object { $_ -match 'colour theme -> .* \(settings panel\)' }).Count -eq 2)
+    # the other panel rows, by their keys: ghost opacity [ ], tabs t, line height ; ', letter spacing n m
+    $pn = LineCount $log
+    [GT]::Key(0xDB); Start-Sleep -Milliseconds 500; [GT]::Key(0xDD); Start-Sleep -Milliseconds 500
+    [GT]::Key(0x54); Start-Sleep -Milliseconds 500; [GT]::Key(0x54); Start-Sleep -Milliseconds 500; [GT]::Key(0x54); Start-Sleep -Milliseconds 500
+    [GT]::Key(0xDE); Start-Sleep -Milliseconds 500; [GT]::Key(0xBA); Start-Sleep -Milliseconds 500
+    [GT]::Key(0x4D); Start-Sleep -Milliseconds 500; [GT]::Key(0x4E); Start-Sleep -Milliseconds 700
+    $pl = @(Cut $log $pn)
+    Check 'ui' 'the [ and ] keys lower and raise the ghost opacity by 10 (40 -> 30 -> 40)' ((@($pl | Where-Object { $_ -match 'ghost opacity -> 30% \(settings panel\)' }).Count -eq 1) -and (@($pl | Where-Object { $_ -match 'ghost opacity -> 40% \(settings panel\)' }).Count -eq 1))
+    Check 'ui' 'the t key steps the tab style (auto -> always -> overlay -> auto)' ((@($pl | Where-Object { $_ -match 'tabs -> always \(settings panel\)' }).Count -eq 1) -and (@($pl | Where-Object { $_ -match 'tabs -> overlay \(settings panel\)' }).Count -eq 1) -and (@($pl | Where-Object { $_ -match 'tabs -> auto \(settings panel\)' }).Count -eq 1))
+    Check 'ui' "the ' and ; keys raise and lower the line height by 5 (100 -> 105 -> 100)" ((@($pl | Where-Object { $_ -match 'line height -> 105% \(settings panel\)' }).Count -eq 1) -and (@($pl | Where-Object { $_ -match 'line height -> 100% \(settings panel\)' }).Count -eq 1))
+    Check 'ui' 'the m and n keys raise and lower the letter spacing by 1 px (0 -> 1 -> 0)' ((@($pl | Where-Object { $_ -match 'letter spacing -> 1 px \(settings panel\)' }).Count -eq 1) -and (@($pl | Where-Object { $_ -match 'letter spacing -> 0 px \(settings panel\)' }).Count -eq 1))
     $o = [GT]::Origin($h); $ox = $o.X; $oy = $o.Y
     function Click($x, $y) { [GT]::MoveTo($ox + $x, $oy + $y); Start-Sleep -Milliseconds 250; [GT]::MouseDown(); Start-Sleep -Milliseconds 120; [GT]::MouseUp(); Start-Sleep -Milliseconds 600 }
     $cw = 8.4; $b0 = 327; $by = 82
@@ -1232,6 +1245,30 @@ function Snap-Monitor($m, $others) {
     [GT]::MouseDown(); Start-Sleep -Milliseconds 100; [GT]::MouseUp(); Start-Sleep -Milliseconds 2500
     $s8 = Last-State @(Cut $log $n)
     Check 'snap' "$name`: a second double click restores it (${w0}x${h0})" (([Math]::Abs(($s8.R - $s8.L) - $w0) -le 3) -and ([Math]::Abs(($s8.B - $s8.T) - $h0) -le 3)) ("window {0},{1},{2},{3}" -f $s8.L, $s8.T, $s8.R, $s8.B)
+    # Dropping the window with the cursor on the left or right edge of the screen makes it fill that half; dragging it away restores its size.
+    foreach ($side in 'left', 'right') {
+      $st = Last-State @(Cut $log $n); $w0 = $st.R - $st.L; $h0 = $st.B - $st.T
+      $gx = $st.L + [int](200 * $dpr); $gy = $st.T + [int](10 * $dpr)
+      $ex = if ($side -eq 'left') { $m.L } else { $m.R - 1 }
+      $ey = $m.T + [int](($m.B - $m.T) / 2)
+      $joined = @(Get-Monitors | Where-Object { (($side -eq 'left' -and $_.R -eq $m.L) -or ($side -eq 'right' -and $_.L -eq $m.R)) -and $_.T -le $ey -and $_.B -gt $ey }).Count -gt 0
+      Drag-Mouse $gx $gy $ex $ey
+      $s9 = Last-State @(Cut $log $n)
+      if ($joined) {
+        Check 'snap' "$name`: at the $side edge, where another monitor continues, the window is not tiled (the cursor just crosses over)" (([Math]::Abs(($s9.R - $s9.L) - $w0) -le 3) -and ([Math]::Abs(($s9.B - $s9.T) - $h0) -le 3)) ("window {0},{1},{2},{3}" -f $s9.L, $s9.T, $s9.R, $s9.B)
+        continue
+      }
+      $halfW = [int](($m.R - $m.L) / 2)
+      $okx = if ($side -eq 'left') { ([Math]::Abs($s9.L - $m.L) -le 1) -and ([Math]::Abs($s9.R - ($m.L + $halfW)) -le 2) } else { ([Math]::Abs($s9.R - $m.R) -le 1) -and ([Math]::Abs($s9.L - ($m.R - $halfW)) -le 2) }
+      Check 'snap' "$name`: dropping the window with the cursor on the $side edge of the screen fills the $side half" ($okx -and ([Math]::Abs($s9.T - $m.T) -le 1) -and ([Math]::Abs($s9.B - $m.B) -le 1)) ("window {0},{1},{2},{3} on monitor {4},{5},{6},{7}" -f $s9.L, $s9.T, $s9.R, $s9.B, $m.L, $m.T, $m.R, $m.B)
+      Start-Sleep -Milliseconds 400
+      Check 'snap' "$name`: the $side half has square corners" ((Last-Corners @(Cut $log $n)) -eq 'square') (Last-Corners @(Cut $log $n))
+      Shot ("tile-{0}x{1}-{2}" -f ($m.WR - $m.WL), ($m.WB - $m.WT), $side) $s9.L $s9.T $s9.R $s9.B
+      $gx = $s9.L + [int](($s9.R - $s9.L) / 2); $gy = $s9.T + [int](10 * $dpr)
+      Drag-Mouse $gx $gy $gx ($gy + [int](200 * $dpr))
+      $s10 = Last-State @(Cut $log $n)
+      Check 'snap' "$name`: dragging the tiled window away by its strip restores its size (${w0}x${h0})" (([Math]::Abs(($s10.R - $s10.L) - $w0) -le 3) -and ([Math]::Abs(($s10.B - $s10.T) - $h0) -le 3)) ("window {0},{1},{2},{3}" -f $s10.L, $s10.T, $s10.R, $s10.B)
+    }
     foreach ($o in @($others)) {
       $odpr = $o.Dpi / 96.0
       $oname = "monitor " + ($o.WR - $o.WL) + "x" + ($o.WB - $o.WT) + " at " + [int]($o.Dpi * 100 / 96) + "%"
@@ -1385,7 +1422,28 @@ function Suite-Windows {
   Check 'windows' 'the tray item "Ghost all windows" puts every window in ghost mode, and a second use takes them all out' ($gA -and $gA.N -eq 4 -and @($gA.Wins | Where-Object { -not $_.Ghost }).Count -eq 0 -and $gO -and @($gO.Wins | Where-Object { $_.Ghost }).Count -eq 0)
   $hA = Get-Windows $r 'hidden-all'; $sA = Get-Windows $r 'shown-all'
   Check 'windows' 'the tray item "Show / hide all windows" hides every window, and a second use shows them all' ($hA -and @($hA.Wins | Where-Object { $_.Visible }).Count -eq 0 -and $sA -and @($sA.Wins | Where-Object { -not $_.Visible }).Count -eq 0)
+  $kg = Get-Windows $r 'hk-ghost'; $kgo = Get-Windows $r 'hk-ghost-off'; $kh = Get-Windows $r 'hk-hidden'; $ks = Get-Windows $r 'hk-shown'
+  Check 'windows' 'the "ghost all windows" hotkey puts every window in ghost mode, and pressing it again takes them all out' ($kg -and @($kg.Wins | Where-Object { -not $_.Ghost }).Count -eq 0 -and $kgo -and @($kgo.Wins | Where-Object { $_.Ghost }).Count -eq 0)
+  Check 'windows' 'the "show / hide all windows" hotkey hides every window, and pressing it again shows them all' ($kh -and @($kh.Wins | Where-Object { $_.Visible }).Count -eq 0 -and $ks -and @($ks.Wins | Where-Object { -not $_.Visible }).Count -eq 0)
   Check 'windows' 'no start failures logged and the run finished' ((@($r | Where-Object { $_ -match 'FAILED to start' }).Count -eq 0) -and (@($r | Where-Object { $_ -match 'AUTOTEST: finished' }).Count -eq 1))
+}
+
+# Moving a shell into another window, the theme reaching every window, and a window rescued after a display change (no OS input).
+function Suite-WindowsMove {
+  Write-Host "=== winmove: a shell moved into another window, theme in every window, a window off every screen comes back (no OS input) ==="
+  $r = Run-Scenario @('--term', '--windowsmove', '--test-profiles', '--delay', '2') 120000
+  $bg = @($r | Where-Object { $_ -match 'page: .*"k":"bg"' } | ForEach-Object { [regex]::Match($_, '"v":"([^"]*)"').Groups[1].Value })
+  Check 'winmove' 'the colour theme change reached both windows: each page has the same new background, not the starting one' ($bg.Count -ge 2 -and ($bg[-1] -eq $bg[-2]) -and $bg[-1] -ne '#0c1620' -and $bg[-1] -ne '') ($bg -join ' | ')
+  $b = Get-Windows $r 'before-move'; $a = Get-Windows $r 'after-move'; $l = Get-Windows $r 'after-last-move'; $o = Get-Windows $r 'after-offscreen'
+  Check 'winmove' 'before the move: window 1 holds shell 1, window 2 holds shells 2 and 3' ($b -and $b.N -eq 2 -and $b.Wins[0].Shells -eq '1' -and $b.Wins[1].Shells -eq '2,3') $(if ($b) { ($b.Wins | ForEach-Object { "[$($_.Shells)]" }) -join ' ' } else { 'no state' })
+  Check 'winmove' 'the move hotkey action takes the active shell (3) out of window 2 into window 1, which now holds 1 and 3' ($a -and $a.N -eq 2 -and $a.Wins[0].Shells -eq '1,3' -and $a.Wins[1].Shells -eq '2') $(if ($a) { ($a.Wins | ForEach-Object { "[$($_.Shells)]" }) -join ' ' } else { 'no state' })
+  Check 'winmove' 'the moved shell kept its start profile (work), so a restart would use it' (@($r | Where-Object { $_ -match 'SPAWNPROFILE id=3 name=work' }).Count -eq 1)
+  Check 'winmove' 'the moved shell kept running: what is typed into it shows up in its new window' (Dump-Has $r 'moved-three' 'MOVED-THREE')
+  Check 'winmove' "moving a window's only shell takes the window with it: one window is left, holding 1, 3 and 2" ($l -and $l.N -eq 1 -and $l.Wins[0].Shells -eq '1,3,2') $(if ($l) { "n=$($l.N) [$($l.Wins[0].Shells)]" } else { 'no state' })
+  Check 'winmove' 'that shell kept running too' (Dump-Has $r 'moved-two' 'MOVED-TWO')
+  $mons = @(Get-Monitors); $vl = ($mons | Measure-Object -Property L -Minimum).Minimum; $vr = ($mons | Measure-Object -Property R -Maximum).Maximum
+  Check 'winmove' 'a window put far off every screen comes back onto a screen after a display change message' ($o -and $o.Wins[0].L -ge $vl -and $o.Wins[0].R -le $vr -and (@($r | Where-Object { $_ -match 'display changed: the window was off every screen' }).Count -ge 1)) $(if ($o) { "left $($o.Wins[0].L), screens $vl..$vr" } else { 'no state' })
+  Check 'winmove' 'no start failures logged and the run finished' ((@($r | Where-Object { $_ -match 'FAILED to start' }).Count -eq 0) -and (@($r | Where-Object { $_ -match 'AUTOTEST: finished' }).Count -eq 1))
 }
 
 # Several windows come back at the next start (restore_session = shells): their shells, layouts and where each window was.
@@ -1413,6 +1471,15 @@ function Suite-WindowsRestore {
   if ($j -and $j2) { for ($i = 0; $i -lt 2; $i++) { for ($k = 0; $k -lt 4; $k++) { if ([Math]::Abs([int]$j.windows[$i].rect[$k] - [int]$j2.windows[$i].rect[$k]) -gt 2) { $placed = $false } } } } else { $placed = $false }
   Check 'winrestore' 'and each restored window is where it was (position and size within 2 px)' $placed
   Check 'winrestore' 'the log says each restored window got its shells back' (@($r2 | Where-Object { $_ -match 'session restored: 2 shell' }).Count -eq 2 -or @($r2 | Where-Object { $_ -match 'session restored: ' }).Count -ge 3)
+  # a saved window whose place is on no screen now (its monitor is gone): it is opened at the default place instead, on a screen
+  if ($j2) {
+    $j2.windows[0].rect = @(-30000, -30000, 700, 420)
+    [IO.File]::WriteAllText($file, ($j2 | ConvertTo-Json -Depth 10))
+    $r4 = Run-Scenario (@('--term', '--windowsload') + $args2) 120000
+    $s4 = Get-Windows $r4 'restored'
+    $mons = @(Get-Monitors); $vl = ($mons | Measure-Object -Property L -Minimum).Minimum; $vr = ($mons | Measure-Object -Property R -Maximum).Maximum
+    Check 'winrestore' 'a saved window whose place is on no screen (its monitor is gone) is opened on a screen instead, with its shells' ($s4 -and $s4.N -eq 3 -and @($s4.Wins | Where-Object { $_.L -lt $vl -or $_.R -gt $vr }).Count -eq 0) $(if ($s4) { "n=$($s4.N), lefts " + (($s4.Wins | ForEach-Object { $_.L }) -join ',') } else { 'no state' })
+  }
   $r3 = Run-Scenario @('--term', '--windowsload', '--test-profiles', '--session-file', $file, '--delay', '2') 120000
   $s3 = Get-Windows $r3 'restored'
   Check 'winrestore' 'restore_session off (the default): one window with one shell' ($s3 -and $s3.N -eq 1 -and $s3.Wins[0].Shells -eq '1')
@@ -1466,6 +1533,14 @@ function Suite-WindowSnap {
     Start-Sleep 1
     $w = Get-Windows @(Cut $log $n) 'snap'; $w1 = $w.Wins[0]; $w2 = $w.Wins[1]
     Check 'windowsnap' 'with the pair touching, dragging window 2 moves both again (a group)' (([Math]::Abs(($w1.L - $o1.L) - ($w2.L - $o2.L)) -le 1) -and (($w1.L - $o1.L) -ne 0))
+    # Shift held at the start of the drag: only the dragged window moves (the pair is left alone)
+    $o1 = $w1; $o2 = $w2
+    $gx = $w2.L + [int](150 * $dpr); $gy = $w2.T + [int](10 * $dpr)
+    [GT]::ShiftDown(); Start-Sleep -Milliseconds 300
+    try { Drag-Mouse $gx $gy ($gx + [int](40 * $dpr)) ($gy + [int](150 * $dpr)) } finally { [GT]::ShiftUp() }
+    Start-Sleep 1
+    $w = Get-Windows @(Cut $log $n) 'snap'; $w1 = $w.Wins[0]; $w2 = $w.Wins[1]
+    Check 'windowsnap' 'with Shift held, dragging window 2 moves only window 2 and leaves the touching window 1 where it was' (([Math]::Abs($w1.L - $o1.L) -le 1) -and ([Math]::Abs($w1.T - $o1.T) -le 1) -and ([Math]::Abs($w2.T - $o2.T) -ge [int](100 * $dpr))) ("window 1 moved {0},{1}; window 2 moved {2},{3}" -f ($w1.L - $o1.L), ($w1.T - $o1.T), ($w2.L - $o2.L), ($w2.T - $o2.T))
     Check 'windowsnap' 'no start failures logged' (@(Cut $log $n | Where-Object { $_ -match 'FAILED to start' }).Count -eq 0)
   } finally {
     Stop-HUDshell
@@ -1711,6 +1786,7 @@ foreach ($s in $want) {
     'recover' { Suite-Recover }
     'windows' { Suite-Windows }
     'winrestore' { Suite-WindowsRestore }
+    'winmove' { Suite-WindowsMove }
     'windowsnap' { Suite-WindowSnap }
     'input' { Suite-Input }
     'snap' { Suite-Snap }
