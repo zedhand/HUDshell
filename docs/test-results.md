@@ -31,6 +31,13 @@ clean for both builds. The `real` suite was not re-run after these three feature
   is applied again when A comes back (300,300), B has its own (900,500), a program with no place and the desktop shell leave the window alone, no program
   name is written to the log, and with the setting off (the default) nothing is remembered or moved. The real lookup of the program in front was checked for its
   shape only (a lower-case executable name without a folder). Not tested with a real game; only the first window is moved.
+- **A real monitor unplug (`monitorunplug`, manual, 2026-11-21, 8 pass):** with three HUDshell windows open (two on the left 150% monitor, one on the primary), the
+  person unplugged the left monitor's cable. HUDshell kept running, Windows reported one monitor fewer, both windows that had been on it were moved onto the primary
+  monitor (the log says so for both), the window on the primary did not move, and after the cable was plugged back in all three windows were still on screen.
+  **Found by that run and then changed:** the two rescued windows landed at exactly the same place and kept their physical size (1050x630 pixels from the 150%
+  monitor, which is 1.5 times bigger on a 100% monitor). They now keep their logical size and sit along a diagonal (unit-tested in `place.rs`); **that change has not
+  been run against a real unplug yet.** After the cable was plugged back the windows stayed where they had been put (they do not jump back).
+- **A shell in the alternate screen (`altmove`, no OS input):** a full-screen program's screen (alternate buffer) and text survive a detach into a new window.
 - **Cost of the extra window** (`costwin`) and **`edge_tiling = false`** (`tileoff`) are described above.
 
 ## Extras after several windows (2026-11-21): earlier full run 501 pass, 0 fail, 3 warnings

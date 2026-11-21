@@ -2865,6 +2865,10 @@ fn move_shell_now(id: u32) {
     }
 }
 
+/// When the last rescue happened and how many windows it moved (see `keep_on_screen`).
+static RESCUE_AT: AtomicU64 = AtomicU64::new(0);
+static RESCUE_COUNT: AtomicU32 = AtomicU32::new(0);
+
 /// After a display change (a monitor unplugged, the resolution or arrangement changed): a window that is no longer on any screen goes back
 /// into the work area of the nearest monitor.
 unsafe fn keep_on_screen(hwnd: HWND) {
@@ -2876,12 +2880,22 @@ unsafe fn keep_on_screen(hwnd: HWND) {
     if on_screen(&g) {
         return;
     }
+    use windows::Win32::Graphics::Gdi::{MonitorFromWindow, MONITOR_DEFAULTTONEAREST};
+    use windows::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
     let work = unsafe { work_area(hwnd) };
     let margin = unsafe { scaled(hwnd, cfg().snap_margin) };
-    let (w, h) = (g.w.min(work.w()), g.h.min(work.h()));
-    let (x, y) = place::corner_pos(0, w, h, work, margin);
-    let _ = unsafe { SetWindowPos(hwnd, None, x, y, w, h, SWP_NOZORDER | SWP_NOACTIVATE) };
-    log(&format!("display changed: the window was off every screen; moved to {x},{y}"));
+    // the scaling of the monitor it was on (the window still has it) and of the one it lands on: it keeps its logical size
+    let old_dpi = unsafe { GetDpiForWindow(hwnd) } as i32;
+    let (mut dx, mut dy) = (0u32, 0u32);
+    let mon = unsafe { MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST) };
+    let new_dpi = if unsafe { GetDpiForMonitor(mon, MDT_EFFECTIVE_DPI, &mut dx, &mut dy) }.is_ok() { dx as i32 } else { old_dpi };
+    // windows rescued by the same display change sit along a diagonal instead of on top of each other
+    let now = now_ms() as u64;
+    let index = if now.saturating_sub(RESCUE_AT.swap(now, Ordering::SeqCst)) < 3000 { RESCUE_COUNT.fetch_add(1, Ordering::SeqCst) + 1 } else { RESCUE_COUNT.store(0, Ordering::SeqCst); 0 };
+    let step = unsafe { scaled(hwnd, 36) };
+    let r = place::rescue_rect((g.w, g.h), (old_dpi, new_dpi), work, margin, index as i32, step);
+    let _ = unsafe { SetWindowPos(hwnd, None, r.l, r.t, r.w(), r.h(), SWP_NOZORDER | SWP_NOACTIVATE) };
+    log(&format!("display changed: the window was off every screen; moved to {},{} ({}x{}, scaling {} -> {})", r.l, r.t, r.w(), r.h(), old_dpi, new_dpi));
     unsafe { save_geometry(hwnd) };
 }
 

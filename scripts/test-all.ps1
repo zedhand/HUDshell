@@ -33,7 +33,7 @@ New-Item -ItemType Directory -Force $scratch | Out-Null
 $env:HUDSHELL_TEST_DIR = $scratch
 if ($Sandbox) { $env:HUDSHELL_SANDBOX = $Sandbox } else { $env:HUDSHELL_SANDBOX = $scratch }
 $Suite = @($Suite | ForEach-Object { $_ -split ',' } | Where-Object { $_ })
-$want = if ($Suite -contains 'all') { @('static', 'keys', 'width', 'hideshow', 'clickfocus', 'clipboard', 'autotest', 'ui', 'scrollback', 'ghost', 'attention', 'policy', 'place', 'dpi', 'text', 'reload', 'restore', 'recover', 'windows', 'winrestore', 'winmove', 'costwin', 'tileoff', 'tabsedit', 'tabsui', 'gamepos', 'qol', 'sessions', 'shells', 'layout', 'input', 'snap', 'windowsnap', 'kbd', 'cost', 'release', 'config', 'soak') + $(if ($Sandbox) { 'real' } else { @() }) } else { $Suite }
+$want = if ($Suite -contains 'all') { @('static', 'keys', 'width', 'hideshow', 'clickfocus', 'clipboard', 'autotest', 'ui', 'scrollback', 'ghost', 'attention', 'policy', 'place', 'dpi', 'text', 'reload', 'restore', 'recover', 'windows', 'winrestore', 'winmove', 'costwin', 'tileoff', 'tabsedit', 'tabsui', 'gamepos', 'altmove', 'qol', 'sessions', 'shells', 'layout', 'input', 'snap', 'windowsnap', 'kbd', 'cost', 'release', 'config', 'soak') + $(if ($Sandbox) { 'real' } else { @() }) } else { $Suite }
 
 $script:R = New-Object System.Collections.Generic.List[object]
 # Appended to every check name while a suite runs a second time on another monitor.
@@ -1764,6 +1764,71 @@ function Suite-CostWindows {
   } finally { Stop-HUDshell }
 }
 
+# A shell in the alternate screen (what full-screen programs use) moves into a window of its own (no OS input).
+function Suite-AltMove {
+  Write-Host "=== altmove: a shell in the alternate screen is detached into its own window (no OS input) ==="
+  $r = Run-Scenario @('--term', '--altmove', '--delay', '2') 90000
+  $hdr = { param($label) for ($k = 0; $k -lt $r.Count; $k++) { if ($r[$k] -match ('DUMP label=' + $label + '(\s|$)')) { for ($j = $k + 1; $j -lt [Math]::Min($k + 6, $r.Count); $j++) { if ($r[$j] -match 'terminal dump:.*buffer="(\w+)"') { return $Matches[1] } } } }; return '?' }
+  $b0 = & $hdr 'alt-before'; $b1 = & $hdr 'alt-after'
+  Check 'altmove' 'before the move the shell is in the alternate screen and shows its text' ($b0 -eq 'alternate' -and (Dump-Has $r 'alt-before' 'ALT-SCREEN-LINE')) "buffer $b0"
+  Check 'altmove' 'after the move, in the new window, it is still in the alternate screen with the same text' ($b1 -eq 'alternate' -and (Dump-Has $r 'alt-after' 'ALT-SCREEN-LINE')) "buffer $b1"
+  Check 'altmove' 'no start failures logged and the run finished' ((@($r | Where-Object { $_ -match 'FAILED to start' }).Count -eq 0) -and (@($r | Where-Object { $_ -match 'AUTOTEST: finished' }).Count -eq 1))
+}
+
+# MANUAL (not part of 'all'): a person unplugs a monitor while three HUDshell windows are open, and plugs it back in later. Nothing about the
+# display settings is changed by this script. Run it with: -Suite monitorunplug. HUDSHELL_UNPLUG="1920x1080" picks the monitor by the size of its work area.
+function Suite-MonitorUnplug {
+  Write-Host "=== monitorunplug: MANUAL - a monitor is unplugged and plugged back in while HUDshell runs ==="
+  $mons0 = @(Get-Monitors)
+  $primary = $mons0 | Where-Object { $_.Primary } | Select-Object -First 1
+  $others = @($mons0 | Where-Object { -not $_.Primary })
+  if ($others.Count -lt 1) { Warn 'monitorunplug' 'only one monitor: nothing to unplug, not tested'; return }
+  $target = $null
+  if ($env:HUDSHELL_UNPLUG) { $target = $others | Where-Object { (($_.WR - $_.WL).ToString() + 'x' + ($_.WB - $_.WT).ToString()) -eq $env:HUDSHELL_UNPLUG } | Select-Object -First 1 }
+  if (-not $target) { $target = $others | Sort-Object -Property Dpi -Descending | Select-Object -First 1 }
+  $desc = "{0}x{1} at {2}%, x {3}..{4}" -f ($target.WR - $target.WL), ($target.WB - $target.WT), [int]($target.Dpi * 100 / 96), $target.L, $target.R
+  Stop-HUDshell
+  $p = $null
+  try {
+    $n = LineCount $log
+    $at = "{0},{1}" -f ($target.WL + 150), ($target.WT + 100)
+    $pat = "{0},{1}" -f ($primary.WL + 300), ($primary.WT + 300)
+    $p = Start-Process $dbg -ArgumentList @('--term', '--monitortest', '--at', $at, '--primary-at', $pat, '--delay', '2') -PassThru
+    $inside = { param($w, $ms) $cx = [int](($w.L + $w.R) / 2); $cy = [int](($w.T + $w.B) / 2); @($ms | Where-Object { $cx -ge $_.L -and $cx -lt $_.R -and $cy -ge $_.T -and $cy -lt $_.B }).Count -gt 0 }
+    $w0 = $null
+    for ($i = 0; $i -lt 90 -and -not ($w0 -and $w0.N -eq 3 -and $w0.Wins.Count -eq 3); $i++) { Start-Sleep 1; $w0 = Get-Windows @(Cut $log $n) 'mon'; if ($w0 -and $w0.N -eq 3) { Start-Sleep 2; $w0 = Get-Windows @(Cut $log $n) 'mon' } }
+    Check 'monitorunplug' 'three HUDshell windows are open: two on the monitor to be unplugged, one on another' ($w0 -and $w0.N -eq 3 -and (& $inside $w0.Wins[0] @($target)) -and (& $inside $w0.Wins[1] @($target)) -and (& $inside $w0.Wins[2] @(@($mons0 | Where-Object { $_.L -ne $target.L })))) $(if ($w0) { ($w0.Wins | ForEach-Object { "w$($_.Serial)@$($_.L),$($_.T)" }) -join ' ' } else { 'no state' })
+    if (-not ($w0 -and $w0.N -eq 3)) { return }
+    Write-Host ""
+    Write-Host ">>> UNPLUG-NOW: unplug the cable of the monitor $desc (waiting up to 4 minutes)"
+    $gone = $false
+    for ($i = 0; $i -lt 240 -and -not $gone; $i++) { Start-Sleep 1; if (@(Get-Monitors).Count -lt $mons0.Count) { $gone = $true } }
+    Check 'monitorunplug' 'the monitor was unplugged (Windows reports one monitor fewer)' $gone
+    if (-not $gone) { return }
+    Start-Sleep 15
+    $mons1 = @(Get-Monitors)
+    $w1 = Get-Windows @(Cut $log $n) 'mon'
+    $detail1 = if ($w1) { ($w1.Wins | ForEach-Object { "w$($_.Serial)@$($_.L),$($_.T) $($_.R - $_.L)x$($_.B - $_.T)" }) -join ' ' } else { 'no state' }
+    Check 'monitorunplug' 'HUDshell is still running after the unplug' (-not $p.HasExited)
+    Check 'monitorunplug' 'every window is on a monitor that is left (its centre is on a screen)' ($w1 -and $w1.N -eq 3 -and @($w1.Wins | Where-Object { -not (& $inside $_ $mons1) }).Count -eq 0) $detail1
+    $pw = [int](700 * $primary.Dpi / 96)
+    Check 'monitorunplug' 'a rescued window keeps its logical size on the new monitor (700 x 420 at the scaling of the monitor it landed on)' ($w1 -and [Math]::Abs(($w1.Wins[0].R - $w1.Wins[0].L) - $pw) -le 4 -and [Math]::Abs(($w1.Wins[1].R - $w1.Wins[1].L) - $pw) -le 4) $detail1
+    Check 'monitorunplug' 'the two rescued windows do not sit exactly on top of each other' ($w1 -and (($w1.Wins[0].L -ne $w1.Wins[1].L) -or ($w1.Wins[0].T -ne $w1.Wins[1].T))) $detail1
+    Check 'monitorunplug' 'the window on the monitor that stayed did not move' ($w1 -and [Math]::Abs($w1.Wins[2].L - $w0.Wins[2].L) -le 2 -and [Math]::Abs($w1.Wins[2].T - $w0.Wins[2].T) -le 2) $detail1
+    Check 'monitorunplug' 'the log says windows that were off every screen were moved back' (@(Cut $log $n | Where-Object { $_ -match 'display changed: the window was off every screen' }).Count -ge 1) ("moved: " + @(Cut $log $n | Where-Object { $_ -match 'display changed: the window was off every screen' }).Count)
+    Write-Host ""
+    Write-Host ">>> PLUG-BACK-NOW: plug the monitor in again (waiting up to 4 minutes)"
+    $back = $false
+    for ($i = 0; $i -lt 240 -and -not $back; $i++) { Start-Sleep 1; if (@(Get-Monitors).Count -ge $mons0.Count) { $back = $true } }
+    Check 'monitorunplug' 'the monitor was plugged back in' $back
+    if (-not $back) { return }
+    Start-Sleep 12
+    $mons2 = @(Get-Monitors)
+    $w2 = Get-Windows @(Cut $log $n) 'mon'
+    Check 'monitorunplug' 'HUDshell is still running and all three windows are on screen after the monitor came back' ((-not $p.HasExited) -and $w2 -and $w2.N -eq 3 -and @($w2.Wins | Where-Object { -not (& $inside $_ $mons2) }).Count -eq 0) $(if ($w2) { ($w2.Wins | ForEach-Object { "w$($_.Serial)@$($_.L),$($_.T)" }) -join ' ' } else { 'no state' })
+  } finally { Stop-HUDshell }
+}
+
 # game_positions: the window goes back to where it was put while a given program was in front. The program in front is faked (no OS input).
 function Suite-GamePos {
   Write-Host "=== gamepos: window places per program (the foreground program is faked; no OS input) ==="
@@ -1946,6 +2011,8 @@ foreach ($s in $want) {
     'tileoff' { Suite-TileOff }
     'tabsedit' { Suite-TabsEdit }
     'gamepos' { Suite-GamePos }
+    'altmove' { Suite-AltMove }
+    'monitorunplug' { Suite-MonitorUnplug }
     'tabsui' { Suite-TabsUi }
     'windowsnap' { Suite-WindowSnap }
     'input' { Suite-Input }

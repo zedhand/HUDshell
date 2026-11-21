@@ -176,6 +176,18 @@ pub fn snap_to_rects(win: Rect, others: &[Rect], distance: i32) -> Rect {
     Rect::new(x, y, x + w, y + h)
 }
 
+/// Where a window goes when its monitor is gone: its size is scaled to the scaling of the monitor it lands on (so it keeps its logical size), cut
+/// to the work area, and it sits at the top-left corner, each window of the same rescue `index` further along the diagonal by `step` pixels so
+/// they do not hide each other.
+pub fn rescue_rect(size: (i32, i32), dpi: (i32, i32), work: Rect, margin: i32, index: i32, step: i32) -> Rect {
+    let ((w, h), (old_dpi, new_dpi)) = (size, dpi);
+    let (w, h) = if old_dpi > 0 && new_dpi > 0 { (w * new_dpi / old_dpi, h * new_dpi / old_dpi) } else { (w, h) };
+    let (w, h) = (w.min(work.w()).max(1), h.min(work.h()).max(1));
+    let (x0, y0) = corner_pos(0, w, h, work, margin);
+    let off = (index * step).min((work.w() - w).max(0)).min((work.h() - h).max(0));
+    Rect::new(x0 + off, y0 + off, x0 + off + w, y0 + off + h)
+}
+
 /// Two windows touch: an edge of one lies on the opposite edge of the other (within `tol` pixels) and they overlap along that edge.
 pub fn touching(a: Rect, b: Rect, tol: i32) -> bool {
     let side = ((a.r - b.l).abs() <= tol || (a.l - b.r).abs() <= tol) && a.t < b.b && a.b > b.t;
@@ -327,6 +339,18 @@ mod tests {
         let mut d = SnapDrag::new(Rect::new(200, 300, 400, 500));
         let applied = d.step(Rect::new(10, 300, 210, 500), WORK, 16, 8, &[Rect::new(220, 300, 420, 500)]);
         assert_eq!(applied.l, 8, "the screen margin wins over the window beside it");
+    }
+
+    #[test]
+    fn a_rescued_window_keeps_its_logical_size_and_does_not_hide_the_others() {
+        let work = Rect::new(0, 0, 2560, 1440);
+        // 700x420 (logical) on a 150% monitor is 1050x630 pixels; on a 100% monitor it is 700x420 again
+        assert_eq!(rescue_rect((1050, 630), (144, 96), work, 12, 0, 36), Rect::new(12, 12, 712, 432));
+        assert_eq!(rescue_rect((1050, 630), (144, 96), work, 12, 2, 36), Rect::new(84, 84, 784, 504), "the third window of the rescue is two steps along");
+        // onto a bigger scaling the window grows with it; one too big for the screen is cut to it
+        assert_eq!(rescue_rect((700, 420), (96, 144), work, 0, 0, 36), Rect::new(0, 0, 1050, 630));
+        assert_eq!(rescue_rect((5000, 4000), (96, 96), work, 0, 0, 36), Rect::new(0, 0, 2560, 1440));
+        assert_eq!(rescue_rect((700, 420), (0, 96), work, 0, 0, 36), Rect::new(0, 0, 700, 420), "an unknown scaling leaves the size alone");
     }
 
     #[test]
