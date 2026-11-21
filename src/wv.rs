@@ -17,7 +17,7 @@ use webview2_com::{
     CreateCoreWebView2ControllerCompletedHandler,
     CreateCoreWebView2EnvironmentCompletedHandler,
     FocusChangedEventHandler, NavigationStartingEventHandler, NewWindowRequestedEventHandler,
-    PermissionRequestedEventHandler,
+    PermissionRequestedEventHandler, ProcessFailedEventHandler,
     WebMessageReceivedEventHandler, WebResourceRequestedEventHandler,
 };
 use windows::Win32::UI::Shell::SHCreateMemStream;
@@ -26,8 +26,12 @@ use windows::Wdk::System::SystemServices::RtlGetVersion;
 use windows::Win32::Foundation::{E_POINTER, HWND, LPARAM, RECT};
 use windows::Win32::System::SystemInformation::OSVERSIONINFOW;
 use windows::Win32::UI::WindowsAndMessaging::{
-    EnumChildWindows, GetClassNameW, GetClientRect, GetWindowLongPtrW, GWL_EXSTYLE,
+    EnumChildWindows, GetClassNameW, GetClientRect, GetWindowLongPtrW, PostMessageW, GWL_EXSTYLE,
 };
+use windows::Win32::Foundation::WPARAM;
+
+/// Posted to the main window when a WebView2 process failed (wparam = the kind of process, see `on_process_failed`).
+pub const WM_APP_WEBVIEW_FAILED: u32 = 0x8000 + 9;
 
 use crate::{log, pty};
 
@@ -165,6 +169,27 @@ pub unsafe fn init(hwnd: HWND) -> Result<(), String> {
             .add_LostFocus(
                 &FocusChangedEventHandler::create(Box::new(|_, _| {
                     log("webview: controller LostFocus");
+                    Ok(())
+                })),
+                &mut token,
+            )
+            .map_err(|e| e.to_string())?;
+
+        // A WebView2 process died. Only post a message here: rebuilding blocks and must not run inside this callback.
+        webview
+            .add_ProcessFailed(
+                &ProcessFailedEventHandler::create(Box::new(move |_, args| {
+                    let mut kind = Default::default();
+                    if let Some(a) = args {
+                        let _ = a.ProcessFailedKind(&mut kind);
+                    }
+                    log(&format!("webview: a process failed (kind {})", kind.0));
+                    let _ = PostMessageW(
+                        Some(HWND(hwnd_i as *mut std::ffi::c_void)),
+                        WM_APP_WEBVIEW_FAILED,
+                        WPARAM(kind.0 as usize),
+                        LPARAM(0),
+                    );
                     Ok(())
                 })),
                 &mut token,
@@ -340,7 +365,11 @@ fn handle_term_message(hwnd: isize, m: &str) {
                 log(&format!("bridge: session {id} {kind} at {cols}x{rows}, starting shell"));
                 match pty::spawn(hwnd, id, cols, rows, &crate::spawn_opts_for(id)) {
                     Ok(path) => log(&format!("pty: started {path} for session {id} at {cols}x{rows}")),
-                    Err(e) => log(&format!("pty: FAILED to start session {id}: {e}")),
+                    Err(e) => {
+                        log(&format!("pty: FAILED to start session {id}: {e}"));
+                        // say so in the tab (Enter there tries again), instead of a silent empty window
+                        post(&serde_json::json!({ "t": "startfail", "s": id, "msg": e }).to_string());
+                    }
                 }
             }
         }
@@ -351,6 +380,7 @@ fn handle_term_message(hwnd: isize, m: &str) {
         }
         Some("pickerclose") => crate::picker_closed(hwnd),
         Some("tabsneeded") => {
+            crate::reopen_shells_after_recovery();
             crate::layout_page_ready();
             crate::push_tabs();
         }
@@ -452,6 +482,44 @@ pub fn post(json: &str) {
             let _ = unsafe { w.PostWebMessageAsString(&HSTRING::from(json)) };
         }
     });
+}
+
+/// A WebView2 process failed (message `WM_APP_WEBVIEW_FAILED`, `kind` = COREWEBVIEW2_PROCESS_FAILED_KIND). The shells keep running; only the page
+/// needs a new life. A render process (1), an unresponsive one (2) or a frame's (3) is cured by loading the page again; when the browser process
+/// itself (0) is gone the whole web view is created again. Returns true when a new page is on its way and must be told about the open shells.
+pub unsafe fn on_process_failed(hwnd: HWND, kind: i32) -> bool {
+    match kind {
+        1..=3 => {
+            log("webview: reloading the page after a render process failure");
+            INFLIGHT.with(|i| i.set(0));
+            WEBVIEW.with(|w| {
+                if let Some(w) = w.borrow().as_ref() {
+                    let _ = unsafe { w.Reload() };
+                }
+            });
+            true
+        }
+        0 => {
+            log("webview: the browser process exited; creating the web view again");
+            WEBVIEW.with(|w| *w.borrow_mut() = None);
+            CONTROLLER.with(|c| *c.borrow_mut() = None);
+            INFLIGHT.with(|i| i.set(0)); // the old page will never acknowledge what was in flight
+            match unsafe { init(hwnd) } {
+                Ok(()) => {
+                    log("webview: created again");
+                    true
+                }
+                Err(e) => {
+                    log(&format!("webview: could not create it again: {e}"));
+                    false
+                }
+            }
+        }
+        _ => {
+            log("webview: the failed process needs no action");
+            false
+        }
+    }
 }
 
 /// Forward buffered pty output to the page while the in-flight byte budget allows.

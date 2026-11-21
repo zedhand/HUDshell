@@ -22,6 +22,7 @@ mod layout;
 mod place;
 mod progs;
 mod pty;
+mod session;
 mod shells;
 mod wv;
 
@@ -38,7 +39,7 @@ use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::HiDpi::{
     GetDpiForWindow, SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
 };
-use windows::Win32::UI::Input::KeyboardAndMouse::{RegisterHotKey, SetFocus, HOT_KEY_MODIFIERS};
+use windows::Win32::UI::Input::KeyboardAndMouse::{RegisterHotKey, SetFocus, UnregisterHotKey, HOT_KEY_MODIFIERS};
 use windows::Win32::UI::WindowsAndMessaging::*;
 
 const HK_CLICKTHROUGH: i32 = 1;
@@ -676,7 +677,7 @@ fn push_settings(open: bool) {
     wv::post(
         &serde_json::json!({
             "t": "settings", "open": open, "opacity": base_opacity(), "minOpacity": config::MIN_OPACITY,
-            "theme": c.theme, "themes": themes,
+            "theme": c.theme, "themes": themes, "textScale": c.text_scale, "uiScale": c.ui_scale,
         })
         .to_string(),
     );
@@ -707,6 +708,22 @@ pub fn on_settings_message(hwnd_i: isize, v: &serde_json::Value) {
                         log(&format!("colour theme -> {name} (settings panel)"));
                         push_theme();
                     }
+                }
+            }
+            Some("textscale") => {
+                if let Some(p) = v["v"].as_u64() {
+                    let pct = (p as u32).clamp(50, 300);
+                    cfg_update(|c| c.text_scale = pct);
+                    log(&format!("text scale -> {pct}% (settings panel)"));
+                    wv::post(&serde_json::json!({ "t": "textscale", "pct": pct }).to_string());
+                }
+            }
+            Some("uiscale") => {
+                if let Some(p) = v["v"].as_u64() {
+                    let pct = (p as u32).clamp(50, 300);
+                    cfg_update(|c| c.ui_scale = pct);
+                    log(&format!("ui scale -> {pct}% (settings panel)"));
+                    wv::post(&serde_json::json!({ "t": "uiscale", "pct": pct }).to_string());
                 }
             }
             Some("close") => {
@@ -793,6 +810,8 @@ unsafe fn cycle_size(hwnd: HWND) {
 static SNAP_DRAG: Mutex<Option<place::SnapDrag>> = Mutex::new(None);
 static DRAG_START: Mutex<Option<RECT>> = Mutex::new(None);
 static DRAG_IS_MOVE: AtomicBool = AtomicBool::new(false);
+/// The window really moved during this drag (a plain click on the strip must not maximize it at the top edge).
+static DRAG_MOVED: AtomicBool = AtomicBool::new(false);
 /// The window fills the work area of a monitor (dragged to the top edge, or the top strip double-clicked); the rectangle and
 /// scaling it had before are kept to restore it.
 static MAXIMIZED: AtomicBool = AtomicBool::new(false);
@@ -805,6 +824,7 @@ fn lock_or_recover<T>(m: &'static Mutex<T>) -> std::sync::MutexGuard<'static, T>
 
 /// Magnetic edge snapping while the window is dragged (WM_MOVING). Returns true when the rectangle changed.
 unsafe fn snap_moving(hwnd: HWND, r: &mut RECT) -> bool {
+    DRAG_MOVED.store(true, Ordering::SeqCst);
     if MAXIMIZED.swap(false, Ordering::SeqCst) {
         // The first movement of a drag that began on a maximized window: it leaves the maximized state, at the size it had
         // before, staying under the cursor in the same proportion as before (like a normal title bar).
@@ -888,6 +908,376 @@ unsafe fn restore_window(hwnd: HWND, anchor_x: Option<i32>) {
     let _ = unsafe { SetWindowPos(hwnd, None, x, y, w, h, SWP_NOZORDER | SWP_NOACTIVATE) };
     log(&format!("restored from maximized to {w}x{h} at {x},{y}"));
     unsafe { save_geometry(hwnd) };
+}
+
+/// On a keyboard layout with an AltGr key (right Alt, which Windows treats as Ctrl+Alt), a Ctrl+Alt+<key> hotkey also swallows
+/// the character AltGr+<key> types. The registered hotkeys (as written in the config) that do, with that character.
+fn altgr_clashes(specs: &[String]) -> Vec<(String, char)> {
+    use windows::Win32::UI::Input::KeyboardAndMouse::{GetKeyboardLayout, MapVirtualKeyExW, ToUnicodeEx, MAPVK_VK_TO_VSC};
+    let hkl = unsafe { GetKeyboardLayout(0) };
+    let mut out = Vec::new();
+    for spec in specs {
+        let Some((mods, vk)) = config::parse_hotkey(spec) else { continue };
+        // Ctrl and Alt both held, no Windows key
+        if mods & 0x2 == 0 || mods & 0x1 == 0 || mods & 0x8 != 0 {
+            continue;
+        }
+        // AltGr is reported as Ctrl (left) + Alt (right)
+        let mut state = [0u8; 256];
+        state[0x11] = 0x80;
+        state[0x12] = 0x80;
+        state[0xA2] = 0x80;
+        state[0xA5] = 0x80;
+        if mods & 0x4 != 0 {
+            state[0x10] = 0x80;
+        }
+        let sc = unsafe { MapVirtualKeyExW(vk, MAPVK_VK_TO_VSC, Some(hkl)) };
+        let mut buf = [0u16; 8];
+        // flag 4: do not change the keyboard state (a dead key stays pending as it was)
+        let n = unsafe { ToUnicodeEx(vk, sc, &state, &mut buf, 4, Some(hkl)) };
+        // exactly one printable character (a layout without AltGr gives nothing or a control character)
+        if n == 1 && buf[0] >= 0x20 && buf[0] != 0x7f {
+            if let Some(ch) = char::from_u32(buf[0] as u32) {
+                out.push((spec.clone(), ch));
+            }
+        }
+    }
+    out
+}
+
+/// Tell the user (once, at start) about hotkeys that take characters typed with AltGr on the current layout.
+fn notice_altgr_clashes(registered: &[String]) {
+    let clashes = altgr_clashes(registered);
+    if clashes.is_empty() {
+        return;
+    }
+    let shown: Vec<String> = clashes.iter().take(5).map(|(s, c)| format!("{s} ({c})")).collect();
+    let more = if clashes.len() > 5 { format!(" and {} more", clashes.len() - 5) } else { String::new() };
+    log(&format!("AltGr clash: {} hotkey(s) also type a character with AltGr on this keyboard layout", clashes.len()));
+    notice(&format!(
+        "Your keyboard layout has an AltGr key (right Alt). These HUDshell hotkeys use the same keys, so HUDshell takes the character instead of typing it: {}{}. Change those hotkeys in {} if you need the characters.",
+        shown.join(", "),
+        more,
+        config::path().display()
+    ));
+}
+
+/// Register every global hotkey of `hk` (a problem becomes a notice); returns the hotkey texts that were registered.
+unsafe fn register_hotkeys(hwnd: HWND, hk: &config::Hotkeys) -> Vec<String> {
+    unsafe {
+        let mut registered: Vec<String> = Vec::new();
+        for (id, spec, what) in [
+            (HK_CLICKTHROUGH, &hk.click_through, "click-through"),
+            (HK_FOCUS, &hk.grab_focus, "grab/release focus"),
+            (HK_SHOWHIDE, &hk.show_hide, "show/hide"),
+            (HK_THEME, &hk.cycle_colours, "cycle colours"),
+            (HK_OPACITY_UP, &hk.opacity_up, "opacity up"),
+            (HK_OPACITY_DOWN, &hk.opacity_down, "opacity down"),
+            (HK_SETTINGS, &hk.settings, "settings panel"),
+            (HK_QUIT, &hk.quit, "quit"),
+            (HK_GHOST, &hk.ghost, "ghost (click-through + dim)"),
+            (HK_CORNER_NEXT, &hk.corner_next, "next corner"),
+            (HK_CORNER_PREV, &hk.corner_prev, "previous corner"),
+            (HK_SIZE, &hk.size_cycle, "size presets"),
+            (HK_FONT_UP, &hk.font_bigger, "bigger font"),
+            (HK_FONT_DOWN, &hk.font_smaller, "smaller font"),
+            (HK_FONT_RESET, &hk.font_reset, "reset font size"),
+            (HK_SHELL_NEXT, &hk.shell_next, "next shell"),
+            (HK_SHELL_PREV, &hk.shell_prev, "previous shell"),
+            (HK_SHELL_NEW, &hk.shell_new, "new shell"),
+            (HK_SHELL_CLOSE, &hk.shell_close, "close shell"),
+            (HK_SHELL_LIST, &hk.shell_list, "shell list"),
+            (HK_SHELL_PICKER, &hk.shell_picker, "shell picker"),
+            (HK_SHELL_ATTN, &hk.shell_attention, "next shell needing attention"),
+            (HK_LAYOUT, &hk.layout_cycle, "next layout"),
+            (HK_PANE_ZOOM, &hk.pane_zoom, "zoom pane"),
+            (HK_PANE_NEXT, &hk.pane_next, "next pane"),
+        ] {
+            match config::parse_hotkey(spec) {
+                Some((mods, vk)) => match RegisterHotKey(Some(hwnd), id, HOT_KEY_MODIFIERS(mods), vk) {
+                    Ok(()) => {
+                        log(&format!("hotkey {spec} ({what}) registered"));
+                        registered.push(spec.to_string());
+                    }
+                    Err(e) => {
+                        log(&format!("hotkey {spec} ({what}) FAILED: {e}"));
+                        notice(&format!(
+                            "Hotkey {spec} ({what}) is already used by another program. Change it in {}",
+                            config::path().display()
+                        ));
+                    }
+                },
+                None => notice(&format!("Hotkey '{spec}' ({what}) is not valid")),
+            }
+        }
+        for n in 1..=9 {
+            let spec = format!("{}+{n}", hk.shell_jump);
+            match config::parse_hotkey(&spec) {
+                Some((mods, vk)) => {
+                    if RegisterHotKey(Some(hwnd), HK_SHELL_JUMP + n - 1, HOT_KEY_MODIFIERS(mods), vk).is_err() {
+                        log(&format!("hotkey {spec} (shell {n}) FAILED"));
+                    } else {
+                        registered.push(spec.clone());
+                    }
+                }
+                None => {
+                    notice(&format!("shell_jump '{}' is not valid", hk.shell_jump));
+                    break;
+                }
+            }
+        }
+        registered
+    }
+}
+
+/// Give back every hotkey id HUDshell uses (before registering a changed set).
+unsafe fn unregister_hotkeys(hwnd: HWND) {
+    for id in (1..=18).chain(20..=26).chain(30..=38) {
+        let _ = unsafe { UnregisterHotKey(Some(hwnd), id) };
+    }
+}
+
+/// Modified time of config.json when HUDshell last looked at it (normal runs only; tests never read or write the real file).
+static CFG_STAMP: Mutex<Option<std::time::SystemTime>> = Mutex::new(None);
+/// How many polls in a row found the file unreadable or invalid (an editor may be halfway through writing it).
+static CFG_ERRS: AtomicU32 = AtomicU32::new(0);
+
+fn cfg_mtime() -> Option<std::time::SystemTime> {
+    std::fs::metadata(config::path()).and_then(|m| m.modified()).ok()
+}
+
+/// Show the notices that piled up (tray notification).
+unsafe fn flush_notices(hwnd: HWND) {
+    let msgs: Vec<String> = NOTICES.lock().map(|mut n| std::mem::take(&mut *n)).unwrap_or_default();
+    if !msgs.is_empty() {
+        unsafe { tray_notify(hwnd, "HUDshell", &msgs.join("\n")) };
+    }
+}
+
+/// Every 1.5 s in a normal run: reload the settings when config.json changed on disk.
+unsafe fn poll_config(hwnd: HWND) {
+    if !PERSIST.load(Ordering::SeqCst) {
+        return;
+    }
+    let Some(m) = cfg_mtime() else { return };
+    {
+        let mut stamp = lock_or_recover(&CFG_STAMP);
+        match *stamp {
+            None => {
+                *stamp = Some(m);
+                return;
+            }
+            Some(prev) if prev == m => return,
+            _ => {}
+        }
+    }
+    match config::try_load() {
+        Ok(c) => {
+            CFG_ERRS.store(0, Ordering::SeqCst);
+            *lock_or_recover(&CFG_STAMP) = Some(m);
+            unsafe { reload_with(hwnd, c, false) };
+        }
+        Err(e) => {
+            // an editor may still be writing: only the second poll in a row that finds it bad says so
+            if CFG_ERRS.fetch_add(1, Ordering::SeqCst) + 1 >= 2 {
+                *lock_or_recover(&CFG_STAMP) = Some(m);
+                CFG_ERRS.store(0, Ordering::SeqCst);
+                log(&format!("config reload: the settings file is not valid ({e}); keeping the settings in use"));
+                unsafe { tray_notify(hwnd, "HUDshell", "config.json is not valid, so the settings in use were kept. Fix the file and save it again.") };
+            }
+        }
+    }
+}
+
+/// The tray menu's "Reload settings": read the file now.
+unsafe fn reload_now(hwnd: HWND) {
+    match config::try_load() {
+        Ok(c) => {
+            *lock_or_recover(&CFG_STAMP) = cfg_mtime();
+            unsafe { reload_with(hwnd, c, true) };
+        }
+        Err(e) => {
+            log(&format!("config reload: the settings file is not valid ({e}); keeping the settings in use"));
+            unsafe { tray_notify(hwnd, "HUDshell", "config.json is not valid, so the settings in use were kept.") };
+        }
+    }
+}
+
+/// Make `new` the settings in use and apply what can change while running; a notice names what needs a restart.
+unsafe fn reload_with(hwnd: HWND, mut new: config::Config, manual: bool) {
+    let old = cfg();
+    new.window = old.window.clone();
+    let changed = config::changed_keys(&old, &new);
+    if changed.is_empty() {
+        if manual {
+            unsafe { tray_notify(hwnd, "HUDshell", "Settings reloaded: nothing had changed.") };
+        }
+        return;
+    }
+    if let Ok(mut g) = CFG.lock() {
+        *g = Some(new.clone());
+    }
+    unsafe { apply_config_change(hwnd, &new, &changed) };
+    unsafe { flush_notices(hwnd) };
+}
+
+unsafe fn apply_config_change(hwnd: HWND, new: &config::Config, changed: &[String]) {
+    let has = |k: &str| changed.iter().any(|c| c == k);
+    log(&format!("config reload: changed {}", changed.join(", ")));
+    if has("opacity") || has("active_opacity") || has("idle_dim_seconds") || has("idle_opacity") || has("ghost_opacity") {
+        unsafe { refresh_opacity(hwnd) };
+    }
+    if has("idle_dim_seconds") {
+        if new.idle_dim_seconds > 0 {
+            let _ = unsafe { SetTimer(Some(hwnd), 4, 1000, None) };
+        } else {
+            let _ = unsafe { KillTimer(Some(hwnd), 4) };
+        }
+    }
+    if has("click_through") {
+        CLICK_THROUGH.store(new.click_through, Ordering::SeqCst);
+        unsafe { refresh_pointer_style(hwnd) };
+    }
+    if has("theme") || has("custom_colours") {
+        push_theme();
+    }
+    if has("hotkeys") {
+        unsafe {
+            unregister_hotkeys(hwnd);
+            let registered = register_hotkeys(hwnd, &new.hotkeys);
+            notice_altgr_clashes(&registered);
+        }
+    }
+    if has("tab_program") {
+        let _ = unsafe { SetTimer(Some(hwnd), 5, 2000, None) };
+    }
+    if has("tabs") || has("profiles") || has("default_profile") || has("tab_program") {
+        push_tabs();
+    }
+    if has("pane_min") || has("split") || has("pane_dividers") || has("layout_fill") {
+        {
+            let mut l = layout_lock();
+            l.set_min(new.pane_min[0], new.pane_min[1]);
+            l.set_split(new.split[0], new.split[1]);
+        }
+        push_layout();
+    }
+    if has("font_size") {
+        FONT_START.store(new.font_size, Ordering::SeqCst);
+    }
+    if has("restore_session") && new.restore_session == "shells" {
+        SESSION_LIVE.store(true, Ordering::SeqCst); // start saving now (it was off at start)
+        save_session();
+    }
+    // everything the page itself applies
+    let page_keys = [
+        "font_size", "font_family", "text_scale", "ui_scale", "line_height", "letter_spacing", "scrollback", "copy_on_select",
+        "right_click", "osc52",
+    ];
+    if page_keys.iter().any(|k| has(k)) {
+        wv::post(
+            &serde_json::json!({
+                "t": "cfg", "fontSize": new.font_size, "fontFamily": new.font_family, "textScale": new.text_scale, "uiScale": new.ui_scale,
+                "lineHeight": new.line_height as f64 / 100.0, "letterSpacing": new.letter_spacing, "scrollback": new.scrollback,
+                "copyOnSelect": new.copy_on_select, "rightClick": new.right_click, "osc52": new.osc52,
+            })
+            .to_string(),
+        );
+    }
+    // what is only read at start
+    let restart: Vec<&str> = ["shell", "unicode", "shift_enter", "pane_shells", "layout", "start_hidden", "start_ghost"]
+        .into_iter()
+        .filter(|k| has(k))
+        .collect();
+    if !restart.is_empty() {
+        notice(&format!("These settings apply after HUDshell is restarted: {}", restart.join(", ")));
+    }
+}
+
+// ---- session restore (config restore_session = "shells") ----------------------------------------------------------
+
+/// The saved session read at start, until the page is ready and the shells can be started again.
+static SESSION_PENDING: Mutex<Option<session::Session>> = Mutex::new(None);
+/// Saving is switched on once the start (and a restore) is finished, so the start itself never overwrites the saved session.
+static SESSION_LIVE: AtomicBool = AtomicBool::new(false);
+/// Where the session is kept in a test run (tests never touch the real settings folder).
+static SESSION_FILE: Mutex<Option<std::path::PathBuf>> = Mutex::new(None);
+
+fn session_enabled() -> bool {
+    cfg().restore_session == "shells" && (PERSIST.load(Ordering::SeqCst) || lock_or_recover(&SESSION_FILE).is_some())
+}
+
+fn session_path() -> std::path::PathBuf {
+    lock_or_recover(&SESSION_FILE).clone().unwrap_or_else(|| config::path().with_file_name("session.json"))
+}
+
+fn load_session() -> Option<session::Session> {
+    if !session_enabled() {
+        return None;
+    }
+    let text = std::fs::read_to_string(session_path()).ok()?;
+    let s = session::Session::parse(&text);
+    if s.is_none() {
+        log("session: the saved session is damaged or from another version; starting with one shell");
+    }
+    s
+}
+
+/// Write the open shells and the layout (called whenever the shell list or the layout changes, and at quit).
+fn save_session() {
+    if !SESSION_LIVE.load(Ordering::SeqCst) || !session_enabled() {
+        return;
+    }
+    let (entries, active): (Vec<(u32, String)>, u32) = {
+        let sh = shells_lock();
+        (sh.entries().iter().map(|e| (e.id, e.profile.clone())).collect(), sh.active())
+    };
+    let s = session::Session::capture(&entries, active, &layout_lock());
+    let p = session_path();
+    let tmp = p.with_extension("json.tmp");
+    let ok = serde_json::to_string_pretty(&s)
+        .map_err(|e| e.to_string())
+        .and_then(|text| std::fs::write(&tmp, text).map_err(|e| e.to_string()))
+        .and_then(|_| std::fs::rename(&tmp, &p).map_err(|e| e.to_string()));
+    if let Err(e) = ok {
+        log(&format!("session: could not save ({e})"));
+    }
+}
+
+/// Start the saved shells again (shell 1 already runs the first profile) and put the layout back.
+fn restore_session(sess: session::Session) {
+    for name in sess.shells.iter().skip(1) {
+        new_shell(Some(name));
+    }
+    let ids = shells_lock().ids();
+    match sess.resolve(&ids) {
+        Some(r) => {
+            layout_lock().restore(r.preset, r.split, r.slots, r.groups, r.focus, &ids);
+            shells_lock().activate(r.active);
+            pty::set_active(r.active);
+            wv::post(&serde_json::json!({ "t": "show", "s": r.active }).to_string());
+            log(&format!("session restored: {} shell(s), layout {}", ids.len(), r.preset.name()));
+            push_tabs();
+        }
+        None => log("session: the shells that started do not match the saved session; its layout is ignored"),
+    }
+}
+
+/// Set while a new page after a WebView2 failure has not yet been told about the open shells.
+static WV_RECOVERING: AtomicBool = AtomicBool::new(false);
+
+/// The new page (after a WebView2 failure) starts with shell 1 only: open the others in it. Their programs kept running; what the old page had
+/// on screen is gone.
+pub fn reopen_shells_after_recovery() {
+    if !WV_RECOVERING.swap(false, Ordering::SeqCst) {
+        return;
+    }
+    let ids = shells_lock().ids();
+    for id in ids.into_iter().filter(|&i| i != 1) {
+        wv::post(&serde_json::json!({ "t": "open", "s": id }).to_string());
+    }
+    log("webview: the open shells were opened again in the new page");
+    push_tabs();
 }
 
 /// The top strip was double-clicked: maximize, or restore.
@@ -1088,6 +1478,7 @@ pub fn push_tabs() {
     );
     drop(sh);
     push_layout();
+    save_session();
 }
 
 /// Tell the page what to draw: the panes on screen (shape, which shell in each), focus, zoom and split.
@@ -1178,6 +1569,16 @@ pub fn layout_page_ready() {
     static DONE: AtomicBool = AtomicBool::new(false);
     if DONE.swap(true, Ordering::SeqCst) {
         return;
+    }
+    let pending = lock_or_recover(&SESSION_PENDING).take();
+    if let Some(sess) = pending {
+        restore_session(sess);
+        SESSION_LIVE.store(true, Ordering::SeqCst);
+        save_session();
+        return; // the saved layout wins over the `layout` setting
+    }
+    if session_enabled() {
+        SESSION_LIVE.store(true, Ordering::SeqCst); // nothing to restore: record from now on
     }
     let p = layout::Preset::parse(&cfg().layout).unwrap_or(layout::Preset::Single);
     if p == layout::Preset::Single {
@@ -1576,6 +1977,7 @@ unsafe fn tray_menu(hwnd: HWND) {
         let _ = AppendMenuW(menu, MF_STRING, 11, w!("Next layout (split panes)"));
         let zoom_chk = if layout_lock().zoomed() { MF_CHECKED } else { MF_UNCHECKED };
         let _ = AppendMenuW(menu, MF_STRING | zoom_chk, 12, w!("Zoom pane"));
+        let _ = AppendMenuW(menu, MF_STRING, 13, w!("Reload settings (config.json)"));
         let _ = AppendMenuW(menu, MF_STRING, 6, w!("Settings (opacity, colours)..."));
         let _ = AppendMenuW(menu, MF_STRING | auto_chk, 8, w!("Start with Windows"));
         let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
@@ -1618,6 +2020,7 @@ unsafe fn tray_menu(hwnd: HWND) {
             10 => shell_step(1),
             11 => layout_cycle(),
             12 => pane_zoom(),
+            13 => reload_now(hwnd),
             8 => {
                 let on = !autostart_enabled();
                 if !set_autostart(on) {
@@ -1797,6 +2200,12 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 wv::pump_output();
                 LRESULT(0)
             }
+            wv::WM_APP_WEBVIEW_FAILED => {
+                if wv::on_process_failed(hwnd, wparam.0 as i32) {
+                    WV_RECOVERING.store(true, Ordering::SeqCst);
+                }
+                LRESULT(0)
+            }
             pty::WM_APP_PTY_EXIT => {
                 wv::pump_output();
                 wv::notify_exit(wparam.0 as pty::SessionId);
@@ -1812,6 +2221,8 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                     idle_tick(hwnd);
                 } else if wparam.0 == 5 {
                     poll_programs();
+                } else if wparam.0 == 6 {
+                    poll_config(hwnd);
                 } else if wparam.0 == 3 {
                     let _ = KillTimer(Some(hwnd), 3);
                     wv::log_children(hwnd);
@@ -1845,6 +2256,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 let _ = GetWindowRect(hwnd, &mut wr);
                 *lock_or_recover(&SNAP_DRAG) = Some(place::SnapDrag::new(to_rect(&wr)));
                 *lock_or_recover(&DRAG_START) = Some(wr);
+                DRAG_MOVED.store(false, Ordering::SeqCst);
                 foreground_note("at size/move start");
                 let _ = SetTimer(Some(hwnd), 2, 100, None);
                 DefWindowProcW(hwnd, msg, wparam, lparam)
@@ -1859,7 +2271,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 log("WM_EXITSIZEMOVE");
                 foreground_note("at size/move end");
                 *lock_or_recover(&SNAP_DRAG) = None;
-                if DRAG_IS_MOVE.swap(false, Ordering::SeqCst) {
+                if DRAG_IS_MOVE.swap(false, Ordering::SeqCst) && DRAG_MOVED.load(Ordering::SeqCst) {
                     after_move_drag(hwnd);
                 }
                 *lock_or_recover(&DRAG_START) = None;
@@ -1876,6 +2288,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 LRESULT(0)
             }
             WM_DESTROY => {
+                save_session();
                 save_geometry(hwnd);
                 remove_tray(hwnd);
                 pty::shutdown();
@@ -1987,65 +2400,14 @@ fn main() -> windows::core::Result<()> {
             );
         }
 
-        let hk = loaded.hotkeys.clone();
-        for (id, spec, what) in [
-            (HK_CLICKTHROUGH, &hk.click_through, "click-through"),
-            (HK_FOCUS, &hk.grab_focus, "grab/release focus"),
-            (HK_SHOWHIDE, &hk.show_hide, "show/hide"),
-            (HK_THEME, &hk.cycle_colours, "cycle colours"),
-            (HK_OPACITY_UP, &hk.opacity_up, "opacity up"),
-            (HK_OPACITY_DOWN, &hk.opacity_down, "opacity down"),
-            (HK_SETTINGS, &hk.settings, "settings panel"),
-            (HK_QUIT, &hk.quit, "quit"),
-            (HK_GHOST, &hk.ghost, "ghost (click-through + dim)"),
-            (HK_CORNER_NEXT, &hk.corner_next, "next corner"),
-            (HK_CORNER_PREV, &hk.corner_prev, "previous corner"),
-            (HK_SIZE, &hk.size_cycle, "size presets"),
-            (HK_FONT_UP, &hk.font_bigger, "bigger font"),
-            (HK_FONT_DOWN, &hk.font_smaller, "smaller font"),
-            (HK_FONT_RESET, &hk.font_reset, "reset font size"),
-            (HK_SHELL_NEXT, &hk.shell_next, "next shell"),
-            (HK_SHELL_PREV, &hk.shell_prev, "previous shell"),
-            (HK_SHELL_NEW, &hk.shell_new, "new shell"),
-            (HK_SHELL_CLOSE, &hk.shell_close, "close shell"),
-            (HK_SHELL_LIST, &hk.shell_list, "shell list"),
-            (HK_SHELL_PICKER, &hk.shell_picker, "shell picker"),
-            (HK_SHELL_ATTN, &hk.shell_attention, "next shell needing attention"),
-            (HK_LAYOUT, &hk.layout_cycle, "next layout"),
-            (HK_PANE_ZOOM, &hk.pane_zoom, "zoom pane"),
-            (HK_PANE_NEXT, &hk.pane_next, "next pane"),
-        ] {
-            match config::parse_hotkey(spec) {
-                Some((mods, vk)) => match RegisterHotKey(Some(hwnd), id, HOT_KEY_MODIFIERS(mods), vk) {
-                    Ok(()) => log(&format!("hotkey {spec} ({what}) registered")),
-                    Err(e) => {
-                        log(&format!("hotkey {spec} ({what}) FAILED: {e}"));
-                        notice(&format!(
-                            "Hotkey {spec} ({what}) is already used by another program. Change it in {}",
-                            config::path().display()
-                        ));
-                    }
-                },
-                None => notice(&format!("Hotkey '{spec}' ({what}) is not valid")),
-            }
-        }
-        for n in 1..=9 {
-            let spec = format!("{}+{n}", hk.shell_jump);
-            match config::parse_hotkey(&spec) {
-                Some((mods, vk)) => {
-                    if RegisterHotKey(Some(hwnd), HK_SHELL_JUMP + n - 1, HOT_KEY_MODIFIERS(mods), vk).is_err() {
-                        log(&format!("hotkey {spec} (shell {n}) FAILED"));
-                    }
-                }
-                None => {
-                    notice(&format!("shell_jump '{}' is not valid", hk.shell_jump));
-                    break;
-                }
-            }
-        }
+        let registered = register_hotkeys(hwnd, &loaded.hotkeys);
+        notice_altgr_clashes(&registered);
         {
             let c0 = cfg();
-            shells_lock().adopt(1, &config::default_profile(&c0).name);
+            let saved = load_session();
+            let first = saved.as_ref().map(|s| profile_named(&s.shells[0])).unwrap_or_else(|| config::default_profile(&c0).clone());
+            *lock_or_recover(&SESSION_PENDING) = saved;
+            shells_lock().adopt(1, &first.name);
             let mut l = layout_lock();
             FONT_START.store(c0.font_size, Ordering::SeqCst);
             l.set_own(c0.pane_shells == "own");
@@ -2053,7 +2415,7 @@ fn main() -> windows::core::Result<()> {
             l.set_min(c0.pane_min[0], c0.pane_min[1]);
             l.set_split(c0.split[0], c0.split[1]);
             if let Ok(mut l) = SPAWN_PROFILES.lock() {
-                l.push((1, config::default_profile(&c0).clone()));
+                l.push((1, first.clone()));
             }
         }
         TASKBAR_MSG.store(RegisterWindowMessageW(w!("TaskbarCreated")), Ordering::SeqCst);
@@ -2117,6 +2479,9 @@ fn main() -> windows::core::Result<()> {
                     let _ = SetTimer(Some(hwnd), 3, 1500, None);
                     if loaded.tab_program != "off" {
                         let _ = SetTimer(Some(hwnd), 5, 2000, None);
+                    }
+                    if PERSIST.load(Ordering::SeqCst) {
+                        let _ = SetTimer(Some(hwnd), 6, 1500, None); // watch config.json for edits
                     }
                     #[cfg(feature = "harness")]
                     harness::arm(hwnd);

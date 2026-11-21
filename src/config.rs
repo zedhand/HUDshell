@@ -204,6 +204,9 @@ pub struct Config {
     /// How panes get their shells: "shared" = every pane shows a shell from the one tab list; "own" = each pane
     /// has its own list of shells (the tab strip, switch and jump hotkeys act on the focused pane's list).
     pub pane_shells: String,
+    /// "off" (default): start with one shell. "shells": the open shells and the layout are saved while HUDshell runs and started again
+    /// at the next start (from their profiles; folders and running programs are not restored).
+    pub restore_session: String,
     /// Save the chosen layout (and divider positions) in `layout` / `split` whenever it changes.
     pub remember_layout: bool,
     /// Share in percent (20-80) of the first column and of the first row.
@@ -256,6 +259,7 @@ impl Default for Config {
             layout: "single".into(),
             layout_fill: "new".into(),
             pane_shells: "shared".into(),
+            restore_session: "off".into(),
             remember_layout: false,
             split: [50, 50],
             pane_dividers: false,
@@ -342,6 +346,9 @@ fn validate(cfg: &mut Config) {
     cfg.layout = crate::layout::Preset::parse(&cfg.layout).unwrap_or(crate::layout::Preset::Single).name().to_string();
     if !matches!(cfg.layout_fill.as_str(), "new" | "empty") {
         cfg.layout_fill = "new".into();
+    }
+    if !matches!(cfg.restore_session.as_str(), "off" | "shells") {
+        cfg.restore_session = "off".into();
     }
     if !matches!(cfg.pane_shells.as_str(), "shared" | "own") {
         cfg.pane_shells = "shared".into();
@@ -497,6 +504,39 @@ pub fn load() -> Config {
             cfg
         }
     }
+}
+
+/// Parse and validate settings text without touching any file (a reload while HUDshell runs).
+pub fn try_parse(text: &str) -> Result<Config, String> {
+    let mut cfg: Config = serde_json::from_str(text.trim_start_matches('\u{feff}')).map_err(|e| e.to_string())?;
+    validate(&mut cfg);
+    Ok(cfg)
+}
+
+/// Read the settings file for a reload: unlike `load`, a bad file is left alone (the settings in use stay in use).
+pub fn try_load() -> Result<Config, String> {
+    let text = std::fs::read_to_string(path()).map_err(|e| format!("cannot read it: {e}"))?;
+    try_parse(&text)
+}
+
+/// Top-level settings whose values differ between `a` and `b`, sorted. The window position is ignored: HUDshell writes it itself.
+pub fn changed_keys(a: &Config, b: &Config) -> Vec<String> {
+    let (Ok(serde_json::Value::Object(x)), Ok(serde_json::Value::Object(y))) = (serde_json::to_value(a), serde_json::to_value(b)) else {
+        return Vec::new();
+    };
+    let mut keys: Vec<String> = Vec::new();
+    for (k, v) in &y {
+        if k != "window" && x.get(k) != Some(v) {
+            keys.push(k.clone());
+        }
+    }
+    for k in x.keys() {
+        if k != "window" && !y.contains_key(k) {
+            keys.push(k.clone());
+        }
+    }
+    keys.sort();
+    keys
 }
 
 pub fn save(cfg: &Config) {
@@ -720,6 +760,27 @@ mod tests {
     }
 
     #[test]
+    fn a_reload_sees_exactly_what_changed() {
+        let a = Config::default();
+        assert!(changed_keys(&a, &a.clone()).is_empty());
+        let mut b = a.clone();
+        b.window = Some(Geometry { x: 1, y: 2, w: 300, h: 200 });
+        assert!(changed_keys(&a, &b).is_empty(), "the window position is written by HUDshell itself and ignored");
+        b.theme = "matrix".into();
+        b.text_scale = 150;
+        b.hotkeys.quit = "Ctrl+Alt+F9".into();
+        assert_eq!(changed_keys(&a, &b), vec!["hotkeys", "text_scale", "theme"]);
+    }
+
+    #[test]
+    fn parsing_for_a_reload_validates_and_rejects_bad_json_without_side_effects() {
+        let c = try_parse("\u{feff}{\"text_scale\": 5000, \"theme\": \"nope\"}").unwrap();
+        assert_eq!((c.text_scale, c.theme.as_str()), (300, "midnight"), "values are clamped as at start");
+        assert!(try_parse("{ not json").is_err());
+        assert!(try_parse("").is_err());
+    }
+
+    #[test]
     fn text_settings_are_validated() {
         let d = Config::default();
         assert_eq!((d.text_scale, d.ui_scale, d.line_height, d.letter_spacing, d.text_scale_hotkeys.as_str()), (100, 100, 100, 0, "focused"),
@@ -741,6 +802,10 @@ mod tests {
         assert_eq!((d.layout.as_str(), d.layout_fill.as_str(), d.remember_layout, d.split, d.pane_dividers, d.pane_min),
             ("single", "new", false, [50, 50], false, [30, 6]), "defaults are the recommended behaviour");
         assert_eq!(d.pane_shells, "shared");
+        assert_eq!(d.restore_session, "off", "restoring is opt-in");
+        let mut r = Config { restore_session: "x".into(), ..Config::default() };
+        validate(&mut r);
+        assert_eq!(r.restore_session, "off");
         assert_eq!(d.tab_program, "known");
         let mut t = Config { tab_program: "x".into(), ..Config::default() };
         validate(&mut t);

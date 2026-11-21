@@ -900,6 +900,72 @@ const TEXT: &[(u64, &str)] = &[
     (12500, "quit"),
 ];
 
+/// `--sessionsave` / `--sessionload` (run with `--test-profiles --restore-session shells --session-file <path>`): the first run opens shells
+/// from three profiles and a 2 x 2 layout and quits; the second starts again and must come back with the same shells and layout.
+const SESSION_SAVE: &[(u64, &str)] = &[
+    (1500, "cdp-focus"),
+    (2000, "resize:900,520"),
+    (3000, "shell:new:work"),
+    (7000, "shell:new:cmd"),
+    (11000, "layout:set:grid"),
+    (16000, "pane:next"),
+    (17000, "dumps:1:ss-end"),
+    (17500, "quit"),
+];
+const SESSION_LOAD: &[(u64, &str)] = &[
+    (1500, "cdp-focus"),
+    (2000, "resize:900,520"),
+    (20000, "dumps:1:sl-restored"),
+    (20500, "quit"),
+];
+
+/// `--recovertest`: two shells; the runner kills the web view's browser process after the first dump (see Suite-Recover). The shells must
+/// survive, and what is typed into them afterwards must show up in the new page.
+const RECOVER: &[(u64, &str)] = &[
+    (1500, "cdp-focus"),
+    (2000, "resize:900,520"),
+    (3000, "shell:new"),
+    (9000, "w:echo BEFORE-CRASH\r"),
+    (10000, "dumps:1:rc-before"),
+    (40000, "shell:jump:1"),
+    (40500, "w:echo AFTER-CRASH-ONE\r"),
+    (42000, "dumps:1:rc-one"),
+    (42500, "wto:2:echo AFTER-CRASH-TWO\r"),
+    (44500, "dumps:2:rc-two"),
+    (45000, "quit"),
+];
+
+/// `--startfailtest`: the tab says why when its shell could not start, and Enter then starts one.
+const STARTFAIL: &[(u64, &str)] = &[
+    (1500, "cdp-focus"),
+    (4000, "startfail:CreateProcess: the system cannot find the file specified"),
+    (5000, "dumps:1:sf-message"),
+    (5500, "key:Enter"),
+    (8000, "w:echo STARTED-AFTER-ENTER\r"),
+    (9000, "dumps:1:sf-after"),
+    (9500, "quit"),
+];
+
+/// `--reloadtest`: settings reloaded while running. Each `reload:` is a whole settings text (on top of the defaults), fed to the same code
+/// as an edited config.json; the dumps and states show what really changed. A bad text must change nothing.
+const RELOAD: &[(u64, &str)] = &[
+    (1500, "cdp-focus"),
+    (2000, "resize:900,520"),
+    (3000, "dumps:1:r-base"),
+    (3500, "reload:{\"text_scale\":150}"),
+    (4500, "dumps:1:r-text"),
+    (5000, "reload:{\"text_scale\":150,\"ui_scale\":150,\"tabs\":\"always\"}"),
+    (6000, "dumps:1:r-ui"),
+    (6500, "reload:{\"text_scale\":150,\"ui_scale\":150,\"tabs\":\"always\",\"opacity\":60}"),
+    (7500, "state:r-opacity"),
+    (8000, "reload:{\"line_height\":150,\"letter_spacing\":3}"),
+    (9000, "dumps:1:r-spacing"),
+    (9500, "reload:{ this is not json"),
+    (10000, "state:r-bad"),
+    (10500, "reload:{\"shell\":\"C:\\\\nowhere\\\\sh.exe\",\"line_height\":150,\"letter_spacing\":3}"),
+    (11200, "quit"),
+];
+
 /// `--dpitest` (run with `--at X,Y --cross CX,CY`): the window starts at X,Y, moves to CX,CY (another monitor, normally with
 /// a different scaling), docks in a corner there, and comes back. State and page dumps at every step.
 fn build_dpitest() -> &'static [(u64, &'static str)] {
@@ -958,6 +1024,11 @@ fn build_inputtest() -> &'static [(u64, &'static str)] {
 
 fn scen() -> &'static [(u64, &'static str)] {
     match SCEN_SEL.load(Ordering::SeqCst) {
+        36 => RECOVER,
+        35 => STARTFAIL,
+        34 => SESSION_LOAD,
+        33 => SESSION_SAVE,
+        32 => RELOAD,
         31 => TEXT,
         30 => build_dpitest(),
         29 => build_inputtest(),
@@ -1239,6 +1310,14 @@ unsafe fn run_action(hwnd: HWND, act: &str) {
         // Opens the picker in the page only; the real hotkey also grabs the keyboard, which tests avoid.
         push_tabs();
         wv::post("{\"t\":\"picker\"}");
+    } else if let Some(text) = act.strip_prefix("startfail:") {
+        // The message the host sends when a shell cannot start (a real failure cannot be forced: other shells are tried first).
+        wv::post(&serde_json::json!({ "t": "startfail", "s": 1, "msg": text }).to_string());
+    } else if let Some(text) = act.strip_prefix("reload:") {
+        match config::try_parse(text) {
+            Ok(c) => unsafe { reload_with(hwnd, c, false) },
+            Err(e) => log(&format!("config reload: the settings file is not valid ({e}); keeping the settings in use")),
+        }
     } else if act == "layout:next" {
         layout_cycle();
     } else if let Some(name) = act.strip_prefix("layout:set:") {
@@ -1484,7 +1563,7 @@ const SCENARIO_FLAGS: &[&str] = &[
     "--autotest", "--keys", "--widthtest", "--probe", "--probe2", "--probe3", "--probe4", "--real",
     "--clickfocus", "--hideshow", "--clipboard", "--soak", "--scrolltest", "--ghosttest", "--attention",
     "--policytest", "--placetest", "--idletest", "--starttest", "--autostarttest", "--sessiontest", "--shellstest",
-    "--tabmodes", "--shellsfull", "--layouttest", "--layoutempty", "--layoutstart", "--layoutown", "--labeltest", "--inputtest", "--dpitest", "--texttest",
+    "--tabmodes", "--shellsfull", "--layouttest", "--layoutempty", "--layoutstart", "--layoutown", "--labeltest", "--inputtest", "--dpitest", "--texttest", "--reloadtest", "--sessionsave", "--sessionload", "--startfailtest", "--recovertest",
 ];
 
 pub(crate) fn is_test_mode() -> bool {
@@ -1557,7 +1636,7 @@ pub(crate) unsafe fn arm(hwnd: HWND) {
     if SCENARIO_FLAGS.iter().any(|f| any_scen(f)) {
         let args: Vec<String> = std::env::args().collect();
         SCEN_SEL.store(
-            if any_scen("--texttest") { 31 } else if any_scen("--dpitest") { 30 } else if any_scen("--inputtest") { 29 } else if any_scen("--labeltest") { 28 } else if any_scen("--layoutown") { 27 } else if any_scen("--layoutstart") { 26 } else if any_scen("--layoutempty") { 25 } else if any_scen("--layouttest") { 24 } else if any_scen("--shellsfull") { 23 } else if any_scen("--tabmodes") { 22 } else if any_scen("--shellstest") { 21 } else if any_scen("--sessiontest") { 20 } else if any_scen("--autostarttest") { 19 } else if any_scen("--starttest") { 18 } else if any_scen("--idletest") { 17 } else if any_scen("--placetest") { 16 } else if any_scen("--policytest") { 15 } else if any_scen("--attention") { 14 } else if any_scen("--ghosttest") { 13 } else if any_scen("--scrolltest") { 12 } else if any_scen("--soak") { 11 } else if any_scen("--clipboard") { 10 } else if any_scen("--hideshow") { 9 } else if any_scen("--clickfocus") { 8 } else if any_scen("--real") { 7 } else if any_scen("--probe4") { 6 } else if any_scen("--probe3") { 5 } else if any_scen("--probe2") { 4 } else if any_scen("--probe") { 3 } else if any_scen("--widthtest") { 2 } else if any_scen("--keys") { 1 } else { 0 },
+            if any_scen("--recovertest") { 36 } else if any_scen("--startfailtest") { 35 } else if any_scen("--sessionload") { 34 } else if any_scen("--sessionsave") { 33 } else if any_scen("--reloadtest") { 32 } else if any_scen("--texttest") { 31 } else if any_scen("--dpitest") { 30 } else if any_scen("--inputtest") { 29 } else if any_scen("--labeltest") { 28 } else if any_scen("--layoutown") { 27 } else if any_scen("--layoutstart") { 26 } else if any_scen("--layoutempty") { 25 } else if any_scen("--layouttest") { 24 } else if any_scen("--shellsfull") { 23 } else if any_scen("--tabmodes") { 22 } else if any_scen("--shellstest") { 21 } else if any_scen("--sessiontest") { 20 } else if any_scen("--autostarttest") { 19 } else if any_scen("--starttest") { 18 } else if any_scen("--idletest") { 17 } else if any_scen("--placetest") { 16 } else if any_scen("--policytest") { 15 } else if any_scen("--attention") { 14 } else if any_scen("--ghosttest") { 13 } else if any_scen("--scrolltest") { 12 } else if any_scen("--soak") { 11 } else if any_scen("--clipboard") { 10 } else if any_scen("--hideshow") { 9 } else if any_scen("--clickfocus") { 8 } else if any_scen("--real") { 7 } else if any_scen("--probe4") { 6 } else if any_scen("--probe3") { 5 } else if any_scen("--probe2") { 4 } else if any_scen("--probe") { 3 } else if any_scen("--widthtest") { 2 } else if any_scen("--keys") { 1 } else { 0 },
             Ordering::SeqCst,
         );
         let delay = args
@@ -1648,6 +1727,13 @@ pub(crate) fn override_config(mut c: config::Config) -> config::Config {
     }
     if let Some(v) = opt("--tab-program") {
         c.tab_program = v;
+    }
+    if let Some(v) = opt("--restore-session") {
+        c.restore_session = v;
+    }
+    // --session-file <path>: where the session is kept in a test run
+    if let Some(v) = opt("--session-file") {
+        *lock_or_recover(&SESSION_FILE) = Some(std::path::PathBuf::from(v));
     }
     if let Some(v) = opt("--text-scale").and_then(|v| v.parse().ok()) {
         c.text_scale = v;

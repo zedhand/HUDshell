@@ -54,7 +54,7 @@ Or by hand: `npm install`, `npm run build`, `cargo build --release`.
 | Ctrl+Alt+V | show / hide |
 | Ctrl+Alt+C | next colour theme |
 | Ctrl+Alt+[ / Ctrl+Alt+] | opacity down / up (10% steps) |
-| Ctrl+Alt+S | settings panel (arrows change opacity and colours, Esc closes) |
+| Ctrl+Alt+S | settings panel (left/right opacity, up/down colours, `-` / `=` text size, `,` / `.` size of HUDshell's own text, or click; Esc closes) |
 | Ctrl+Alt+X | ghost: click-through plus dim, press again to restore |
 | Ctrl+Alt+. / Ctrl+Alt+, | dock in the next / previous screen corner |
 | Ctrl+Alt+/ | cycle size presets |
@@ -72,7 +72,7 @@ Or by hand: `npm install`, `npm run build`, `cargo build --release`.
 | Ctrl+Alt+Z | zoom the focused pane to the whole window, press again to go back |
 | Ctrl+Alt+Q | quit |
 
-On a keyboard layout with an **AltGr** key (right Alt, which Windows treats as Ctrl+Alt), a character typed with AltGr that sits on the same key as one of these hotkeys is taken by HUDshell instead (on a German layout AltGr+Q, `@`, is the quit hotkey). Change those hotkeys in `config.json` if you use such a layout.
+On a keyboard layout with an **AltGr** key (right Alt, which Windows treats as Ctrl+Alt), a character typed with AltGr that sits on the same key as one of these hotkeys is taken by HUDshell instead (on a German layout AltGr+Q, `@`, is the quit hotkey). HUDshell warns you at start (a tray notification) which of its hotkeys clash on your current layout. Change those hotkeys in `config.json` if you need the characters.
 
 Inside the terminal: **Shift+Enter** inserts a newline in Claude Code and Codex; **Ctrl+Shift+C** or
 **Ctrl+Insert** copies the selection; **Ctrl+V** pastes. Plain Ctrl+C is the interrupt key.
@@ -83,6 +83,8 @@ scroll a page, **Ctrl+Shift+Up / Down** a line, **Ctrl+Shift+Home / End** jump t
 
 `%APPDATA%\HUDshell\config.json` is created on first run. Missing keys take defaults, unknown keys are ignored,
 values are range-checked, and an unreadable file is kept as `config.json.bad-N` while defaults are used.
+
+**Edits apply while HUDshell runs** (it checks the file every 1.5 seconds; the tray menu has "Reload settings" to do it at once): opacity, colours, hotkeys, tabs, profiles, layout options, text sizes, line and letter spacing, font, scrollback, clipboard options and the other pointer and notification settings. A few are read only at start and a notice names them if you change them: `shell`, `unicode`, `shift_enter`, `pane_shells`, `layout`, `start_hidden`, `start_ghost`. If the file is not valid JSON when you save it, the settings in use are kept and a notice says so.
 
 | Key | Default | Notes |
 |---|---|---|
@@ -110,6 +112,7 @@ values are range-checked, and an unreadable file is kept as `config.json.bad-N` 
 | `tab_program` | `"known"` | label a tab with the program running in it (`claude · <title>`): `"known"` = Claude Code, Codex, Gemini CLI, Aider, OpenCode; `"all"` = also any other program (`git`, `ssh`, ...); `"off"` = never. Found by reading the process list below each shell: nothing is injected and nothing is written to the log |
 | `tabs` | `"auto"` | `"auto"`: tab strip once there are 2+ shells; `"always"`: strip even for one; `"overlay"`: no strip, only a short overlay on switch and on the list hotkey |
 | `profiles` / `default_profile` | one `pwsh` profile / `""` | kinds of shell: `{name, dir, command, shell, color}`. `dir` expands `%VARS%`; `command` is typed into the new shell; `color` is a tab accent `#rrggbb` |
+| `restore_session` | `"off"` | `"shells"`: the open shells (by profile) and the layout are saved while HUDshell runs (`session.json` next to `config.json`) and started again at the next start; folders and running programs are not restored, and a saved layout wins over `layout` |
 | `layout` | `"single"` | layout at start: `"single"`, `"side-by-side"`, `"stacked"` or `"grid"` (2 x 2) |
 | `pane_shells` | `"shared"` | `"shared"`: every pane shows a shell from the one tab list; `"own"`: each pane has its own list of shells (the tab strip, PageUp/PageDown and the number keys then act on the focused pane's list; a new shell joins the focused pane; going to fewer panes moves the shells into the focused pane) |
 | `layout_fill` | `"new"` | when a layout has more panes than there are shells: `"new"` starts shells (default profile) for them, `"empty"` leaves the panes empty until you start a shell there |

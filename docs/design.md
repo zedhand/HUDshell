@@ -122,7 +122,58 @@ Key decisions and why:
   behaviour). Reset goes back to the `font_size` of the start. A terminal opened later starts at the common size.
 - `line_height` and `letter_spacing` are xterm.js options of every terminal. `ui_scale` sets one CSS variable that HUDshell's own text and
   the tab strip height are multiples of; at 100 the pixel values are exactly what they were before the setting existed.
-- There is no live reload and no settings-panel row for these yet (config is read at start); both are planned.
+- The settings panel has two rows for the scales (`text_scale` and `ui_scale`, steps of 10%, live and saved); the other text settings have no row and there is no live config reload (config is read at start); both are planned.
+
+## Session restore
+
+- With `restore_session = "shells"` the host writes `session.json` (next to `config.json`) whenever the shell list or the layout changes and at
+  quit: the profile of every shell in tab order, the active shell and the layout (preset, split, which shell is in which pane, the per-pane lists in
+  own mode). Shell ids are saved as tab-order indexes, so they survive the new numbering (`src/session.rs`, pure logic with unit tests).
+- At start the file is read first and saving is held back until the page is ready, so the start itself never overwrites it. Shell 1 runs the
+  first saved profile; once the page is ready the other shells are started from their profiles and the layout is put back (it wins over the
+  `layout` setting). A missing, damaged, inconsistent or newer-version file is ignored and one shell starts.
+- Only profiles are restored. A shell's current folder and the program running in it are not known to HUDshell, so they come back as the
+  profile's start folder and start command say. A profile that no longer exists becomes the default profile.
+
+## Planned: several windows (not implemented)
+
+Measured on 2026-11-20: `main.rs` holds 36 process-wide statics, `wv.rs` 8 (one WebView2 controller and one page bridge, thread-local) and `pty.rs` 7.
+Most of the `main.rs` ones are really state of *one window*: pointer and keyboard mode (`CLICK_THROUGH`, `TERMINAL_FOCUS`, `VISIBLE`, `GHOST_*`,
+`IDLE_DIM`, `SETTINGS_GRABBED`, `PICKER_GRABBED`), the drag and maximize state (`SNAP_DRAG`, `DRAG_START`, `MAXIMIZED`, `RESTORE_*`), and the shell list
+and layout (`SHELLS`, `SPAWN_PROFILES`, `LAYOUT`, `FONT_SIZES`, `PROGS_SENT`). The settings (`CFG`), notices, the config watcher and the session file are
+genuinely global. The pty sessions are global and have their own ids, which is the right shape: a window only needs to know which session ids it shows.
+
+Plan, in an order that keeps the program working at every step:
+1. Put the per-window statics into one `Window` struct, kept in a table keyed by `HWND`, and make every handler look its window up from the `HWND` it
+   already receives (`wndproc` has it); nothing changes for a single window.
+2. Give `wv.rs` one controller and bridge per window (the thread-local becomes a map by window), and route page messages and pty output by the window
+   that shows the session (a table session id -> window).
+3. A "detach shell" action creates a second window, moves one session id to it and tells both pages (close in one, open in the other).
+4. Hotkeys act on the active window (the one that last had the keyboard or the pointer); tray actions get "all windows" variants (ghost, hide).
+5. Snapping to other HUDshell windows (extra rectangles in `place::snap_rect`) and moving a group of snapped windows together.
+6. Session restore saves a list of windows (position, size, shells, layout) instead of one.
+
+The riskiest part is step 1 (every handler touches these statics) and step 2 (output routing and acknowledgements per window); both need the full
+test suite after each step, so none of it was started while testing was paused.
+
+## When the web view fails
+
+- The web view reports a failed process through one event; its handler only posts a message to the main window (rebuilding blocks, so it must not
+  run inside the callback). A failed render process, an unresponsive one or a frame's is cured by loading the page again; when the browser process itself
+  exited the controller and web view are created again, the unacknowledged-output counter is reset (the dead page will never acknowledge it) and the
+  new page, once it asks for the shell list, is told to open the shells it does not know. The pty sessions are independent of the page, so the programs keep
+  running; the old screens are gone.
+
+## Live settings
+
+- In a normal run a timer checks the modified time of `config.json` every 1.5 s (tests never read or write the real file). A changed file is parsed
+  without side effects (`config::try_load`: a bad file is not renamed, unlike at start) and compared with the settings in use key by key
+  (`config::changed_keys`; the window position is ignored because HUDshell writes it itself, which also makes HUDshell's own saves a no-op).
+  An unreadable or invalid file must be seen twice in a row before a notice is shown (an editor may be halfway through writing).
+- What changed decides what is applied: opacity (the one opacity function), colours, hotkeys (all unregistered and registered again, with the
+  usual conflict notices and the AltGr check), tab mode and profiles, pane options, and one `cfg` message with the text, font, scrollback and
+  clipboard settings that the page applies itself (a terminal that has its own text size keeps it). Settings only read at start (`shell`,
+  `unicode`, `shift_enter`, `pane_shells`, `layout`, `start_hidden`, `start_ghost`) produce a notice that they apply after a restart.
 
 ## Clipboard, links and permissions
 

@@ -1,7 +1,7 @@
 <#
 HUDshell full test runner (Windows PowerShell 5.1 or PowerShell 7).
 
-  scripts\test-all.ps1 [-Suite static,keys,width,hideshow,clickfocus,clipboard,autotest,ui,scrollback,ghost,attention,policy,place,dpi,text,qol,sessions,shells,layout,input,snap,kbd,cost,release,config,soak,real | all]
+  scripts\test-all.ps1 [-Suite static,keys,width,hideshow,clickfocus,clipboard,autotest,ui,scrollback,ghost,attention,policy,place,dpi,text,reload,restore,recover,qol,sessions,shells,layout,input,snap,kbd,cost,release,config,soak,real | all]
                        [-Sandbox <folder both Claude Code and Codex already trust>] [-SoakSeconds 300]
 
 What it touches (read before running):
@@ -33,7 +33,7 @@ New-Item -ItemType Directory -Force $scratch | Out-Null
 $env:HUDSHELL_TEST_DIR = $scratch
 if ($Sandbox) { $env:HUDSHELL_SANDBOX = $Sandbox } else { $env:HUDSHELL_SANDBOX = $scratch }
 $Suite = @($Suite | ForEach-Object { $_ -split ',' } | Where-Object { $_ })
-$want = if ($Suite -contains 'all') { @('static', 'keys', 'width', 'hideshow', 'clickfocus', 'clipboard', 'autotest', 'ui', 'scrollback', 'ghost', 'attention', 'policy', 'place', 'dpi', 'text', 'qol', 'sessions', 'shells', 'layout', 'input', 'snap', 'kbd', 'cost', 'release', 'config', 'soak') + $(if ($Sandbox) { 'real' } else { @() }) } else { $Suite }
+$want = if ($Suite -contains 'all') { @('static', 'keys', 'width', 'hideshow', 'clickfocus', 'clipboard', 'autotest', 'ui', 'scrollback', 'ghost', 'attention', 'policy', 'place', 'dpi', 'text', 'reload', 'restore', 'recover', 'qol', 'sessions', 'shells', 'layout', 'input', 'snap', 'kbd', 'cost', 'release', 'config', 'soak') + $(if ($Sandbox) { 'real' } else { @() }) } else { $Suite }
 
 $script:R = New-Object System.Collections.Generic.List[object]
 # Appended to every check name while a suite runs a second time on another monitor.
@@ -414,7 +414,7 @@ function Suite-Ui {
     $t0 = @(Cut $log $n | Where-Object { $_ -match 'colour theme ->' }).Count
     Click 459 101
     Check 'ui' 'clicking the colour arrow steps the theme' (@(Cut $log $n | Where-Object { $_ -match 'colour theme ->' }).Count -eq $t0 + 1)
-    Click 315 173
+    Click 315 209   # [close] moved down by the two rows added for text size and UI text size (2 x 18 px); not yet run
     Check 'ui' 'clicking [close] closes the panel and returns focus' ((@(Cut $log $n | Where-Object { $_ -match 'settings panel closed' }).Count -ge 1) -and -not [GT]::IsFg($h))
     [GT]::Hotkey(0x53); Start-Sleep -Milliseconds 1200
     [GT]::Key(0x1B); Start-Sleep -Milliseconds 1000
@@ -807,6 +807,10 @@ function Suite-Sessions {
   Check 'sessions' 'session 1 is untouched by all of it and still works' ((Dump-Has $run 's1-final' 'BACK-ON-ONE') -and (Dump-Has $run 's1-final' 'SESSION-ONE-ALIVE'))
   Check 'sessions' 'no start failures logged' (@($run | Where-Object { $_ -match 'FAILED to start' }).Count -eq 0)
   Check 'sessions' 'all shells are gone after the app quits (no orphan pwsh from this run)' ((Get-Process hudshell -ErrorAction SilentlyContinue | Measure-Object).Count -eq 0)
+  # a shell that could not start is explained in its tab
+  $r2 = Run-Scenario @('--term', '--startfailtest', '--delay', '2') 60000
+  Check 'sessions' 'when the shell cannot start the tab says why and how to go on' (Dump-Has $r2 'sf-message' 'could not start the shell') (@(Get-Dump $r2 'sf-message') -join ' ')
+  Check 'sessions' 'Enter in that tab then works as for a finished shell (a new shell, typing works)' ((Dump-Has $r2 'sf-after' 'starting a new shell') -and (Dump-Has $r2 'sf-after' 'STARTED-AFTER-ENTER'))
 }
 
 # The page's `ui` object from the dump header that follows "DUMP label=<label>".
@@ -1230,6 +1234,77 @@ function Suite-Snap {
   }
 }
 
+function Suite-Reload {
+  Write-Host "=== reload: settings changed while HUDshell runs (the same code as an edited config.json; no OS input) ==="
+  $r = Run-Scenario @('--term', '--reloadtest', '--delay', '2') 90000
+  $s = Get-States $r
+  $b = Get-Ui $r 'r-base'; $t = Get-Ui $r 'r-text'; $u = Get-Ui $r 'r-ui'; $sp = Get-Ui $r 'r-spacing'
+  Check 'reload' 'before any reload: text 14 points, UI scale 1, line height 1' ($b -and $b.fonts -ceq '1:14/14' -and $b.text.ui -ceq '1' -and $b.text.lh -eq 1) ($b.fonts)
+  Check 'reload' 'text_scale 150 reloaded: the terminal shows 21 points at once' ($t -and $t.fonts -ceq '1:21/14' -and $t.text.scale -eq 150) ($t.fonts)
+  Check 'reload' 'ui_scale 150 and tabs=always reloaded: tab strip 30 px high with 18 px text, strip shown even for one shell' ($u -and $u.text.ui -ceq '1.5' -and $u.text.tabh -eq 30 -and $u.text.tabfs -ceq '18px' -and $u.strip) ("ui " + $u.text.ui + ", strip " + $u.text.tabh + " px / " + $u.text.tabfs)
+  Check 'reload' 'opacity 60 reloaded: the window is at 60%' ($s.ContainsKey('r-opacity') -and $s['r-opacity'].pct -eq '60') ("pct=" + $s['r-opacity'].pct)
+  Check 'reload' 'line_height 150 and letter_spacing 3 reloaded; the text scale that is no longer set goes back to 100' ($sp -and $sp.text.lh -eq 1.5 -and $sp.text.ls -eq 3 -and $sp.fonts -ceq '1:14/14') ("lh " + $sp.text.lh + ", ls " + $sp.text.ls + ", " + $sp.fonts)
+  Check 'reload' 'invalid settings text: the settings in use are kept (opacity stays at the last good value, 100%) and the log says so' (($s.ContainsKey('r-bad') -and $s['r-bad'].pct -eq '100') -and (@($r | Where-Object { $_ -match 'config reload: the settings file is not valid' }).Count -eq 1)) ("pct=" + $s['r-bad'].pct)
+  Check 'reload' 'a setting that is only read at start (shell) is reported as needing a restart' (@($r | Where-Object { $_ -match 'notice: These settings apply after HUDshell is restarted: shell' }).Count -eq 1)
+  Check 'reload' 'each real change was logged with the keys that changed' (@($r | Where-Object { $_ -match 'config reload: changed ' }).Count -ge 5) ((@($r | Where-Object { $_ -match 'config reload: changed ' }) | Select-Object -First 2 | ForEach-Object { ($_ -replace '^\d+ ', '') }) -join ' | ')
+  Check 'reload' 'no start failures logged' (@($r | Where-Object { $_ -match 'FAILED to start' }).Count -eq 0)
+}
+
+function Suite-Restore {
+  Write-Host "=== restore: the open shells and the layout come back at the next start (restore_session = shells; no OS input) ==="
+  $file = Join-Path $scratch 'session-test.json'
+  Remove-Item -LiteralPath $file -ErrorAction SilentlyContinue
+  $args2 = @('--test-profiles', '--restore-session', 'shells', '--session-file', $file, '--delay', '2')
+  # run 1: open shells from three profiles and a 2 x 2 layout, then quit
+  $r1 = Run-Scenario (@('--term', '--sessionsave') + $args2) 90000
+  $j = $null
+  if (Test-Path -LiteralPath $file) { try { $j = Get-Content -LiteralPath $file -Raw | ConvertFrom-Json } catch { } }
+  Check 'restore' 'the first run saved a session file: four shells (pwsh, work, cmd, pwsh) in a 2 x 2 layout, the second pane focused' ($j -and (@($j.shells) -join ',') -ceq 'pwsh,work,cmd,pwsh' -and $j.layout -ceq 'grid' -and $j.focus -eq 1 -and @($j.slots).Count -eq 4) $(if ($j) { (@($j.shells) -join ',') + ' / ' + $j.layout + ' / focus ' + $j.focus } else { 'no file' })
+  $saved1 = if (Test-Path -LiteralPath $file) { Get-Content -LiteralPath $file -Raw } else { '' }
+  # run 2: start again with the same file
+  $r2 = Run-Scenario (@('--term', '--sessionload') + $args2) 90000
+  $u = Get-Ui $r2 'sl-restored'
+  Check 'restore' 'the next start brings the shells back: four tabs, the profile names of the saved shells' ($u -and @($u.labels).Count -eq 4 -and (@($u.labels | Where-Object { $_ -match 'work' }).Count -eq 1) -and (@($u.labels | Where-Object { $_ -match 'cmd' }).Count -eq 1)) $(if ($u) { ($u.labels -join ' | ') } else { 'no dump' })
+  Check 'restore' 'and the 2 x 2 layout, with every pane filled and the same pane focused' ($u -and $u.layout.shown -ceq 'grid' -and (@($u.layout.cells) -join ',') -ceq '1,2,3,4' -and $u.layout.focus -eq 1) $(if ($u) { $u.layout.shown + ' / ' + (@($u.layout.cells) -join ',') + ' / focus ' + $u.layout.focus } else { 'no dump' })
+  Check 'restore' 'the log says the session was restored' (@($r2 | Where-Object { $_ -match 'session restored: 4 shell' }).Count -eq 1)
+  # run 3: without the setting nothing is restored and the file is left alone
+  $stamp = (Get-Item -LiteralPath $file).LastWriteTimeUtc
+  $r3 = Run-Scenario @('--term', '--sessionload', '--test-profiles', '--session-file', $file, '--delay', '2') 90000
+  $u = Get-Ui $r3 'sl-restored'
+  Check 'restore' 'restore_session off (the default): one shell, and the saved file is not touched' ($u -and @($u.labels).Count -eq 1 -and ((Get-Item -LiteralPath $file).LastWriteTimeUtc -eq $stamp)) $(if ($u) { ($u.labels -join ' | ') } else { 'no dump' })
+  # run 4: a damaged file is ignored
+  [IO.File]::WriteAllText($file, '{ this is not a session')
+  $r4 = Run-Scenario (@('--term', '--sessionload') + $args2) 90000
+  $u = Get-Ui $r4 'sl-restored'
+  Check 'restore' 'a damaged session file is ignored: one shell, and the log says so' ($u -and @($u.labels).Count -eq 1 -and (@($r4 | Where-Object { $_ -match 'session: the saved session is damaged' }).Count -eq 1)) $(if ($u) { ($u.labels -join ' | ') } else { 'no dump' })
+  Check 'restore' 'no start failures logged' ((@($r2 + $r4) | Where-Object { $_ -match 'FAILED to start' }).Count -eq 0)
+}
+
+function Suite-Recover {
+  Write-Host "=== recover: this HUDshell's web view process is killed while it runs; the window and the shells come back (no OS input) ==="
+  Stop-HUDshell
+  $n = LineCount $log
+  $p = Start-Process $dbg -ArgumentList @('--term', '--recovertest', '--delay', '2') -PassThru
+  $killed = 0
+  for ($i = 0; $i -lt 60 -and $killed -eq 0; $i++) {
+    Start-Sleep 1
+    if (@(Cut $log $n | Where-Object { $_ -match 'DUMP label=rc-before' }).Count -ge 1) {
+      # only the browser process (the one without --type=) of the web view that belongs to THIS instance
+      $kids = @(Get-CimInstance Win32_Process -Filter ("ParentProcessId=" + $p.Id + " AND Name='msedgewebview2.exe'") | Where-Object { $_.CommandLine -notmatch '--type=' })
+      foreach ($k in $kids) { Stop-Process -Id $k.ProcessId -Force -ErrorAction SilentlyContinue; $killed++ }
+    }
+  }
+  $null = $p.WaitForExit(120000)
+  if (-not $p.HasExited) { Stop-Process -Id $p.Id -Force }
+  $r = @(Cut $log $n)
+  Check 'recover' 'the browser process of the web view was found and killed' ($killed -ge 1) "killed $killed"
+  Check 'recover' 'HUDshell noticed it and created the web view again' ((@($r | Where-Object { $_ -match 'webview: the browser process exited' }).Count -ge 1) -and (@($r | Where-Object { $_ -match 'webview: created again' }).Count -ge 1))
+  Check 'recover' 'the open shells were opened again in the new page' (@($r | Where-Object { $_ -match 'the open shells were opened again' }).Count -ge 1)
+  Check 'recover' 'shell 1 kept running: what is typed after the failure shows up in the new page' (Dump-Has $r 'rc-one' 'AFTER-CRASH-ONE')
+  Check 'recover' 'shell 2 kept running too and has a view again' (Dump-Has $r 'rc-two' 'AFTER-CRASH-TWO')
+  Check 'recover' 'HUDshell itself kept running until the script ended it' (@($r | Where-Object { $_ -match 'AUTOTEST: finished' }).Count -eq 1)
+}
+
 function Suite-Dpi {
   Write-Host "=== dpi: moving the window between monitors with different scaling (no OS input) ==="
   $alt = Alt-Monitor
@@ -1278,6 +1353,22 @@ function Suite-Kbd {
   $p = $null
   $us = [GT]::LoadLayout('00000409')
   try {
+    # 0. The warning about AltGr characters at start: first with German active (it must name the hotkeys that clash), then on the
+    # normal layout (it must stay silent).
+    $hklDe0 = [GT]::LoadLayout('00000407')
+    [GT]::RestoreSystemLayout($hklDe0.ToInt64() -band 0xFFFFFFFF); Start-Sleep -Milliseconds 1800
+    $n0 = LineCount $log
+    $null = Start-Process $dbg -ArgumentList @('--term', '--inputtest', '--delay', '2') -PassThru
+    Start-Sleep 9
+    $seg0 = @(Cut $log $n0)
+    Check 'kbd' 'started with German active, HUDshell warns that some hotkeys also type AltGr characters (Ctrl+Alt+Q gives @)' (@($seg0 | Where-Object { $_ -match 'notice: .*AltGr key' -and $_ -match 'Ctrl\+Alt\+Q \(@\)' }).Count -ge 1) ((@($seg0 | Where-Object { $_ -match 'AltGr clash' }) | Select-Object -First 1) -join '')
+    Stop-HUDshell
+    [GT]::RestoreSystemLayout($origLayout); Start-Sleep -Milliseconds 1800
+    $n0 = LineCount $log
+    $null = Start-Process $dbg -ArgumentList @('--term', '--inputtest', '--delay', '2') -PassThru
+    Start-Sleep 9
+    Check 'kbd' 'started on the normal layout, HUDshell says nothing about AltGr' (@(Cut $log $n0 | Where-Object { $_ -match 'AltGr' }).Count -eq 0)
+    Stop-HUDshell
     $n = LineCount $log
     $p = Start-Process $dbg -ArgumentList @('--term', '--inputtest', '--interactive', '--delay', '2') -PassThru
     $h = [IntPtr]::Zero
@@ -1447,6 +1538,9 @@ foreach ($s in $want) {
     'layout' { Suite-Layout }
     'dpi' { Suite-Dpi }
     'text' { Suite-Text }
+    'reload' { Suite-Reload }
+    'restore' { Suite-Restore }
+    'recover' { Suite-Recover }
     'input' { Suite-Input }
     'snap' { Suite-Snap }
     'kbd' { Suite-Kbd }

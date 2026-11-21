@@ -29,9 +29,9 @@
   }
   applyPageColours(startTheme);
   // Terminal policies (config.json): all clipboard conveniences are opt-in.
-  const copyOnSelect = injected.copyOnSelect === true;
-  const rightClick = injected.rightClick === 'paste' ? 'paste' : 'off';
-  const osc52Mode = injected.osc52 === 'write' ? 'write' : 'off';
+  let copyOnSelect = injected.copyOnSelect === true;
+  let rightClick = injected.rightClick === 'paste' ? 'paste' : 'off';
+  let osc52Mode = injected.osc52 === 'write' ? 'write' : 'off';
   // Experiment switch: which Unicode width rules xterm.js uses ('default' | '11' | 'graphemes').
   const uni = injected.unicode || 'default';
   // Shift+Enter: xterm.js has no kitty keyboard protocol, so Shift+Enter would arrive as plain
@@ -583,11 +583,43 @@
         // shell gets the new cell count. A new terminal starts at the common size.
         if (m.all) curBase = m.size;
         const targets = m.all ? [...views.values()] : (v ? [v] : []);
-        for (const o of targets) { o.base = m.size; o.term.options.fontSize = effSize(o.base); }
+        for (const o of targets) { o.base = m.size; o.own = !m.all; o.term.options.fontSize = effSize(o.base); }
         fitShown();
         requestAnimationFrame(reportArea);
         break;
       }
+      case 'startfail':
+        // The host could not start the shell for this tab: say why in the tab itself; Enter tries again.
+        if (v) {
+          v.exited = true;
+          const why = String(m.msg || '').replace(/[\u0000-\u001f\u007f-\u009f]/g, ' ').slice(0, 200);
+          v.term.write('\r\n[HUDshell could not start the shell: ' + why + '. Check that PowerShell 7 is installed, or set "shell" in config.json. Press Enter to try again.]\r\n');
+        }
+        break;
+      case 'cfg': {
+        // The settings file was edited while HUDshell runs: apply what the page owns.
+        if (m.copyOnSelect !== undefined) copyOnSelect = m.copyOnSelect === true;
+        if (m.rightClick !== undefined) rightClick = m.rightClick === 'paste' ? 'paste' : 'off';
+        if (m.osc52 !== undefined) osc52Mode = m.osc52 === 'write' ? 'write' : 'off';
+        if (m.textScale) { textScale = m.textScale; S.text = m.textScale; }
+        if (m.uiScale) { document.documentElement.style.setProperty('--ui', String(m.uiScale / 100)); S.ui = m.uiScale; }
+        if (m.fontSize) curBase = m.fontSize;
+        for (const o of views.values()) {
+          if (m.fontSize && !o.own) o.base = curBase; // a terminal with a size of its own keeps it
+          o.term.options.fontSize = effSize(o.base);
+          if (m.lineHeight) o.term.options.lineHeight = m.lineHeight;
+          if (m.letterSpacing !== undefined) o.term.options.letterSpacing = m.letterSpacing;
+          if (m.scrollback) o.term.options.scrollback = m.scrollback;
+          if (m.fontFamily) o.term.options.fontFamily = m.fontFamily;
+        }
+        fitShown();
+        requestAnimationFrame(reportArea);
+        break;
+      }
+      case 'uiscale':
+        document.documentElement.style.setProperty('--ui', String(Math.max(50, Math.min(300, Number(m.pct) || 100)) / 100));
+        requestAnimationFrame(() => { fitShown(); reportArea(); });
+        break;
       case 'textscale':
         textScale = Math.max(50, Math.min(300, Number(m.pct) || 100));
         for (const o of views.values()) o.term.options.fontSize = effSize(o.base);
@@ -651,7 +683,7 @@
   // ---- settings panel (text-mode box) ----------------------------------------------------------
   const panel = document.getElementById('settings');
   const sset = (o) => send(Object.assign({ t: 'settings' }, o));
-  const S = { opacity: 100, min: 20, theme: '', themes: [] };
+  const S = { opacity: 100, min: 20, theme: '', themes: [], text: 100, ui: 100 };
   const BAR = 20;
   const esc = (s) => s.replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
   function render() {
@@ -662,7 +694,9 @@
     let out = 'hudshell settings\n' + '─'.repeat(W) + '\n';
     out += 'opacity  [' + bar + '] ' + String(S.opacity).padStart(3) + '%\n';
     out += 'colours  <span class="c" data-d="-1">&lt;</span> <span class="on">' + esc(S.theme.padEnd(14)) + '</span> <span class="c" data-d="1">&gt;</span>\n';
-    out += '\n<span class="k">left/right  opacity\nup/down     colours</span>\n';
+    out += 'text     <span class="c" data-t="-1">[-]</span> ' + String(S.text).padStart(3) + '% <span class="c" data-t="1">[+]</span>\n';
+    out += 'ui text  <span class="c" data-u="-1">[-]</span> ' + String(S.ui).padStart(3) + '% <span class="c" data-u="1">[+]</span>\n';
+    out += '\n<span class="k">left/right  opacity\nup/down     colours\n- / =       text size\n, / .       ui text size</span>\n';
     out += '<span class="k">esc</span> or <span class="c" id="sx">[close]</span>';
     panel.innerHTML = out;
   }
@@ -674,6 +708,8 @@
   }
   function showSettings(m) {
     S.opacity = m.opacity; S.min = m.minOpacity; S.theme = m.theme; S.themes = m.themes;
+    if (m.textScale) S.text = m.textScale;
+    if (m.uiScale) S.ui = m.uiScale;
     render();
     if (m.open) panel.classList.add('open');
   }
@@ -682,6 +718,9 @@
     render();
     sset({ a: 'opacity', v: S.opacity, save });
   }
+  const clampPct = (v) => Math.max(50, Math.min(300, Math.round(v / 10) * 10));
+  function stepText(d) { S.text = clampPct(S.text + d * 10); render(); textScale = S.text; for (const o of views.values()) o.term.options.fontSize = effSize(o.base); fitShown(); sset({ a: 'textscale', v: S.text }); }
+  function stepUi(d) { S.ui = clampPct(S.ui + d * 10); render(); document.documentElement.style.setProperty('--ui', String(S.ui / 100)); sset({ a: 'uiscale', v: S.ui }); }
   function stepTheme(d) { const i = S.themes.indexOf(S.theme); setTheme(S.themes[(i + d + S.themes.length) % S.themes.length]); }
   function setTheme(n) { S.theme = n; render(); sset({ a: 'theme', v: n }); }
   let dragging = false;
@@ -693,6 +732,8 @@
     const t = e.target;
     if (t.dataset && t.dataset.i !== undefined) { dragging = true; setOpacity(barValue(t), false); }
     else if (t.dataset && t.dataset.d) stepTheme(Number(t.dataset.d));
+    else if (t.dataset && t.dataset.t) stepText(Number(t.dataset.t));
+    else if (t.dataset && t.dataset.u) stepUi(Number(t.dataset.u));
     else if (t.id === 'sx') closePanel();
   });
   panel.addEventListener('mouseover', (e) => {
@@ -708,6 +749,10 @@
     else if (e.key === 'ArrowRight') setOpacity(S.opacity + 5, true);
     else if (e.key === 'ArrowUp') stepTheme(-1);
     else if (e.key === 'ArrowDown') stepTheme(1);
+    else if (e.key === '-') stepText(-1);
+    else if (e.key === '=' || e.key === '+') stepText(1);
+    else if (e.key === ',') stepUi(-1);
+    else if (e.key === '.') stepUi(1);
     else return;
     e.preventDefault(); e.stopPropagation();
   }, true);

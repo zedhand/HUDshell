@@ -180,6 +180,31 @@ impl Layout {
     }
 
     /// The shell in the focused pane (0 when that pane is empty).
+    /// Put back a saved layout. `slots` is the shell id per pane (0 = empty), `groups` the own-lists (only used in own mode; when
+    /// they are missing each pane's list is its own shell, and shells in no pane join the focused pane's list), `all` every shell id.
+    pub fn restore(&mut self, preset: Preset, split: (u32, u32), slots: Vec<u32>, groups: Vec<Vec<u32>>, focus: usize, all: &[u32]) {
+        let n = preset.panes();
+        let mut slots = slots;
+        slots.resize(n, 0);
+        slots.truncate(n);
+        let from_slots: Vec<Vec<u32>> = slots.iter().map(|&s| if s != 0 { vec![s] } else { Vec::new() }).collect();
+        let mut g = if self.own && groups.len() == n { groups } else { from_slots };
+        if self.own {
+            let focus = focus.min(n - 1);
+            for &id in all {
+                if !g.iter().any(|l| l.contains(&id)) {
+                    g[focus].push(id);
+                }
+            }
+        }
+        self.preset = preset;
+        self.set_split(split.0, split.1);
+        self.groups = g;
+        self.slots = slots;
+        self.focus = focus.min(n - 1);
+        self.zoom = false;
+    }
+
     /// Move the focus to the next pane (from the focused one, wrapping) that shows a shell, without changing
     /// what any pane shows. Returns that shell, 0 when every pane is empty.
     pub fn focus_nonempty(&mut self) -> u32 {
@@ -651,6 +676,27 @@ mod tests {
         let mut e = Layout::new();
         e.set_preset(Preset::Columns, &[], 0);
         assert_eq!(e.focus_nonempty(), 0, "every pane empty");
+    }
+
+    #[test]
+    fn a_saved_layout_can_be_put_back() {
+        let mut l = with(&[1]);
+        l.restore(Preset::Grid, (60, 40), vec![3, 1, 0, 2], vec![], 1, &[1, 2, 3]);
+        assert_eq!((l.preset(), l.slots(), l.focus(), l.split()), (Preset::Grid, &[3u32, 1, 0, 2][..], 1, (60, 40)));
+        assert!(!l.zoomed());
+        l.restore(Preset::Columns, (50, 50), vec![2], vec![], 9, &[1, 2]);
+        assert_eq!((l.slots(), l.focus()), (&[2u32, 0][..], 1), "too few panes are padded, an impossible focus is brought back");
+    }
+
+    #[test]
+    fn own_lists_come_back_and_orphans_join_the_focused_pane() {
+        let mut l = own();
+        l.restore(Preset::Columns, (50, 50), vec![1, 3], vec![vec![1, 2], vec![3]], 1, &[1, 2, 3]);
+        assert_eq!((l.group(0), l.group(1)), (&[1u32, 2][..], &[3u32][..]));
+        // saved without lists (it was saved in shared mode): each pane has its own shell, the rest join the focused pane
+        let mut m = own();
+        m.restore(Preset::Columns, (50, 50), vec![1, 3], vec![], 1, &[1, 2, 3, 4]);
+        assert_eq!((m.group(0), m.group(1)), (&[1u32][..], &[3u32, 2, 4][..]));
     }
 
     #[test]
