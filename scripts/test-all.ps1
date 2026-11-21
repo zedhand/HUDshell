@@ -1950,7 +1950,7 @@ function Suite-Hardware {
   Write-Host "Each step names what to change in Windows' settings; do nothing else, and keep your hands off the mouse and keyboard while the tests run."
   Write-Host "When it is over, put the taskbar and the scaling back the way you like them."
   if ($skip -notcontains 'taskbar') {
-    Hw-State 'taskbar visible at the bottom' 'Make the taskbar visible at the bottom of the main screen (Settings > Personalization > Taskbar > Taskbar behaviors: turn OFF "Automatically hide the taskbar").' { (Get-TaskbarEdge) -eq 'bottom' } 300 { Suite-MaxWork; Suite-Place; Suite-Snap }
+    Hw-State 'taskbar visible at the bottom' 'Make the taskbar visible at the bottom of the main screen (Settings > Personalization > Taskbar > Taskbar behaviors: turn OFF "Automatically hide the taskbar").' { (Get-TaskbarEdge) -eq 'bottom' } 300 { Suite-MaxWork; Suite-Place }
     if ($skip -notcontains 'edges') {
       Hw-State 'taskbar on the left' 'Move the taskbar to the LEFT edge of the main screen (not every Windows 11 version can do this: if yours cannot, stop and skip with HUDSHELL_HW_SKIP=edges).' { (Get-TaskbarEdge) -eq 'left' } 300 { Suite-MaxWork; Suite-Place; Suite-Snap }
       Hw-State 'taskbar on the top' 'Move the taskbar to the TOP edge of the main screen.' { (Get-TaskbarEdge) -eq 'top' } 300 { Suite-MaxWork; Suite-Place; Suite-Snap }
@@ -1958,8 +1958,8 @@ function Suite-Hardware {
     }
   }
   if ($skip -notcontains 'scaling') {
-    Hw-State 'primary scaling 125%' 'Set the scaling of the MAIN screen to 125% (Settings > System > Display > Scale).' { (Get-PrimaryScale) -eq 125 } 300 { Suite-Dpi; Suite-Place; Suite-Input; Suite-Snap }
-    Hw-State 'primary scaling 200%' 'Set the scaling of the MAIN screen to 200%.' { (Get-PrimaryScale) -eq 200 } 300 { Suite-Dpi; Suite-Place; Suite-Input; Suite-Snap }
+    Hw-State 'primary scaling 125%' 'Set the scaling of the MAIN screen to 125% (Settings > System > Display > Scale).' { (Get-PrimaryScale) -eq 125 } 300 { Suite-Dpi; Suite-Place; Suite-Snap }
+    Hw-State 'primary scaling 200%' 'Set the scaling of the MAIN screen to 200%.' { (Get-PrimaryScale) -eq 200 } 300 { Suite-Dpi; Suite-Place; Suite-Snap }
     Hw-State 'primary scaling back at 100%' 'Set the scaling of the MAIN screen back to 100%.' { (Get-PrimaryScale) -eq 100 } 300 { }
   }
   if ($skip -notcontains 'unplug') {

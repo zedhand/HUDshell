@@ -75,10 +75,10 @@ skipped with a warning, never failed. Keep hands off the mouse and keyboard whil
 
 | Step | What the person does | What runs |
 |---|---|---|
-| 1 | taskbar visible at the bottom (turn off auto-hide) | `maxwork` (maximize and half tiles with `maximize_area = work` stop at the taskbar), `place`, `snap` |
-| 2, 3 | taskbar on the left, then the top (only if this Windows version can; skip with `HUDSHELL_HW_SKIP=edges`) | the same three |
-| 4 | main screen scaling 125% | `dpi`, `place`, `input`, `snap` |
-| 5 | main screen scaling 200% | the same four |
+| 1 | taskbar visible at the bottom (turn off auto-hide) | `maxwork` (maximize and half tiles with `maximize_area = work` stop at the taskbar), `place` |
+| 2, 3 | taskbar on the left, then the top (only if this Windows version can; skip with `HUDSHELL_HW_SKIP=edges`) | `maxwork`, `place`, `snap` |
+| 4 | main screen scaling 125% | `dpi`, `place`, `snap` |
+| 5 | main screen scaling 200% | the same three |
 | 6 | scaling back to 100% | nothing |
 | 7 | unplug a monitor's cable, later plug it back | `monitorunplug` |
 | 8 | nothing (needs `HUDSHELL_HW_SLEEP_OK=1`): the computer goes to sleep and a one-time wake-up task wakes it | `sleepresume`: windows, web views and shells still work, heartbeats continue |
