@@ -2192,13 +2192,13 @@ function Game-PadChecks($h, $gamePid, $gameWnd) {
   Check 'gamesession' ("a controller is connected (XInput slot {0})" -f $s.Slot) $true
   $to = 150
   # the person's answers only mean something with the game in front: say so when it is not
-  $front = { if ([GT]::ForegroundWindow() -eq $gameWnd) { Write-Host '(the game window is in front)' } else { Warn 'gamesession' 'the game window was NOT in front at this controller step (something else had the keyboard focus): the answer below does not say how the game reacts with focus' } }
-  & $front
+  $chkFront = { if ([GT]::ForegroundWindow() -eq $gameWnd) { Write-Host '(the game window is in front)' } else { Warn 'gamesession' 'the game window was NOT in front at this controller step (something else had the keyboard focus): the answer below does not say how the game reacts with focus' } }
+  & $chkFront
   Say 'CONTROLLER 1 of 4: HUDshell is shown over the game. Hold BOTH TRIGGERS (LT + RT) on the controller for one second. (waiting up to 2.5 minutes)'
   $ok = Pad-WaitTriggers $to
   if ($ok) { Check 'gamesession' 'with HUDshell shown over the game, another program can read the controller (both triggers seen)' $true } else { Warn 'gamesession' 'controller check 1: no trigger hold seen within 2.5 minutes (nobody answered?)' }
   Say 'CONTROLLER 2 of 4: move the character or the menu cursor with the controller. If the GAME reacts normally press RB (yes); if it does not react press LB (no).'
-  & $front
+  & $chkFront
   $a = Pad-WaitYesNo $to
   if ($a) { Check 'gamesession' 'the game reacts to the controller while HUDshell is shown over it (said by the person)' ($a -eq 'yes') "answer: $a" } else { Warn 'gamesession' 'controller check 2: no answer within 2.5 minutes' }
   # take the keyboard: HUDshell comes to the front (only meaningful when the game was in front before)
@@ -2211,7 +2211,7 @@ function Game-PadChecks($h, $gamePid, $gameWnd) {
   # give it back
   [GT]::Hotkey(0x47); Start-Sleep -Milliseconds 2000
   if ($gameWasFront) { Check 'gamesession' 'the keyboard went back to the game window after the controller step' ([GT]::ForegroundWindow() -eq $gameWnd) } else { Warn 'gamesession' 'the keyboard was not given back to the game after the controller step because the game was not in front before the grab (HUDshell gives back to whoever had it)' }
-  & $front
+  & $chkFront
   Say 'CONTROLLER 4 of 4: HUDshell gave the keyboard back to the game. Move the character or the menu cursor again. RB = the game reacts (yes), LB = it does not (no).'
   $a = Pad-WaitYesNo $to
   if ($a) { Check 'gamesession' 'the game reacts to the controller again after HUDshell took the keyboard and gave it back (said by the person)' ($a -eq 'yes') "answer: $a" } else { Warn 'gamesession' 'controller check 4: no answer within 2.5 minutes' }

@@ -16,16 +16,17 @@ One sitting run by the script: 36 checks passed, 2 failed, 2 warnings. Both fail
 - **A second real game (borderless, a different one from the first sitting; its name is not recorded).** Passed: the game kept the keyboard when HUDshell appeared; HUDshell was drawn over it; show / hide and the
   click-through hotkey worked with the game in front (the click-through check that had failed through a test fault in the first sitting now passed); Ctrl+Alt+G took the keyboard and the second press gave it back to the
   same game window; the click-through hotkey twice with the game in front.
-- **Controller (read-only XInput polling; nothing was sent to the controller or the game).** With HUDshell shown over the game and again while HUDshell held the keyboard, another program could still read the
-  controller (both triggers were seen). The person said the game reacted to the controller while HUDshell was shown, and again after HUDshell took and gave back the keyboard. **Limits of that evidence:** the answers
-  are the person's, and at the second grab the game window was not the foreground window (the terminal this session ran in was; the test did not check this, so the answers are not tied to the game having the
-  keyboard). HUDshell gave the keyboard back to the window that had it, as designed (log: previous foreground was the terminal), which is why the check "the keyboard went back to the game window" failed: **a test
-  fault** (it assumed the game was in front). The test now checks the foreground before each controller step and warns when it is not. The controller steps have **not** been re-run with the game verified in front.
-  Controllers that Windows does not show as XInput pads were not tested.
+- **Controller (read-only XInput polling; nothing was sent to the controller or the game).** First sitting: another program could read the controller with HUDshell shown and while HUDshell held the keyboard,
+  and the person said the game reacted. At the second grab the game window was not in front (the terminal this session ran in was), so the check "the keyboard went back to the game window" failed: **a test fault**
+  (HUDshell gave the keyboard back to the window that had it, as designed), and the answers were not tied to the game having the keyboard.
+  **Re-run the same day, `gamesession` with the controller steps, with the game window checked to be in front before each step: 15 of 15 pass, 0 warnings.** Both triggers were read with HUDshell shown and while it
+  held the keyboard; the person said the game reacted with HUDshell shown (first and fourth step) and again after HUDshell took the keyboard and gave it back, and the keyboard went back to the game window. (A first attempt
+  stopped after step 3 because of a variable-name bug in my test, fixed; an earlier attempt timed out at step 1 because nobody answered; those are not counted.) The "reacts" answers are the person's, not measured.
+  Not tried: controllers that Windows does not show as XInput pads, and long play with HUDshell over the game.
 - **Frame times (PresentMon 2.6.0, game not capped at 30 fps this time).** Without HUDshell: 3409 frames, 55 fps mean, 1% low 8.7 fps (a stall in that minute). HUDshell shown and idle: 3481 frames, 58 fps, 1% low 49.9 fps.
   HUDshell shown with a shell printing flat out: 3481 frames, 58 fps, 1% low 50.3 fps. **What this does and does not say:** HUDshell showed no frame-rate cost in these three minutes, but the measurement is not a clean
   comparison: the baseline minute had a stall of unknown cause, the two HUDshell runs have the identical frame count and mean (which looks like the game's own frame limit at about 58 fps), and it is one scene on one
-  machine. It does not prove a cost of exactly zero. The game window may not have been in front the whole time (see above).
+  machine. It does not prove a cost of exactly zero. The game window may not have been in front the whole time (the first sitting did not check).
 - **Real sleep.** Windows logged a real sleep and resume (Kernel-Power event 42; sleep 00:28:52, wake 00:29:06 local time): **14 seconds**, not the 2 minutes planned, because the network adapter woke the computer, not the
   wake-up timer. Through it: HUDshell kept running, both windows were still open and on a screen, both shells' heartbeats continued (window 1 from beat 19 to 82), and no web view failure was logged.
   The check "the clock jumped by more than 40 s" failed (34 s) because the sleep was short: **a test threshold fault**, now replaced by a check of Windows' own sleep record. A long sleep (minutes) was **not** tested.
