@@ -4,6 +4,19 @@ Machine: Windows 11 build 26300, WebView2 Runtime 157.x, Rust 1.99 (MSVC), Power
 Codex CLI 0.170.0, three displays (all at 100% scaling). Latest full regression: 2026-11-21 with `scripts/test-all.ps1`.
 "Tested" means observed in a log, a cell-text dump or a screenshot; anything not listed is in [known-gaps.md](known-gaps.md).
 
+## A game in exclusive fullscreen (2026-11-22, `gamesession` with the person's answers): HUDshell cannot be used over it
+
+A game that only has exclusive fullscreen (no borderless mode) was run at the desktop resolution on the main screen. The checks that do not need the keyboard passed: HUDshell started with the game in front and did not take
+the keyboard; the show / hide hotkey, the click-through hotkey (twice) and Ctrl+Alt+G (grab and give back, as measured by the foreground window) all reported success; the window under HUDshell's pixels was the game's.
+**But the person, looking at the screen, said:**
+1. **HUDshell was not visible over the game.** The script's own screen capture said it was (a mean difference of 17 of 255 between shown and hidden): the capture sees the desktop picture, not what an exclusive-fullscreen game puts on the screen,
+   so for such games the capture check proves nothing.
+2. **When HUDshell took the keyboard (Ctrl+Alt+G), the game was minimized** (the person: the game "totally went minimized" and the screen was not visible afterwards; they had to bring the game back by hand). This is how Windows treats an
+   exclusive-fullscreen game that loses the foreground; HUDshell asks for the foreground like any window would. The third question (game normal after the keyboard was given back) was answered "no" as well.
+The test was **stopped by hand** at the controller steps (the game was minimized), so **no controller result exists for this game** (step 1, reading the controller, passed before; steps 2 to 4 were not completed).
+Conclusion, from one game and the person's observation only: **with a game in exclusive fullscreen HUDshell is not drawn over it, and taking the keyboard minimizes the game; use the game's borderless / windowed mode.** Not tested: whether Windows' fullscreen
+optimizations or another game would draw it, and a way for HUDshell to detect exclusive fullscreen and warn or refuse the grab (not built).
+
 ## The finale (2026-11-22, `-Suite finale`): Chinese and Korean input methods, a second game with a controller, real sleep
 
 One sitting run by the script: 36 checks passed, 2 failed, 2 warnings. Both failures were test faults (explained below), not HUDshell faults. Not run: the real-prompt suite (skipped on purpose), and nothing else of the full suite

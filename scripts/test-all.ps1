@@ -2218,6 +2218,23 @@ function Game-PadChecks($h, $gamePid, $gameWnd) {
   Write-Host 'controller checks done: you can let go of the controller; the next part (frame times, if on) needs hands off everything.'
 }
 
+# For a game in exclusive fullscreen (overlays may not draw over it, and a window taking the keyboard may push the game to the desktop): the person
+# says what they SEE, by controller (RB = yes, LB = no). A screen capture cannot be trusted there.
+function Game-ExclAsk($h, $gameWnd) {
+  Write-Host ""; Write-Host '----- what the person sees (exclusive fullscreen) -----'
+  $to = 150
+  $ask = { param($q, $name, $wantYes)
+    Say $q
+    $a = Pad-WaitYesNo $to
+    if ($a) { Check 'gamesession' $name (($a -eq 'yes') -eq $wantYes) "answer: $a (said by the person)" } else { Warn 'gamesession' "no answer within 2.5 minutes: $name" }
+  }
+  & $ask 'LOOK AT THE SCREEN. Do you SEE the HUDshell terminal window drawn over the game right now? RB = yes I see it, LB = no I do not.' 'exclusive fullscreen: HUDshell is visible over the game (said by the person)' $true
+  [GT]::Hotkey(0x47); Start-Sleep -Milliseconds 2500
+  & $ask 'LOOK AT THE SCREEN. HUDshell just took the keyboard. Is the GAME still on screen, full screen, with no desktop showing, no minimize and no resolution flicker? RB = the game is fine, LB = something went wrong.' 'exclusive fullscreen: the game stayed up when HUDshell took the keyboard (said by the person)' $true
+  [GT]::Hotkey(0x47); Start-Sleep -Milliseconds 2500
+  & $ask 'HUDshell gave the keyboard back. Is the game full screen and working normally again? RB = yes, LB = no.' 'exclusive fullscreen: the game is back to normal after HUDshell gave the keyboard back (said by the person)' $true
+}
+
 function Suite-GameSession {
   Write-Host "=== gamesession: HUDshell over a real game (borderless) - do not touch mouse/keyboard once the game is found ==="
   $m = @(Get-Monitors) | Where-Object { $_.Primary } | Select-Object -First 1
@@ -2275,6 +2292,7 @@ function Suite-GameSession {
     $nn = LineCount $log
     [GT]::Hotkey(0x54); Start-Sleep -Milliseconds 1200; [GT]::Hotkey(0x54); Start-Sleep -Milliseconds 1200
     Check 'gamesession' 'the click-through hotkey (Ctrl+Alt+T) works with the game in front, twice, and the game is still in front' ((@(Cut $log $nn | Where-Object { $_ -match 'click_through setting = ' }).Count -eq 2) -and ([GT]::ForegroundPid() -eq $gamePid))
+    if ($env:HUDSHELL_GAME_EXCL -eq '1') { Game-ExclAsk $h $gameWnd }
     if ($env:HUDSHELL_GAME_PAD -eq '1') { Game-PadChecks $h $gamePid $gameWnd }
     # frame times with and without HUDshell (PresentMon needs administrator rights: one prompt, which the person accepts)
     if ($env:HUDSHELL_GAME_NOFT -eq '1') { Write-Host 'frame times left out (HUDSHELL_GAME_NOFT=1)' }
