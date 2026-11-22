@@ -175,7 +175,7 @@ function Alt-Monitor {
   return ($m | Where-Object { -not $_.Primary -and $_.Dpi -ne $p.Dpi -and ($_.WR - $_.WL) -ge 1000 -and ($_.WB - $_.WT) -ge 600 } | Select-Object -First 1)
 }
 
-function Stop-HUDshell { Get-Process hudshell -ErrorAction SilentlyContinue | Stop-Process -Force; Start-Sleep -Milliseconds 400 }
+function Stop-HUDshell { Get-Process hudshell -ErrorAction SilentlyContinue | Stop-Process -Force; Start-Sleep -Milliseconds 400; if ($script:NeutralOn) { Ensure-Neutral } }
 function Read-Lines([string]$p) {
   if (-not (Test-Path -LiteralPath $p)) { return @() }
   # The app may be appending to the log right now: open it shared, and try again if it is locked for a moment.
@@ -383,9 +383,9 @@ function Suite-Ui {
     $o0 = [GT]::Origin($h)
     [GT]::Hotkey(0xBE); Start-Sleep -Milliseconds 600; $o1 = [GT]::Origin($h)
     [GT]::Hotkey(0xBE); Start-Sleep -Milliseconds 600; $o2 = [GT]::Origin($h)
-    [GT]::Hotkey(0xBC); Start-Sleep -Milliseconds 600; $o3 = [GT]::Origin($h)
+    [GT]::HotkeyShift(0xBE); Start-Sleep -Milliseconds 600; $o3 = [GT]::Origin($h)
     Check 'ui' 'Ctrl+Alt+. moves the window to a corner, again to the next one' (($o1.X -ne $o0.X -or $o1.Y -ne $o0.Y) -and ($o2.X -ne $o1.X -or $o2.Y -ne $o1.Y)) ("{0},{1} -> {2},{3} -> {4},{5}" -f $o0.X, $o0.Y, $o1.X, $o1.Y, $o2.X, $o2.Y)
-    Check 'ui' 'Ctrl+Alt+, goes back to the previous corner, and the window never took focus' (($o3.X -eq $o1.X -and $o3.Y -eq $o1.Y) -and -not [GT]::IsFg($h)) ("{0},{1}" -f $o3.X, $o3.Y)
+    Check 'ui' 'Ctrl+Alt+Shift+. goes back to the previous corner, and the window never took focus' (($o3.X -eq $o1.X -and $o3.Y -eq $o1.Y) -and -not [GT]::IsFg($h)) ("{0},{1}" -f $o3.X, $o3.Y)
     [GT]::Hotkey(0xBB); Start-Sleep -Milliseconds 500; [GT]::Hotkey(0xBD); Start-Sleep -Milliseconds 500
     Check 'ui' 'Ctrl+Alt+= and Ctrl+Alt+- change the font size' (@(Cut $log $n | Where-Object { $_ -match 'font size -> (15|14)' }).Count -ge 2)
     $nn = LineCount $log
@@ -2927,7 +2927,76 @@ function Suite-Real {
   Write-Host '  (screen dumps for each step are in the log; review them for rendering)'
 }
 
+# ---- a neutral window for the keys the tests send --------------------------------------------------------------------------------------------------
+# The tests press real hotkeys while HUDshell never takes the keyboard, so the keys go to whatever is in front: some of them are bound in other programs
+# (Windows Terminal opens its settings file in an editor on Ctrl+Alt+, and switches tabs on Ctrl+Alt+1 to 9). A small window of the test's own is kept in front,
+# so those keys land there. Not used by the manual suites (they need the game, or a window of their own, in front).
+Add-Type -MemberDefinition '
+[DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);
+[DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+[DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, out uint p);
+[DllImport("user32.dll")] public static extern bool AttachThreadInput(uint a, uint b, bool attach);
+[DllImport("user32.dll")] public static extern bool PostMessage(IntPtr h, uint msg, IntPtr w, IntPtr l);
+[DllImport("kernel32.dll")] public static extern uint GetCurrentThreadId();' -Name Neutral -Namespace HudTest -ErrorAction SilentlyContinue
+$script:NeutralOn = $false; $script:NeutralSync = $null; $script:NeutralPs = $null; $script:NeutralWarned = $false
+function Start-Neutral {
+  $sync = [hashtable]::Synchronized(@{ Handle = [IntPtr]::Zero })
+  $m = @(Get-Monitors) | Where-Object { $_.Primary } | Select-Object -First 1
+  $rs = [runspacefactory]::CreateRunspace(); $rs.ApartmentState = 'STA'; $rs.ThreadOptions = 'ReuseThread'; $rs.Open()
+  $rs.SessionStateProxy.SetVariable('sync', $sync)
+  $rs.SessionStateProxy.SetVariable('pos', @(([int](($m.L + $m.R) / 2) - 150), ([int]($m.WB - 130))))
+  $code = @'
+Add-Type -AssemblyName System.Windows.Forms
+Add-Type -AssemblyName System.Drawing
+$f = New-Object System.Windows.Forms.Form
+$f.Text = 'HUDshell test: keys are sent here'
+$f.FormBorderStyle = 'FixedToolWindow'; $f.StartPosition = 'Manual'; $f.ShowInTaskbar = $false; $f.TopMost = $true
+$f.Location = New-Object System.Drawing.Point($pos[0], $pos[1]); $f.Size = New-Object System.Drawing.Size(300, 90)
+$l = New-Object System.Windows.Forms.Label; $l.Text = 'The HUDshell tests send their keys to this window so that no other program gets them. Please leave it alone.'; $l.Dock = 'Fill'; $f.Controls.Add($l)
+$f.Add_Shown({ $sync.Handle = $f.Handle })
+[System.Windows.Forms.Application]::Run($f)
+'@
+  $ps = [powershell]::Create(); $ps.Runspace = $rs; [void]$ps.AddScript($code)
+  [void]$ps.BeginInvoke()
+  $script:NeutralPs = $ps; $script:NeutralSync = $sync
+  for ($i = 0; $i -lt 50 -and $sync.Handle -eq [IntPtr]::Zero; $i++) { Start-Sleep -Milliseconds 100 }
+}
+function Ensure-Neutral {
+  if (-not $script:NeutralOn) { return }
+  if (-not $script:NeutralSync) { Start-Neutral }
+  $h = [IntPtr]$script:NeutralSync.Handle
+  if ($h -eq [IntPtr]::Zero) { return }
+  if ([HudTest.Neutral]::GetForegroundWindow() -eq $h) { return }
+  $p = 0; $fg = [HudTest.Neutral]::GetForegroundWindow(); $t = [HudTest.Neutral]::GetWindowThreadProcessId($fg, [ref]$p); $me = [HudTest.Neutral]::GetCurrentThreadId()
+  [void][HudTest.Neutral]::AttachThreadInput($me, $t, $true)
+  [void][HudTest.Neutral]::SetForegroundWindow($h)
+  [void][HudTest.Neutral]::AttachThreadInput($me, $t, $false)
+  Start-Sleep -Milliseconds 300
+  if ([HudTest.Neutral]::GetForegroundWindow() -ne $h) {
+    # Windows does not let a background program take the foreground (the program in front has it); a real click on the test's own window does. The cursor is put back.
+    Add-Type -AssemblyName System.Windows.Forms -ErrorAction SilentlyContinue
+    $old = [System.Windows.Forms.Cursor]::Position
+    $o = [GT]::Origin($h)
+    $script:NeutralWhere = "window at $($o.X),$($o.Y); a window of process id $([GT]::PidAt([int]($o.X + 150), [int]($o.Y + 45))) is under the click point (the test's own is $PID)"
+    [GT]::MoveTo([int]($o.X + 150), [int]($o.Y + 45)); Start-Sleep -Milliseconds 150
+    [GT]::MouseDown(); [GT]::MouseUp(); Start-Sleep -Milliseconds 400
+    [System.Windows.Forms.Cursor]::Position = $old
+  }
+  if ([HudTest.Neutral]::GetForegroundWindow() -ne $h -and -not $script:NeutralWarned) {
+    $script:NeutralWarned = $true
+    Warn 'neutral' 'the test could not bring its neutral window to the front: the keys it sends go to whatever is in front (another program may react to them)' $script:NeutralWhere
+  }
+}
+function Stop-Neutral {
+  $script:NeutralOn = $false
+  if ($script:NeutralSync -and $script:NeutralSync.Handle -ne [IntPtr]::Zero) { [void][HudTest.Neutral]::PostMessage([IntPtr]$script:NeutralSync.Handle, 0x10, [IntPtr]::Zero, [IntPtr]::Zero) }
+  try { if ($script:NeutralPs) { Start-Sleep -Milliseconds 300; $script:NeutralPs.Dispose() } } catch { }
+}
+$manualSuites = @('gamesession', 'finale', 'exclreal', 'hardware', 'everything', 'remaining', 'monitorunplug', 'sleepresume', 'kbdany', 'maxwork', 'scaleprobe')
+
 foreach ($s in $want) {
+  $script:NeutralOn = ($manualSuites -notcontains $s)
+  Ensure-Neutral
   switch ($s) {
     'static' { Suite-Static }
     'keys' { Suite-Keys }
@@ -2994,6 +3063,7 @@ foreach ($s in $want) {
   }
 }
 Stop-HUDshell
+Stop-Neutral
 Write-Host ''
 Write-Host '================ RESULTS ================'
 $script:R | Format-Table Suite, Status, Check, Detail -AutoSize -Wrap | Out-String -Width 220 | Write-Host

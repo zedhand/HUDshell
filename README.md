@@ -58,7 +58,7 @@ Or by hand: `npm install`, `npm run build`, `cargo build --release`.
 | Ctrl+Alt+[ / Ctrl+Alt+] | opacity down / up (10% steps) |
 | Ctrl+Alt+S | settings panel: left/right opacity, up/down colours, `-` / `=` text size, `,` / `.` size of HUDshell's own text, `[` / `]` ghost opacity, `t` tab style, `;` / `'` line height, `n` / `m` letter spacing (or click the `[-]` `[+]` and `<` `>` buttons; Esc closes). Every change is live, saved, and applied to every window |
 | Ctrl+Alt+X | ghost: click-through plus dim, press again to restore |
-| Ctrl+Alt+. / Ctrl+Alt+, | dock in the next / previous screen corner |
+| Ctrl+Alt+. / Ctrl+Alt+Shift+. | dock in the next / previous screen corner |
 | Ctrl+Alt+/ | cycle size presets |
 | Ctrl+Alt+= / Ctrl+Alt+- | bigger / smaller text in the focused terminal (`text_scale_hotkeys = "all"`: in every terminal) |
 | Ctrl+Alt+0 | text size back to the starting size (`font_size`) |
@@ -66,6 +66,9 @@ Or by hand: `npm install`, `npm run build`, `cargo build --release`.
 | Ctrl+Alt+Shift+N | profile picker (takes the keyboard; press a number, Esc cancels) |
 | Ctrl+Alt+PageDown / PageUp | next / previous shell |
 | Ctrl+Alt+1 ... 9 | jump to shell 1-9 |
+
+A program in front that binds the same chord reacts too, because a registered hotkey does not stop a program from also acting on it. **Windows Terminal** binds Ctrl+Alt+1 to 9 (switch to tab 1-9) and Ctrl+Alt+, (open its defaults file); the previous-corner hotkey is Ctrl+Alt+Shift+. for that reason. If Windows Terminal is in front while you press Ctrl+Alt+1 to 9, HUDshell and the terminal both switch; change those hotkeys in `config.json` if that bothers you.
+
 | Ctrl+Alt+` | show the shell list for a moment |
 | Ctrl+Alt+; | jump to the next shell with unseen output |
 | Ctrl+Alt+W | close the active shell (press twice within 3 s; closing the last shell starts a fresh one) |

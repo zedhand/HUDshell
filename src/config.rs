@@ -77,7 +77,7 @@ impl Default for Hotkeys {
             quit: "Ctrl+Alt+Q".into(),
             ghost: "Ctrl+Alt+X".into(),
             corner_next: "Ctrl+Alt+.".into(),
-            corner_prev: "Ctrl+Alt+,".into(),
+            corner_prev: "Ctrl+Alt+Shift+.".into(),
             size_cycle: "Ctrl+Alt+/".into(),
             font_bigger: "Ctrl+Alt+=".into(),
             font_smaller: "Ctrl+Alt+-".into(),

@@ -29,6 +29,7 @@ Everything here is either untested or not implemented. Verified behaviour is in 
 
 ## Not implemented
 
+- **Hotkeys that another program also binds** act in both programs when that program is in front (a registered hotkey does not stop the program in front from seeing the chord). Found 2026-11-22: Windows Terminal binds Ctrl+Alt+, (it opens its defaults file in the default editor: the test run opened VS Code twice before the previous-corner hotkey was moved to Ctrl+Alt+Shift+.) and Ctrl+Alt+1 to 9 (switch to tab 1-9), which are also HUDshell's shell-jump hotkeys; they were kept (changeable in `config.json`) and documented in the README. Other programs' bindings were not checked.
 - Exclusive fullscreen cannot be detected before a grab (Windows reports the same state as for a borderless game): HUDshell learns a program only after a grab minimized it once, or from the hand-edited `exclusive_programs`. HUDshell is never drawn over such a game.
 - Full settings UI (the panel covers opacity, colour theme, text and UI scale, ghost opacity, tab style, line height and letter spacing; font, hotkeys, layout and shell are edited in `config.json`).
 - Live settings reload (the `reload` suite passed 9/9 on 2026-11-21 by feeding settings text to the reload code; **not** tried with a real edit of `config.json` while HUDshell runs, the 1.5 s file watching, the tray item or the hotkey re-registration). Changing `window` by hand in the file while HUDshell runs has no effect until restart.

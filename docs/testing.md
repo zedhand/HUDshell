@@ -82,6 +82,13 @@ then frame times from PresentMon with HUDshell not running, shown and idle, and 
 PresentMon is Intel's frame-time tool, downloaded from its official GitHub release into a git-ignored folder, its Authenticode signature and hash printed; it needs administrator
 rights, so Windows asks once. `HUDSHELL_HW_SKIP` takes `layouts`, `ime`, `scaling`, `taskbar`, `sleep`, `game`, `real`. `-Suite scaleprobe` shows each screen's scaling (read only).
 
+## Where the test keys go
+
+The tests press real hotkeys and HUDshell's windows never take the keyboard, so the keys go to whatever is in front, and some of them are bound there (Windows Terminal opens a settings file in an editor on Ctrl+Alt+, and
+switches tabs on Ctrl+Alt+1 to 9). The runner therefore keeps a small window of its own ("HUDshell test: keys are sent here", topmost, at the bottom of the main screen) in front for the default suites and, when Windows
+refuses to give it the foreground (a background program may not take it), clicks it with the real mouse (the cursor is put back). If another program's window stays above it (seen once with a browser window in front), even that fails and the run
+warns once (`neutral`); the keys then go to that program. The manual suites do not use it. Leave the window alone while a suite runs.
+
 ## Games, a controller and sleep (manual)
 
 - `-Suite finale`: the Chinese and Korean input methods (two Windows prompts), then `gamesession` with a controller and frame times, then real sleep (the game and any streaming program must be closed first).
