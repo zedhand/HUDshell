@@ -33,7 +33,7 @@ New-Item -ItemType Directory -Force $scratch | Out-Null
 $env:HUDSHELL_TEST_DIR = $scratch
 if ($Sandbox) { $env:HUDSHELL_SANDBOX = $Sandbox } else { $env:HUDSHELL_SANDBOX = $scratch }
 $Suite = @($Suite | ForEach-Object { $_ -split ',' } | Where-Object { $_ })
-$want = if ($Suite -contains 'all') { @('static', 'keys', 'width', 'hideshow', 'clickfocus', 'clipboard', 'autotest', 'ui', 'scrollback', 'ghost', 'attention', 'policy', 'place', 'dpi', 'text', 'reload', 'restore', 'recover', 'windows', 'winrestore', 'winmove', 'costwin', 'tileoff', 'tabsedit', 'tabsui', 'gamepos', 'altmove', 'wvbounds', 'qol', 'sessions', 'shells', 'layout', 'input', 'snap', 'windowsnap', 'kbd', 'cost', 'release', 'config', 'soak') + $(if ($Sandbox) { 'real' } else { @() }) } else { $Suite }
+$want = if ($Suite -contains 'all') { @('static', 'keys', 'width', 'hideshow', 'clickfocus', 'clipboard', 'autotest', 'ui', 'scrollback', 'ghost', 'attention', 'policy', 'place', 'dpi', 'text', 'reload', 'restore', 'recover', 'windows', 'winrestore', 'winmove', 'costwin', 'tileoff', 'tabsedit', 'tabsui', 'gamepos', 'exclguard', 'altmove', 'wvbounds', 'qol', 'sessions', 'shells', 'layout', 'input', 'snap', 'windowsnap', 'kbd', 'cost', 'release', 'config', 'soak') + $(if ($Sandbox) { 'real' } else { @() }) } else { $Suite }
 
 $script:R = New-Object System.Collections.Generic.List[object]
 # Appended to every check name while a suite runs a second time on another monitor.
@@ -2346,6 +2346,56 @@ function Suite-GameSession {
   } finally { Stop-HUDshell; [GT]::RestoreCursor() }
 }
 
+# ---- a game in exclusive fullscreen (MANUAL) -----------------------------------------------------------------------------------------------------
+# The exclusive-fullscreen guard against a real game: the first Ctrl+Alt+G minimizes the game, HUDshell notices, gives the keyboard back, restores the game
+# and remembers it; the second Ctrl+Alt+G is refused and the game stays up. The person confirms by controller what they see (RB = yes, LB = no).
+Add-Type -MemberDefinition '[DllImport("user32.dll")] public static extern bool IsIconic(IntPtr h);' -Name Win -Namespace HudTest -ErrorAction SilentlyContinue
+function Suite-ExclReal {
+  Write-Host "=== exclreal: the exclusive-fullscreen guard against a real game ==="
+  $m = @(Get-Monitors) | Where-Object { $_.Primary } | Select-Object -First 1
+  $isGame = { $fg = [GT]::ForegroundWindow(); $pid_ = [GT]::ForegroundPid(); $l = 0; $t = 0; $r = 0; $b = 0; [void][GT]::WindowRect($fg, [ref]$l, [ref]$t, [ref]$r, [ref]$b); $pr = Get-Process -Id $pid_ -ErrorAction SilentlyContinue
+    $pr -and $pr.ProcessName -notmatch '^(hudshell|explorer|WindowsTerminal|pwsh|powershell|claude|conhost|OpenConsole|ApplicationFrameHost|SystemSettings|msedge|chrome|firefox)$' -and [Math]::Abs($l - $m.L) -le 2 -and [Math]::Abs($t - $m.T) -le 2 -and [Math]::Abs($r - $m.R) -le 2 -and [Math]::Abs($b - $m.B) -le 2 }
+  Say 'Have the game open in EXCLUSIVE fullscreen on the MAIN screen, in front, in a menu or pause. Then keep your hands off the keyboard and mouse. (waiting up to 10 minutes)'
+  if (-not (Wait-Until $isGame 600)) { Warn 'exclreal' 'no full-screen game was found in front on the main screen within 10 minutes: skipped'; return }
+  Start-Sleep 3
+  $gamePid = [GT]::ForegroundPid(); $gameWnd = [GT]::ForegroundWindow()
+  Check 'exclreal' 'a full-screen game is in front on the main screen' $true
+  Stop-HUDshell
+  GTSave
+  $p = $null
+  try {
+    $n = LineCount $log
+    $at = "{0},{1}" -f ($m.L + 200), ($m.T + 200)
+    $p = Start-Process $dbg -ArgumentList @('--term', '--inputtest', '--interactive', '--size', '900,520', '--at', $at, '--delay', '2') -PassThru
+    $h = [IntPtr]::Zero
+    for ($i = 0; $i -lt 40 -and $h -eq [IntPtr]::Zero; $i++) { Start-Sleep 1; if ($p.HasExited) { break }; $h = [GT]::Find([uint32]$p.Id) }
+    Start-Sleep 8
+    Check 'exclreal' 'HUDshell started and the game kept the keyboard' (($h -ne [IntPtr]::Zero) -and ([GT]::ForegroundPid() -eq $gamePid))
+    if ($h -eq [IntPtr]::Zero) { return }
+    $ask = { param($q, $name)
+      Say $q
+      $a = Pad-WaitYesNo 150
+      if ($a) { Check 'exclreal' $name ($a -eq 'yes') "answer: $a (said by the person)" } else { Warn 'exclreal' "no answer within 2.5 minutes: $name" }
+    }
+    # 1: the first grab (the game is not on the list yet)
+    Write-Host 'first Ctrl+Alt+G: the game is expected to be minimized, then brought back by HUDshell'
+    [GT]::Hotkey(0x47); Start-Sleep -Milliseconds 7000
+    $l1 = @(Cut $log $n)
+    Check 'exclreal' 'HUDshell noticed that the grab minimized the full-screen program, gave the keyboard back and remembered it' (@($l1 | Where-Object { $_ -match 'GRAB minimized the full-screen program' }).Count -eq 1)
+    Check 'exclreal' 'the game window is not minimized any more and is in front again' ((-not [HudTest.Win]::IsIconic($gameWnd)) -and ([GT]::ForegroundWindow() -eq $gameWnd)) $(if ([HudTest.Win]::IsIconic($gameWnd)) { 'still minimized' } else { 'restored' })
+    & $ask 'LOOK AT THE SCREEN. After the first Ctrl+Alt+G the game may have gone away for a moment. Is it back, full screen and working normally now? RB = yes, LB = no.' 'the person sees the game back on screen and normal after the first grab'
+    # 2: the second grab (the game is on the list now)
+    $n2 = LineCount $log
+    Write-Host 'second Ctrl+Alt+G: expected to be refused, the game stays up'
+    [GT]::Hotkey(0x47); Start-Sleep -Milliseconds 3000
+    $l2 = @(Cut $log $n2)
+    Check 'exclreal' 'the second grab was refused (the game is on the list now)' (@($l2 | Where-Object { $_ -match 'GRAB refused' }).Count -eq 1)
+    Check 'exclreal' 'the game was not minimized and kept the keyboard' ((-not [HudTest.Win]::IsIconic($gameWnd)) -and ([GT]::ForegroundWindow() -eq $gameWnd))
+    & $ask 'LOOK AT THE SCREEN. After the second Ctrl+Alt+G the game should NOT have moved at all. Did it stay on screen, full screen, with no flicker? RB = yes it stayed, LB = no.' 'the person sees the game stay up with no flicker after the second grab'
+    Check 'exclreal' 'no start failures logged' (@($l1 + $l2 | Where-Object { $_ -match 'FAILED to start' }).Count -eq 0)
+  } finally { Stop-HUDshell; [GT]::RestoreCursor() }
+}
+
 # ---- everything that needs a person or the computer's own state, in one sitting (MANUAL) ------------------------------------------------------
 # Order: layouts and IME, scaling 200% once more, sleep and resume, a real game with frame times, then (with -Sandbox) the real prompts through Claude
 # Code and Codex. The monitor unplug and the taskbar states were done already (`hardware`). Nothing here changes a setting by itself.
@@ -2728,6 +2778,22 @@ function Suite-GamePos {
   Check 'gamepos' 'no start failures logged' ((@($r + $off) | Where-Object { $_ -match 'FAILED to start' }).Count -eq 0)
 }
 
+# The exclusive-fullscreen guard: the program in front is faked; taking the keyboard is refused for a listed program and works for any other (no OS input).
+function Suite-ExclGuard {
+  Write-Host "=== exclguard: HUDshell does not take the keyboard from a program on the exclusive-fullscreen list ==="
+  $r = Run-Scenario @('--term', '--exclguard', '--excl-programs', 'excl.exe', '--delay', '2') 90000
+  $s = Get-States $r
+  Check 'exclguard' 'a listed program in front: Ctrl+Alt+G is refused (logged) and HUDshell does not have the keyboard' ((@($r | Where-Object { $_ -match 'GRAB refused' }).Count -eq 1) -and $s['listed'] -and $s['listed']['focus'] -eq 'false') $(if ($s['listed']) { 'focus=' + $s['listed']['focus'] } else { 'no state' })
+  Check 'exclguard' 'any other program in front: Ctrl+Alt+G works (HUDshell has the keyboard), and the next press gives it back' ($s['normal'] -and $s['normal']['focus'] -eq 'true' -and $s['released'] -and $s['released']['focus'] -eq 'false') $(if ($s['normal'] -and $s['released']) { 'focus=' + $s['normal']['focus'] + ' then ' + $s['released']['focus'] } else { 'no state' })
+  Check 'exclguard' 'the refusal showed a tray notification' (@($r | Where-Object { $_ -match 'tray notification shown' }).Count -ge 1)
+  $named = @($r | Where-Object { ($_ -notmatch 'AUTOTEST t=') -and ($_ -match 'excl\.exe|normal\.exe') })
+  Check 'exclguard' 'the names of the programs are not written to the log' ($named.Count -eq 0) ($named | Select-Object -First 1)
+  $off = Run-Scenario @('--term', '--exclguard', '--excl-programs', 'excl.exe', '--no-excl-guard', '--delay', '2') 90000
+  $so = Get-States $off
+  Check 'exclguard' 'with exclusive_guard off the listed program is not protected: Ctrl+Alt+G takes the keyboard' ((@($off | Where-Object { $_ -match 'GRAB refused' }).Count -eq 0) -and $so['listed'] -and $so['listed']['focus'] -eq 'true') $(if ($so['listed']) { 'focus=' + $so['listed']['focus'] } else { 'no state' })
+  Check 'exclguard' 'no start failures logged' ((@($r + $off) | Where-Object { $_ -match 'FAILED to start' }).Count -eq 0)
+}
+
 # Tabs named by hand and moved: the host side (no OS input), and that they come back at the next start.
 function Suite-TabsEdit {
   Write-Host "=== tabsedit: renaming and moving tabs, saved and restored (no OS input) ==="
@@ -2889,6 +2955,8 @@ foreach ($s in $want) {
     'tileoff' { Suite-TileOff }
     'tabsedit' { Suite-TabsEdit }
     'gamepos' { Suite-GamePos }
+    'exclguard' { Suite-ExclGuard }
+    'exclreal' { Suite-ExclReal }
     'altmove' { Suite-AltMove }
     'wvbounds' { Suite-WvBounds }
     'monitorunplug' { Suite-MonitorUnplug }

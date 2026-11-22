@@ -15,7 +15,16 @@ the keyboard; the show / hide hotkey, the click-through hotkey (twice) and Ctrl+
    exclusive-fullscreen game that loses the foreground; HUDshell asks for the foreground like any window would. The third question (game normal after the keyboard was given back) was answered "no" as well.
 The test was **stopped by hand** at the controller steps (the game was minimized), so **no controller result exists for this game** (step 1, reading the controller, passed before; steps 2 to 4 were not completed).
 Conclusion, from one game and the person's observation only: **with a game in exclusive fullscreen HUDshell is not drawn over it, and taking the keyboard minimizes the game; use the game's borderless / windowed mode.** Not tested: whether Windows' fullscreen
-optimizations or another game would draw it, and a way for HUDshell to detect exclusive fullscreen and warn or refuse the grab (not built).
+optimizations or another game would draw it.
+
+**The guard built after this (`exclusive_guard`, `exclusive_programs`; 2026-11-22).** Windows' own "full-screen app" flag (`SHQueryUserNotificationState`) reported the same value (busy) for this game as it does for any full-screen window, and the game's window
+looks like a borderless one (popup, not topmost, fills the monitor), so exclusive fullscreen **cannot be detected beforehand**. The guard therefore has two parts: a list of programs (edited by hand) that HUDshell will not take the keyboard from (a tray notice says why),
+and learning: when a grab minimizes a program that filled its monitor, HUDshell gives the keyboard back, restores the program and adds it to the list. Tested: 81 unit tests (the list), clippy clean in both configurations, `exclguard` 6 of 6 (fake foreground program, no real
+input: refused when listed, allowed otherwise, allowed with the guard off, names not logged), and **`exclreal` 9 of 9 against the real game** (the first grab minimized it and HUDshell noticed, restored it and remembered it; the person said it was back on screen and normal;
+the second grab was refused with no change on screen, the person saw no flicker). Two earlier attempts of `exclreal` failed because of defects in the guard itself (found from the log and fixed): it looked at the game once after 0.7 s (the game minimizes later: it now looks every 0.3 s for
+about 4 s) and it measured whether the game filled the monitor after the grab, when the game had already changed (it now measures before). **The first grab per game still minimizes it for a moment** (the person saw it go away and come back); only later grabs are refused cleanly.
+**Regression after the change (targeted, not the full run):** `static` 16, `config` 24, `hideshow` 3, `clickfocus` 3, `ui` 33 and `release` 20 passed (99 checks, 0 failures, 0 warnings), with the game closed. **Not run:** the other suites that take the keyboard or move windows (`kbd`, `windows*`, `snap`, `input`, `place` and the rest); the next full run covers them.
+Not tested: other games, the tray notice itself (the notice is logged as shown, not seen by the person), a game that is minimized by the user for another reason within 4 s of a grab (it would be remembered wrongly; remove it from `exclusive_programs`).
 
 ## The finale (2026-11-22, `-Suite finale`): Chinese and Korean input methods, a second game with a controller, real sleep
 

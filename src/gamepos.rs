@@ -60,9 +60,60 @@ pub fn sanitize(places: &mut Vec<Place>) {
     *places = out;
 }
 
+/// Programs kept in the exclusive-fullscreen list at most; the oldest is forgotten first.
+pub const MAX_EXCLUSIVE: usize = 50;
+
+/// Is `app` (an executable file name, lower case) on the list of programs that run in exclusive fullscreen?
+pub fn is_exclusive(list: &[String], app: &str) -> bool {
+    !app.is_empty() && list.iter().any(|a| a == app)
+}
+
+/// Add `app` to the list (once). The desktop shell is never added.
+pub fn remember_exclusive(list: &mut Vec<String>, app: &str) {
+    if ignored(app) || is_exclusive(list, app) {
+        return;
+    }
+    list.push(app.to_string());
+    while list.len() > MAX_EXCLUSIVE {
+        list.remove(0);
+    }
+}
+
+/// A hand-edited list is cleaned: names are reduced to the file name in lower case; empty, ignored and duplicate names go.
+pub fn sanitize_exclusive(list: &mut Vec<String>) {
+    let mut out: Vec<String> = Vec::new();
+    for n in list.drain(..) {
+        let app = app_key(&n);
+        if !ignored(&app) && !out.contains(&app) {
+            out.push(app);
+        }
+    }
+    while out.len() > MAX_EXCLUSIVE {
+        out.remove(0);
+    }
+    *list = out;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_exclusive_list_is_kept_clean() {
+        let mut v = vec![r"C:\x\Game.EXE".to_string(), "game.exe".into(), "".into(), "explorer.exe".into(), "other.exe".into()];
+        sanitize_exclusive(&mut v);
+        assert_eq!(v, vec!["game.exe".to_string(), "other.exe".to_string()]);
+        assert!(is_exclusive(&v, "game.exe") && !is_exclusive(&v, "x.exe") && !is_exclusive(&v, ""));
+        remember_exclusive(&mut v, "game.exe");
+        remember_exclusive(&mut v, "explorer.exe");
+        remember_exclusive(&mut v, "new.exe");
+        assert_eq!(v.len(), 3, "a known program is not added twice and the desktop shell is never added");
+        for i in 0..(MAX_EXCLUSIVE + 5) {
+            remember_exclusive(&mut v, &format!("g{i}.exe"));
+        }
+        assert_eq!(v.len(), MAX_EXCLUSIVE);
+        assert!(!is_exclusive(&v, "game.exe"), "the oldest went first");
+    }
 
     #[test]
     fn names_come_from_the_executable_file_name_only() {

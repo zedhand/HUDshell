@@ -1185,6 +1185,22 @@ const GAMEPOS: &[(u64, &str)] = &[
     (18000, "quit"),
 ];
 
+/// `--exclguard` (run with `--excl-programs excl.exe`, or also `--no-excl-guard`): the program in front is faked; taking the keyboard (Ctrl+Alt+G) must be refused
+/// while a program on the exclusive-fullscreen list is in front, and work for any other program. See Suite-ExclGuard.
+const EXCL_GUARD: &[(u64, &str)] = &[
+    (1500, "cdp-focus"),
+    (2000, "resize:700,420"),
+    (3000, "fg:excl.exe"),
+    (3500, "hotkey:G"),
+    (5000, "state:listed"),
+    (5500, "fg:normal.exe"),
+    (6000, "hotkey:G"),
+    (7500, "state:normal"),
+    (8000, "hotkey:G"),
+    (9000, "state:released"),
+    (9500, "quit"),
+];
+
 /// `--tabsedit` / `--tabsload` (run with `--test-profiles --restore-session shells --session-file <path>`): a tab is renamed by hand and another
 /// moved (through the same host code the page's messages reach), the labels are dumped, and the next start must bring the names and the order back.
 const TABS_EDIT: &[(u64, &str)] = &[
@@ -1331,6 +1347,7 @@ fn scen() -> &'static [(u64, &'static str)] {
         48 => build_sleeptest(),
         47 => ALT_MOVE,
         46 => build_monitortest(),
+        50 => EXCL_GUARD,
         45 => GAMEPOS,
         44 => TABS_LOAD,
         43 => TABS_EDIT,
@@ -1980,7 +1997,7 @@ const SCENARIO_FLAGS: &[&str] = &[
     "--autotest", "--keys", "--widthtest", "--probe", "--probe2", "--probe3", "--probe4", "--real",
     "--clickfocus", "--hideshow", "--clipboard", "--soak", "--scrolltest", "--ghosttest", "--attention",
     "--policytest", "--placetest", "--idletest", "--starttest", "--autostarttest", "--sessiontest", "--shellstest",
-    "--tabmodes", "--shellsfull", "--layouttest", "--layoutempty", "--layoutstart", "--layoutown", "--labeltest", "--inputtest", "--dpitest", "--texttest", "--reloadtest", "--sessionsave", "--sessionload", "--startfailtest", "--recovertest", "--windowstest", "--windowsnap", "--windowssave", "--windowsload", "--windowsmove", "--costwindows", "--tabsedit", "--tabsload", "--gamepos", "--monitortest", "--altmove", "--sleeptest", "--wvtest",
+    "--tabmodes", "--shellsfull", "--layouttest", "--layoutempty", "--layoutstart", "--layoutown", "--labeltest", "--inputtest", "--dpitest", "--texttest", "--reloadtest", "--sessionsave", "--sessionload", "--startfailtest", "--recovertest", "--windowstest", "--windowsnap", "--windowssave", "--windowsload", "--windowsmove", "--costwindows", "--tabsedit", "--tabsload", "--gamepos", "--exclguard", "--monitortest", "--altmove", "--sleeptest", "--wvtest",
 ];
 
 pub(crate) fn is_test_mode() -> bool {
@@ -2053,7 +2070,7 @@ pub(crate) unsafe fn arm(hwnd: HWND) {
     if SCENARIO_FLAGS.iter().any(|f| any_scen(f)) {
         let args: Vec<String> = std::env::args().collect();
         SCEN_SEL.store(
-            if any_scen("--wvtest") { 49 } else if any_scen("--sleeptest") { 48 } else if any_scen("--altmove") { 47 } else if any_scen("--monitortest") { 46 } else if any_scen("--gamepos") { 45 } else if any_scen("--tabsload") { 44 } else if any_scen("--tabsedit") { 43 } else if any_scen("--costwindows") { 42 } else if any_scen("--windowsmove") { 41 } else if any_scen("--windowsload") { 40 } else if any_scen("--windowssave") { 39 } else if any_scen("--windowsnap") { 38 } else if any_scen("--windowstest") { 37 } else if any_scen("--recovertest") { 36 } else if any_scen("--startfailtest") { 35 } else if any_scen("--sessionload") { 34 } else if any_scen("--sessionsave") { 33 } else if any_scen("--reloadtest") { 32 } else if any_scen("--texttest") { 31 } else if any_scen("--dpitest") { 30 } else if any_scen("--inputtest") { 29 } else if any_scen("--labeltest") { 28 } else if any_scen("--layoutown") { 27 } else if any_scen("--layoutstart") { 26 } else if any_scen("--layoutempty") { 25 } else if any_scen("--layouttest") { 24 } else if any_scen("--shellsfull") { 23 } else if any_scen("--tabmodes") { 22 } else if any_scen("--shellstest") { 21 } else if any_scen("--sessiontest") { 20 } else if any_scen("--autostarttest") { 19 } else if any_scen("--starttest") { 18 } else if any_scen("--idletest") { 17 } else if any_scen("--placetest") { 16 } else if any_scen("--policytest") { 15 } else if any_scen("--attention") { 14 } else if any_scen("--ghosttest") { 13 } else if any_scen("--scrolltest") { 12 } else if any_scen("--soak") { 11 } else if any_scen("--clipboard") { 10 } else if any_scen("--hideshow") { 9 } else if any_scen("--clickfocus") { 8 } else if any_scen("--real") { 7 } else if any_scen("--probe4") { 6 } else if any_scen("--probe3") { 5 } else if any_scen("--probe2") { 4 } else if any_scen("--probe") { 3 } else if any_scen("--widthtest") { 2 } else if any_scen("--keys") { 1 } else { 0 },
+            if any_scen("--exclguard") { 50 } else if any_scen("--wvtest") { 49 } else if any_scen("--sleeptest") { 48 } else if any_scen("--altmove") { 47 } else if any_scen("--monitortest") { 46 } else if any_scen("--gamepos") { 45 } else if any_scen("--tabsload") { 44 } else if any_scen("--tabsedit") { 43 } else if any_scen("--costwindows") { 42 } else if any_scen("--windowsmove") { 41 } else if any_scen("--windowsload") { 40 } else if any_scen("--windowssave") { 39 } else if any_scen("--windowsnap") { 38 } else if any_scen("--windowstest") { 37 } else if any_scen("--recovertest") { 36 } else if any_scen("--startfailtest") { 35 } else if any_scen("--sessionload") { 34 } else if any_scen("--sessionsave") { 33 } else if any_scen("--reloadtest") { 32 } else if any_scen("--texttest") { 31 } else if any_scen("--dpitest") { 30 } else if any_scen("--inputtest") { 29 } else if any_scen("--labeltest") { 28 } else if any_scen("--layoutown") { 27 } else if any_scen("--layoutstart") { 26 } else if any_scen("--layoutempty") { 25 } else if any_scen("--layouttest") { 24 } else if any_scen("--shellsfull") { 23 } else if any_scen("--tabmodes") { 22 } else if any_scen("--shellstest") { 21 } else if any_scen("--sessiontest") { 20 } else if any_scen("--autostarttest") { 19 } else if any_scen("--starttest") { 18 } else if any_scen("--idletest") { 17 } else if any_scen("--placetest") { 16 } else if any_scen("--policytest") { 15 } else if any_scen("--attention") { 14 } else if any_scen("--ghosttest") { 13 } else if any_scen("--scrolltest") { 12 } else if any_scen("--soak") { 11 } else if any_scen("--clipboard") { 10 } else if any_scen("--hideshow") { 9 } else if any_scen("--clickfocus") { 8 } else if any_scen("--real") { 7 } else if any_scen("--probe4") { 6 } else if any_scen("--probe3") { 5 } else if any_scen("--probe2") { 4 } else if any_scen("--probe") { 3 } else if any_scen("--widthtest") { 2 } else if any_scen("--keys") { 1 } else { 0 },
             Ordering::SeqCst,
         );
         let delay = args
@@ -2094,6 +2111,12 @@ pub(crate) fn override_config(mut c: config::Config) -> config::Config {
     }
     if args.iter().any(|a| a == "--game-positions") {
         c.game_positions = true;
+    }
+    if let Some(v) = opt("--excl-programs") {
+        c.exclusive_programs = v.split(',').map(|x| x.trim().to_lowercase()).filter(|x| !x.is_empty()).collect();
+    }
+    if args.iter().any(|a| a == "--no-excl-guard") {
+        c.exclusive_guard = false;
     }
     if let Some(v) = opt("--maximize-area") {
         c.maximize_area = v;

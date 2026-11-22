@@ -345,7 +345,83 @@ fn on_page_click(hwnd_i: isize) {
     unsafe { grab_focus(HWND(hwnd_i as *mut _)) };
 }
 
+/// Does the window cover its whole monitor (a game in fullscreen or borderless)?
+fn covers_monitor(win: HWND) -> bool {
+    use windows::Win32::Graphics::Gdi::{GetMonitorInfoW, MonitorFromWindow, MONITORINFO, MONITOR_DEFAULTTONEAREST};
+    unsafe {
+        let mut r = RECT::default();
+        if win.0.is_null() || GetWindowRect(win, &mut r).is_err() {
+            return false;
+        }
+        let mon = MonitorFromWindow(win, MONITOR_DEFAULTTONEAREST);
+        let mut mi = MONITORINFO { cbSize: std::mem::size_of::<MONITORINFO>() as u32, ..Default::default() };
+        if !GetMonitorInfoW(mon, &mut mi).as_bool() {
+            return false;
+        }
+        let m = mi.rcMonitor;
+        (r.left - m.left).abs() <= 2 && (r.top - m.top).abs() <= 2 && (r.right - m.right).abs() <= 2 && (r.bottom - m.bottom).abs() <= 2
+    }
+}
+
+/// The window that had the keyboard when HUDshell took it, if it covered its monitor: if a grab minimizes it, the program runs in exclusive fullscreen.
+static GRAB_FULLSCREEN_PREV: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);
+
+/// How many times timer 13 has looked since the last grab.
+static GRAB_WATCH_TRIES: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+/// Timer 13 looks every 300 ms for this many tries (a game takes a moment to minimize itself).
+const GRAB_WATCH_MAX: u32 = 14;
+
+/// Timer 13, after a grab: was the full-screen program that had the keyboard minimized by it? Then it runs in exclusive fullscreen: give
+/// the keyboard back, bring it back up, remember it and say why. Looks for about 4 seconds, then gives up.
+unsafe fn check_exclusive_after_grab(hwnd: HWND) {
+    let prev = HWND(GRAB_FULLSCREEN_PREV.load(Ordering::SeqCst) as *mut _);
+    let tries = GRAB_WATCH_TRIES.fetch_add(1, Ordering::SeqCst) + 1;
+    let stop = || {
+        GRAB_FULLSCREEN_PREV.store(0, Ordering::SeqCst);
+        let _ = unsafe { KillTimer(Some(hwnd), 13) };
+    };
+    if prev.0.is_null() || !TERMINAL_FOCUS.load(Ordering::SeqCst) || !cfg().exclusive_guard || !unsafe { IsWindow(Some(prev)) }.as_bool() {
+        stop();
+        return;
+    }
+    if !unsafe { IsIconic(prev) }.as_bool() {
+        if tries >= GRAB_WATCH_MAX {
+            stop();
+        }
+        return;
+    }
+    stop();
+    if let Some(app) = app_of_window(prev) {
+        cfg_update(|c| gamepos::remember_exclusive(&mut c.exclusive_programs, &app));
+    }
+    log("GRAB minimized the full-screen program that was in front (exclusive fullscreen): keyboard given back, program restored, remembered");
+    unsafe {
+        release_focus(hwnd);
+        let _ = ShowWindowAsync(prev, SW_RESTORE);
+        tray_notify(
+            hwnd,
+            "HUDshell",
+            "That program runs in exclusive fullscreen and was minimized when HUDshell took the keyboard. HUDshell gave it back and will not take the keyboard from it again. Use the game's borderless or windowed mode to use HUDshell over it.",
+        );
+    }
+}
+
 unsafe fn grab_focus(hwnd: HWND) {
+    // A program in exclusive fullscreen would be minimized by the grab and cannot show HUDshell anyway: leave it alone.
+    if cfg().exclusive_guard
+        && let Some(app) = foreground_app()
+        && gamepos::is_exclusive(&cfg().exclusive_programs, &app)
+    {
+        log("GRAB refused: the program in front is listed as exclusive fullscreen (exclusive_programs)");
+        unsafe {
+            tray_notify(
+                hwnd,
+                "HUDshell",
+                "The program in front runs in exclusive fullscreen: taking the keyboard would minimize it, so HUDshell did not. Use its borderless or windowed mode, or turn exclusive_guard off in config.json.",
+            );
+        }
+        return;
+    }
     // Typing wants a readable window: leave ghost mode first.
     unsafe { ghost_off(hwnd, true) };
     // Remember who had the keyboard so release can give it back. If HUDshell is already the
@@ -356,6 +432,8 @@ unsafe fn grab_focus(hwnd: HWND) {
     }
     let prev = HWND(PREV_FOREGROUND.load(Ordering::SeqCst) as *mut _);
     log(&format!("GRAB requested; previous foreground = {}", unsafe { describe(prev) }));
+    // measured now: after the grab an exclusive-fullscreen game may already have shrunk or minimized itself
+    let was_full_screen = cur != hwnd && covers_monitor(prev);
     unsafe {
         set_ex_flag(hwnd, WS_EX_NOACTIVATE, false);
         let ok = SetForegroundWindow(hwnd).as_bool();
@@ -372,6 +450,13 @@ unsafe fn grab_focus(hwnd: HWND) {
         if success {
             note_active_window();
             wv::focus();
+            // watch whether a full-screen program that had the keyboard gets minimized by this (exclusive fullscreen)
+            log(&format!("GRAB watch: guard={} previous program covered its monitor={}", cfg().exclusive_guard, was_full_screen));
+            if cfg().exclusive_guard && was_full_screen {
+                GRAB_FULLSCREEN_PREV.store(prev.0 as isize, Ordering::SeqCst);
+                GRAB_WATCH_TRIES.store(0, Ordering::SeqCst);
+                let _ = SetTimer(Some(hwnd), 13, 300, None);
+            }
         }
         if !success {
             // Denied: stay a visible, non-interactive HUD.
@@ -1665,9 +1750,14 @@ fn foreground_app() -> Option<String> {
     if let Some(f) = lock_or_recover(&FAKE_FOREGROUND).clone() {
         return if gamepos::ignored(&f) { None } else { Some(f) };
     }
+    app_of_window(unsafe { GetForegroundWindow() })
+}
+
+/// The program that owns `win` (see `foreground_app`).
+fn app_of_window(win: HWND) -> Option<String> {
     use windows::Win32::System::Threading::{GetCurrentProcessId, OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION};
     unsafe {
-        let fg = GetForegroundWindow();
+        let fg = win;
         if fg.0.is_null() {
             return None;
         }
@@ -3199,6 +3289,8 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             WM_TIMER => {
                 if wparam.0 == 4 {
                     idle_tick(hwnd);
+                } else if wparam.0 == 13 {
+                    check_exclusive_after_grab(hwnd);
                 } else if wparam.0 == 9 {
                     // every 2 s: the web view must cover the window (see wv::ensure_bounds)
                     wv::ensure_bounds(hwnd);

@@ -47,6 +47,7 @@ clipboard text and restores it. `scrollback`, `ghost` and `attention` send no OS
 | `tabsedit` | tabs renamed and moved through the host code the page's messages reach (no OS input): the labels, an empty name, control characters dropped, names and order saved in the session and back at the next start |
 | `tabsui` | real mouse and keys: dragging the third tab onto the first moves it, double-clicking a tab and typing a name renames it |
 | `gamepos` | `game_positions` with the program in front faked (no OS input): the window goes back to the place given while that program was in front, a program with no place and the desktop shell leave it alone, no program names in the log, nothing happens with the setting off; the real lookup of the program in front is checked for its shape only |
+| `exclguard` | `exclusive_guard` / `exclusive_programs` with the program in front faked (no OS input): Ctrl+Alt+G is refused for a listed program (tray notice, no program names in the log), works for any other, and works for a listed one with the guard off |
 | `altmove` | a shell in the alternate screen (what full-screen programs use) is detached into its own window: still in the alternate screen, same text (no OS input) |
 | `monitorunplug` | MANUAL, not part of `all`: three windows open (two on one monitor, one on another); a person unplugs that monitor's cable and later plugs it back; checks the windows land on the monitors that are left, the one on another monitor stays, a rescued window keeps its logical size and they are not stacked, nothing crashes, and all stay on screen when the monitor returns. Run: `scripts	est-all.ps1 -Suite monitorunplug` |
 | `wvbounds` | the web view covers the whole window after resizes, docking, layouts and a detach in two windows (14 states) and the 2-second self-check never had to correct it (no OS input) |
@@ -80,6 +81,15 @@ is drawn over it, does not take the keyboard, is click-through, Ctrl+Alt+G takes
 then frame times from PresentMon with HUDshell not running, shown and idle, and shown with a shell printing flat out) and the **real prompts** through Claude Code and Codex (`real`).
 PresentMon is Intel's frame-time tool, downloaded from its official GitHub release into a git-ignored folder, its Authenticode signature and hash printed; it needs administrator
 rights, so Windows asks once. `HUDSHELL_HW_SKIP` takes `layouts`, `ime`, `scaling`, `taskbar`, `sleep`, `game`, `real`. `-Suite scaleprobe` shows each screen's scaling (read only).
+
+## Games, a controller and sleep (manual)
+
+- `-Suite finale`: the Chinese and Korean input methods (two Windows prompts), then `gamesession` with a controller and frame times, then real sleep (the game and any streaming program must be closed first).
+  `HUDSHELL_HW_SKIP=ime,game,sleep` leaves parts out; `HUDSHELL_FINALE_NOFT=1` leaves the frame times out.
+- `-Suite gamesession` with `HUDSHELL_GAME_PAD=1`: the controller is read with XInput (read only; nothing is sent to it); the person answers by holding both triggers or pressing a bumper (RB = yes, LB = no), so no keyboard or mouse is needed with the game in front.
+  `HUDSHELL_GAME_NOFT=1` leaves the frame times out. `HUDSHELL_GAME_EXCL=1` adds questions the person answers by controller about what they see (needed for exclusive fullscreen, where a screen capture cannot be trusted).
+- `-Suite exclreal`: the exclusive-fullscreen guard against a real game in exclusive fullscreen (the first grab minimizes it and HUDshell restores it; the second grab is refused). `-Suite exclguard` is the same with a faked foreground program and no real input.
+- Run these in the background and watch their output live, telling the person each step; a beep alone is not enough.
 
 ## The hardware session (manual, one sitting)
 

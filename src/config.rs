@@ -197,6 +197,11 @@ pub struct Config {
     pub game_positions: bool,
     /// The places `game_positions` keeps (written by HUDshell).
     pub game_places: Vec<crate::gamepos::Place>,
+    /// A game in exclusive fullscreen cannot show HUDshell, and taking the keyboard from it minimizes it. With this on (the default) HUDshell does not
+    /// take the keyboard from a program listed in `exclusive_programs`, and learns a program when it is minimized by a grab (it then hands the keyboard back).
+    pub exclusive_guard: bool,
+    /// Executable file names (lower case, for example `game.exe`) of programs that run in exclusive fullscreen. Edit by hand; HUDshell adds the ones it learns.
+    pub exclusive_programs: Vec<String>,
     /// Dropping the window with the cursor on the left or right edge of a screen makes it fill that half of the screen (like a normal window).
     pub edge_tiling: bool,
     /// Size presets [width, height] in 96-dpi pixels for the size hotkey.
@@ -275,6 +280,8 @@ impl Default for Config {
             edge_tiling: true,
             game_positions: false,
             game_places: Vec::new(),
+            exclusive_guard: true,
+            exclusive_programs: Vec::new(),
             sizes: vec![[640, 360], [900, 520], [1280, 720]],
             active_opacity: None,
             idle_dim_seconds: 0,
@@ -348,6 +355,7 @@ pub const MIN_OPACITY: u32 = 20;
 
 fn validate(cfg: &mut Config) {
     crate::gamepos::sanitize(&mut cfg.game_places);
+    crate::gamepos::sanitize_exclusive(&mut cfg.exclusive_programs);
     cfg.font_size = cfg.font_size.clamp(8, 48);
     cfg.text_scale = cfg.text_scale.clamp(50, 300);
     cfg.ui_scale = cfg.ui_scale.clamp(50, 300);
