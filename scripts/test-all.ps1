@@ -2149,6 +2149,75 @@ function Frame-Stats($ms) {
   [pscustomobject]@{ Frames = $a.Count; MeanMs = [Math]::Round($mean, 2); Fps = [Math]::Round(1000.0 / $mean, 1); Low1Fps = [Math]::Round(1000.0 / $worst, 1) }
 }
 
+# ---- controller (read only) ---------------------------------------------------------------------------------------------------------------------
+# XInput is polled like any program may poll it; nothing is sent to the controller, the game or any other program. The person answers by holding
+# both triggers (LT + RT) or by pressing a bumper (RB = yes, LB = no), so no keyboard or mouse is needed while the game is in front.
+Add-Type -MemberDefinition '[DllImport("xinput1_4.dll")] public static extern int XInputGetState(int i, byte[] s);' -Name Pad -Namespace HudTest -ErrorAction SilentlyContinue
+function Pad-Read {
+  for ($i = 0; $i -lt 4; $i++) {
+    $b = New-Object byte[] 16
+    $r = $null; try { $r = [HudTest.Pad]::XInputGetState($i, $b) } catch { return $null }
+    if ($r -eq 0) { return [pscustomobject]@{ Slot = $i; Buttons = [BitConverter]::ToUInt16($b, 4); LT = $b[6]; RT = $b[7] } }
+  }
+  return $null
+}
+# true when both triggers have been held for about a third of a second within the time, false when not
+function Pad-WaitTriggers([int]$sec) {
+  $until = (Get-Date).AddSeconds($sec); $hold = 0
+  while ((Get-Date) -lt $until) {
+    $s = Pad-Read
+    if ($s -and $s.LT -gt 200 -and $s.RT -gt 200) { $hold++ } else { $hold = 0 }
+    if ($hold -ge 6) { return $true }
+    Start-Sleep -Milliseconds 50
+  }
+  return $false
+}
+# 'yes' (RB), 'no' (LB) or $null when nobody answered within the time
+function Pad-WaitYesNo([int]$sec) {
+  $until = (Get-Date).AddSeconds($sec)
+  while ((Get-Date) -lt $until) {
+    $s = Pad-Read
+    if ($s -and ($s.Buttons -band 0x0200)) { return 'yes' }
+    if ($s -and ($s.Buttons -band 0x0100)) { return 'no' }
+    Start-Sleep -Milliseconds 50
+  }
+  return $null
+}
+# Does a controller keep working with HUDshell shown over the game, and after the keyboard was grabbed and given back?
+# Two things are measured: another program can still read the controller (XInput), and the person says whether the game itself reacted.
+function Game-PadChecks($h, $gamePid, $gameWnd) {
+  Write-Host ""; Write-Host '----- controller over the game -----'
+  $s = Pad-Read
+  if (-not $s) { Warn 'gamesession' 'no XInput controller was found (a controller that Windows does not show as an XInput pad, for example a DualSense without Steam Input, cannot be read): the controller checks were skipped'; return }
+  Check 'gamesession' ("a controller is connected (XInput slot {0})" -f $s.Slot) $true
+  $to = 150
+  # the person's answers only mean something with the game in front: say so when it is not
+  $front = { if ([GT]::ForegroundWindow() -eq $gameWnd) { Write-Host '(the game window is in front)' } else { Warn 'gamesession' 'the game window was NOT in front at this controller step (something else had the keyboard focus): the answer below does not say how the game reacts with focus' } }
+  & $front
+  Say 'CONTROLLER 1 of 4: HUDshell is shown over the game. Hold BOTH TRIGGERS (LT + RT) on the controller for one second. (waiting up to 2.5 minutes)'
+  $ok = Pad-WaitTriggers $to
+  if ($ok) { Check 'gamesession' 'with HUDshell shown over the game, another program can read the controller (both triggers seen)' $true } else { Warn 'gamesession' 'controller check 1: no trigger hold seen within 2.5 minutes (nobody answered?)' }
+  Say 'CONTROLLER 2 of 4: move the character or the menu cursor with the controller. If the GAME reacts normally press RB (yes); if it does not react press LB (no).'
+  & $front
+  $a = Pad-WaitYesNo $to
+  if ($a) { Check 'gamesession' 'the game reacts to the controller while HUDshell is shown over it (said by the person)' ($a -eq 'yes') "answer: $a" } else { Warn 'gamesession' 'controller check 2: no answer within 2.5 minutes' }
+  # take the keyboard: HUDshell comes to the front (only meaningful when the game was in front before)
+  $gameWasFront = ([GT]::ForegroundWindow() -eq $gameWnd)
+  [GT]::Hotkey(0x47); Start-Sleep -Milliseconds 1800
+  $front = [GT]::IsFg($h)
+  Say 'CONTROLLER 3 of 4: HUDshell now has the keyboard (the game is behind it). Hold BOTH TRIGGERS (LT + RT) for one second.'
+  $ok = Pad-WaitTriggers $to
+  if ($ok) { Check 'gamesession' 'while HUDshell has the keyboard, another program can still read the controller' $front "HUDshell in front: $front" } else { Warn 'gamesession' 'controller check 3: no trigger hold seen within 2.5 minutes' }
+  # give it back
+  [GT]::Hotkey(0x47); Start-Sleep -Milliseconds 2000
+  if ($gameWasFront) { Check 'gamesession' 'the keyboard went back to the game window after the controller step' ([GT]::ForegroundWindow() -eq $gameWnd) } else { Warn 'gamesession' 'the keyboard was not given back to the game after the controller step because the game was not in front before the grab (HUDshell gives back to whoever had it)' }
+  & $front
+  Say 'CONTROLLER 4 of 4: HUDshell gave the keyboard back to the game. Move the character or the menu cursor again. RB = the game reacts (yes), LB = it does not (no).'
+  $a = Pad-WaitYesNo $to
+  if ($a) { Check 'gamesession' 'the game reacts to the controller again after HUDshell took the keyboard and gave it back (said by the person)' ($a -eq 'yes') "answer: $a" } else { Warn 'gamesession' 'controller check 4: no answer within 2.5 minutes' }
+  Write-Host 'controller checks done: you can let go of the controller; the next part (frame times, if on) needs hands off everything.'
+}
+
 function Suite-GameSession {
   Write-Host "=== gamesession: HUDshell over a real game (borderless) - do not touch mouse/keyboard once the game is found ==="
   $m = @(Get-Monitors) | Where-Object { $_.Primary } | Select-Object -First 1
@@ -2206,6 +2275,7 @@ function Suite-GameSession {
     $nn = LineCount $log
     [GT]::Hotkey(0x54); Start-Sleep -Milliseconds 1200; [GT]::Hotkey(0x54); Start-Sleep -Milliseconds 1200
     Check 'gamesession' 'the click-through hotkey (Ctrl+Alt+T) works with the game in front, twice, and the game is still in front' ((@(Cut $log $nn | Where-Object { $_ -match 'click_through setting = ' }).Count -eq 2) -and ([GT]::ForegroundPid() -eq $gamePid))
+    if ($env:HUDSHELL_GAME_PAD -eq '1') { Game-PadChecks $h $gamePid $gameWnd }
     # frame times with and without HUDshell (PresentMon needs administrator rights: one prompt, which the person accepts)
     if ($env:HUDSHELL_GAME_NOFT -eq '1') { Write-Host 'frame times left out (HUDSHELL_GAME_NOFT=1)' }
     elseif ($pm) {
@@ -2292,6 +2362,28 @@ function Suite-Remaining {
       if ($installed) { $script:ImeHkl = @('E00E0804', 'E0120412'); Suite-KbdAny }
     } finally { $script:ImeHkl = $null; if ($installed) { Remove-ImeAfterTest } }
   }
+}
+
+# The last three, in one sitting: the Chinese and Korean input methods (two prompts), the game checks again without the frame-time part, and real sleep.
+function Suite-Finale {
+  Write-Host "=== finale: Chinese and Korean input methods, the game checks, real sleep ==="
+  # Order: 1 input methods (two Windows prompts to accept) -> 2 the game (start it, controller, frame times) -> 3 sleep (close the game and the streaming program first).
+  # HUDSHELL_FINALE_NOFT=1 leaves the frame-time part (one more prompt, 4 minutes hands off) out.
+  $oldSkip = $env:HUDSHELL_HW_SKIP; $oldNoft = $env:HUDSHELL_GAME_NOFT; $oldPad = $env:HUDSHELL_GAME_PAD
+  try {
+    $skip = @(($env:HUDSHELL_HW_SKIP -split ',') | ForEach-Object { $_.Trim().ToLower() } | Where-Object { $_ })
+    if ($skip -notcontains 'ime') { $env:HUDSHELL_HW_SKIP = 'taskbar,scaling'; Suite-Remaining; $env:HUDSHELL_HW_SKIP = $oldSkip }
+    if ($skip -notcontains 'game') {
+      if ($env:HUDSHELL_FINALE_NOFT -eq '1') { $env:HUDSHELL_GAME_NOFT = '1' } else { $env:HUDSHELL_GAME_NOFT = $null }
+      $env:HUDSHELL_GAME_PAD = '1'
+      Suite-GameSession
+    }
+    if ($skip -notcontains 'sleep') {
+      Say 'LAST STEP, real sleep. NOW: 1) quit the GAME (save first), 2) close the streaming / recording program, 3) stop all audio (music, video, calls). Then keep your hands off. The computer goes to sleep in 90 seconds and wakes itself about 2 minutes later.'
+      for ($i = 0; $i -lt 3; $i++) { Start-Sleep 30; try { [console]::Beep(660, 200) } catch { } }
+      Suite-SleepResume
+    }
+  } finally { $env:HUDSHELL_HW_SKIP = $oldSkip; $env:HUDSHELL_GAME_NOFT = $oldNoft; $env:HUDSHELL_GAME_PAD = $oldPad }
 }
 
 function Suite-Everything {
@@ -2484,7 +2576,11 @@ function Suite-SleepResume {
     # back here once the computer is awake (the script was suspended with everything else)
     Start-Sleep 20
     $gap = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() - $stampBefore
-    Check 'sleepresume' 'the computer really slept (the clock jumped by more than 40 s over a 20 s wait)' ($gap -gt 40000) ("{0} s" -f [int]($gap / 1000))
+    # Windows' own record of the sleep (Kernel-Power event 42 = entering sleep); a short sleep (a network adapter can wake the computer early) still counts
+    $ev = @(Get-WinEvent -FilterHashtable @{ LogName = 'System'; ProviderName = 'Microsoft-Windows-Kernel-Power'; Id = 42; StartTime = [DateTimeOffset]::FromUnixTimeMilliseconds($stampBefore - 5000).LocalDateTime } -ErrorAction SilentlyContinue)
+    $ts = @(Get-WinEvent -FilterHashtable @{ LogName = 'System'; ProviderName = 'Microsoft-Windows-Power-Troubleshooter'; StartTime = [DateTimeOffset]::FromUnixTimeMilliseconds($stampBefore - 5000).LocalDateTime } -ErrorAction SilentlyContinue | Select-Object -First 1)
+    $how = if ($ts) { ($ts[0].Message -split "`n" | Where-Object { $_ -match 'Sleep Time|Wake Time|Wake Source' } | ForEach-Object { $_.Trim() }) -join '; ' } else { '' }
+    Check 'sleepresume' 'the computer really slept (Windows logged entering sleep; the clock also jumped over a 20 s wait)' ($ev.Count -ge 1) ("{0} s over a 20 s wait; {1}" -f [int]($gap / 1000), $how)
     Start-Sleep 25
     $after = @(Cut $log $n)
     $w = Get-Windows $after 'sleep'
@@ -2785,6 +2881,7 @@ foreach ($s in $want) {
     'gamesession' { Suite-GameSession }
     'everything' { Suite-Everything }
     'remaining' { Suite-Remaining }
+    'finale' { Suite-Finale }
     'scaleprobe' {
       Write-Host '=== scaleprobe: the display scaling Windows reports (read only), and a write of the same value back (no change) ==='
       $d = @(Get-DisplayScales)

@@ -4,6 +4,32 @@ Machine: Windows 11 build 26300, WebView2 Runtime 157.x, Rust 1.99 (MSVC), Power
 Codex CLI 0.170.0, three displays (all at 100% scaling). Latest full regression: 2026-11-21 with `scripts/test-all.ps1`.
 "Tested" means observed in a log, a cell-text dump or a screenshot; anything not listed is in [known-gaps.md](known-gaps.md).
 
+## The finale (2026-11-22, `-Suite finale`): Chinese and Korean input methods, a second game with a controller, real sleep
+
+One sitting run by the script: 36 checks passed, 2 failed, 2 warnings. Both failures were test faults (explained below), not HUDshell faults. Not run: the real-prompt suite (skipped on purpose), and nothing else of the full suite
+(this was a targeted sitting; the last full run is the one further down).
+
+- **Chinese and Korean input methods.** The language features were installed through one Windows prompt and removed again (the language list was back to what it was, and the removal was confirmed). Real key presses
+  gave the characters Windows lists for the Russian, Swedish, Japanese, Chinese and Korean layouts. **Korean IME composition passed** (romaji-style keys arrived as Hangul in the terminal). **Chinese (Pinyin) and Japanese
+  composition were not tested this time**: both IMEs stayed in direct input mode (plain letters arrived, also after the mode key), so the test warned. (Japanese composition had passed in an earlier sitting.)
+  The keyboard layout and the layout list were restored (checked).
+- **A second real game (borderless, a different one from the first sitting; its name is not recorded).** Passed: the game kept the keyboard when HUDshell appeared; HUDshell was drawn over it; show / hide and the
+  click-through hotkey worked with the game in front (the click-through check that had failed through a test fault in the first sitting now passed); Ctrl+Alt+G took the keyboard and the second press gave it back to the
+  same game window; the click-through hotkey twice with the game in front.
+- **Controller (read-only XInput polling; nothing was sent to the controller or the game).** With HUDshell shown over the game and again while HUDshell held the keyboard, another program could still read the
+  controller (both triggers were seen). The person said the game reacted to the controller while HUDshell was shown, and again after HUDshell took and gave back the keyboard. **Limits of that evidence:** the answers
+  are the person's, and at the second grab the game window was not the foreground window (the terminal this session ran in was; the test did not check this, so the answers are not tied to the game having the
+  keyboard). HUDshell gave the keyboard back to the window that had it, as designed (log: previous foreground was the terminal), which is why the check "the keyboard went back to the game window" failed: **a test
+  fault** (it assumed the game was in front). The test now checks the foreground before each controller step and warns when it is not. The controller steps have **not** been re-run with the game verified in front.
+  Controllers that Windows does not show as XInput pads were not tested.
+- **Frame times (PresentMon 2.6.0, game not capped at 30 fps this time).** Without HUDshell: 3409 frames, 55 fps mean, 1% low 8.7 fps (a stall in that minute). HUDshell shown and idle: 3481 frames, 58 fps, 1% low 49.9 fps.
+  HUDshell shown with a shell printing flat out: 3481 frames, 58 fps, 1% low 50.3 fps. **What this does and does not say:** HUDshell showed no frame-rate cost in these three minutes, but the measurement is not a clean
+  comparison: the baseline minute had a stall of unknown cause, the two HUDshell runs have the identical frame count and mean (which looks like the game's own frame limit at about 58 fps), and it is one scene on one
+  machine. It does not prove a cost of exactly zero. The game window may not have been in front the whole time (see above).
+- **Real sleep.** Windows logged a real sleep and resume (Kernel-Power event 42; sleep 00:28:52, wake 00:29:06 local time): **14 seconds**, not the 2 minutes planned, because the network adapter woke the computer, not the
+  wake-up timer. Through it: HUDshell kept running, both windows were still open and on a screen, both shells' heartbeats continued (window 1 from beat 19 to 82), and no web view failure was logged.
+  The check "the clock jumped by more than 40 s" failed (34 s) because the sleep was short: **a test threshold fault**, now replaced by a check of Windows' own sleep record. A long sleep (minutes) was **not** tested.
+
 ## CI check of the commits after the last full run (2026-11-21)
 
 Commit 7411ade (live settings reload, session restore, web view recovery, start-failure message, AltGr warning, panel rows) was pushed before any
