@@ -3007,8 +3007,11 @@ function Preflight {
     if ([HudTest.Win]::IsIconic($pr.MainWindowHandle)) { continue }
     $l = 0; $t = 0; $r = 0; $b = 0
     if (-not [GT]::WindowRect($pr.MainWindowHandle, [ref]$l, [ref]$t, [ref]$r, [ref]$b)) { continue }
-    if ([Math]::Abs($l - $m.L) -le 2 -and [Math]::Abs($t - $m.T) -le 2 -and [Math]::Abs($r - $m.R) -le 2 -and [Math]::Abs($b - $m.B) -le 2) {
-      Write-Host ">>> PREFLIGHT: a window of '$($pr.ProcessName)' fills the main screen. Close it, minimize it or move it to another screen, then start the run again."
+    # covers the whole screen (a game, a video) or the whole work area (a maximized window; its invisible border can reach 10 px past the edge)
+    $full = ([Math]::Abs($l - $m.L) -le 2 -and [Math]::Abs($t - $m.T) -le 2 -and [Math]::Abs($r - $m.R) -le 2 -and [Math]::Abs($b - $m.B) -le 2)
+    $maxd = ($l -le $m.WL + 10 -and $t -le $m.WT + 10 -and $r -ge $m.WR - 10 -and $b -ge $m.WB - 10)
+    if ($full -or $maxd) {
+      Write-Host ">>> PREFLIGHT: a window of '$($pr.ProcessName)' fills the main screen$(if (-not $full) { ' (maximized)' }). Close it, minimize it or move it to another screen, then start the run again."
       $ok = $false
     }
   }
