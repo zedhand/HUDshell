@@ -9,7 +9,8 @@ use std::sync::mpsc;
 use base64::Engine;
 use webview2_com::Microsoft::Web::WebView2::Win32::{
     CreateCoreWebView2EnvironmentWithOptions, ICoreWebView2, ICoreWebView2Controller,
-    ICoreWebView2Settings3, ICoreWebView2Settings5, ICoreWebView2Settings6,
+    ICoreWebView2Controller4, ICoreWebView2Settings3, ICoreWebView2Settings4, ICoreWebView2Settings5,
+    ICoreWebView2Settings6,
     COREWEBVIEW2_MOVE_FOCUS_REASON_PROGRAMMATIC, COREWEBVIEW2_PERMISSION_KIND,
     COREWEBVIEW2_PERMISSION_STATE_DENY, COREWEBVIEW2_WEB_RESOURCE_CONTEXT_ALL,
 };
@@ -111,8 +112,7 @@ fn windows_build() -> u32 {
 
 /// Create the web view of the current window. `first` is the id of the shell the page starts with (shell 1 in the first window).
 pub unsafe fn init(hwnd: HWND, first: pty::SessionId) -> Result<(), String> {
-    let data_dir =
-        format!("{}\\HUDshell\\WebView2", std::env::var("LOCALAPPDATA").unwrap_or_else(|_| ".".into()));
+    let data_dir = crate::config::local_app_data().join("HUDshell").join("WebView2").display().to_string();
     let data_dir_w = HSTRING::from(data_dir);
 
     let (tx, rx) = mpsc::channel();
@@ -160,6 +160,14 @@ pub unsafe fn init(hwnd: HWND, first: pty::SessionId) -> Result<(), String> {
             let _ = s.SetAreDefaultContextMenusEnabled(false);
             let _ = s.SetIsZoomControlEnabled(false);
             let _ = s.SetIsStatusBarEnabled(false);
+            // nothing to share with the page from the host side, and no browser error page in place of the terminal
+            let _ = s.SetAreHostObjectsAllowed(false);
+            let _ = s.SetIsBuiltInErrorPageEnabled(false);
+            // the tab-rename box must not collect form history or offer to save passwords in the WebView2 profile
+            if let Ok(s4) = s.cast::<ICoreWebView2Settings4>() {
+                let _ = s4.SetIsGeneralAutofillEnabled(false);
+                let _ = s4.SetIsPasswordAutosaveEnabled(false);
+            }
             if let Ok(s3) = s.cast::<ICoreWebView2Settings3>() {
                 let _ = s3.SetAreBrowserAcceleratorKeysEnabled(false);
             }
@@ -170,6 +178,10 @@ pub unsafe fn init(hwnd: HWND, first: pty::SessionId) -> Result<(), String> {
                 let _ = s6.SetIsSwipeNavigationEnabled(false);
             }
             log("webview: DevTools, browser shortcuts, context menu, zoom and swipe disabled");
+        }
+        // a file dragged onto the window is not taken in (navigation is blocked anyway; this stops the drop itself)
+        if let Ok(c4) = controller.cast::<ICoreWebView2Controller4>() {
+            let _ = c4.SetAllowExternalDrop(false);
         }
     }
     let mut rc = RECT::default();
@@ -310,26 +322,34 @@ pub unsafe fn init(hwnd: HWND, first: pty::SessionId) -> Result<(), String> {
                 .add_WebResourceRequested(
                     &WebResourceRequestedEventHandler::create(Box::new(move |_, args| {
                         let Some(args) = args else { return Ok(()) };
-                        let request = unsafe { args.Request()? };
-                        let mut uri = PWSTR::null();
-                        unsafe { request.Uri(&mut uri)? };
-                        let u = take_pwstr(uri);
-                        let path = u
-                            .strip_prefix("https://hudshell.local")
-                            .unwrap_or("/")
-                            .split(['?', '#'])
-                            .next()
-                            .unwrap_or("/");
-                        let path = if path.is_empty() || path == "/" { "/index.html" } else { path };
-                        let (status, reason, body, mime): (i32, &str, &[u8], &str) =
+                        // Every request gets an answer from memory: one that could not be read gets an error, never a fall-through to the
+                        // network (where `.local` names are resolved on the local network).
+                        let u = (|| -> windows::core::Result<String> {
+                            let request = unsafe { args.Request()? };
+                            let mut uri = PWSTR::null();
+                            unsafe { request.Uri(&mut uri)? };
+                            Ok(take_pwstr(uri))
+                        })();
+                        let path = match &u {
+                            Ok(u) => {
+                                let p = u.strip_prefix("https://hudshell.local").unwrap_or("/").split(['?', '#']).next().unwrap_or("/");
+                                if p.is_empty() || p == "/" { "/index.html" } else { p }
+                            }
+                            Err(_) => "",
+                        };
+                        let (status, reason, body, mime): (i32, &str, &[u8], &str) = if u.is_err() {
+                            (500, "Internal Server Error", b"request could not be read", "text/plain")
+                        } else {
                             match crate::assets::find(path) {
                                 Some(a) => (200, "OK", a.data, a.mime),
                                 None => (404, "Not Found", b"not found", "text/plain"),
-                            };
+                            }
+                        };
                         log(&format!("asset served from memory: {path} -> {status} ({} bytes)", body.len()));
                         let stream = unsafe { SHCreateMemStream(Some(body)) };
+                        // The page's policy is also sent as a header (the meta tag in index.html says the same).
                         let headers = format!(
-                            "Content-Type: {mime}\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff"
+                            "Content-Type: {mime}\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nContent-Security-Policy: {CSP}"
                         );
                         let resp = unsafe {
                             env_res.CreateWebResourceResponse(
@@ -379,6 +399,19 @@ pub unsafe fn init(hwnd: HWND, first: pty::SessionId) -> Result<(), String> {
     Ok(())
 }
 
+/// The current window is being destroyed: close its web view (the renderer and the page's scrollback go with it) and forget it.
+pub fn forget_current() {
+    let me = crate::perwin::current();
+    WEBVIEW.with(|w| w.borrow_mut().remove(&me));
+    INFLIGHT.with(|i| i.borrow_mut().remove(&me));
+    if let Some(c) = CONTROLLER.with(|c| c.borrow_mut().remove(&me)) {
+        let _ = unsafe { c.Close() };
+    }
+}
+
+/// The page's content security policy: only its own scripts and styles, nothing from anywhere else, no forms, no base URL change.
+const CSP: &str = "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self'; img-src 'self' data:; connect-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
+
 fn handle_term_message(hwnd: isize, m: &str) {
     let Ok(v) = serde_json::from_str::<serde_json::Value>(m) else { return };
     match v["t"].as_str() {
@@ -388,6 +421,11 @@ fn handle_term_message(hwnd: isize, m: &str) {
             let id = session_of(&v);
             let cols = v["cols"].as_i64().unwrap_or(100);
             let rows = v["rows"].as_i64().unwrap_or(30);
+            // only a shell this window lists may be started from its page (a page cannot make shells up)
+            if !crate::window_shell_ids().contains(&id) {
+                log(&format!("bridge: {kind} for session {id}, which is not a shell of this window: ignored"));
+                return;
+            }
             if pty::has_session(id) {
                 // a shell that moved into this window from another one: the new view is blank, so it repaints
                 crate::redraw_moved_shell(id, cols, rows);
@@ -408,7 +446,11 @@ fn handle_term_message(hwnd: isize, m: &str) {
         Some("rename") => crate::on_tab_rename(session_of(&v), v["name"].as_str().unwrap_or("")),
         Some("reorder") => crate::on_tab_reorder(session_of(&v), v["to"].as_u64().unwrap_or(0) as usize),
         // the page's answer to "snapshot": the terminal text of a shell that is about to move into another window
-        Some("snap") => crate::on_snapshot(session_of(&v), v["data"].as_str().unwrap_or("")),
+        Some("snap") => {
+            // the page's scrollback is bounded by `scrollback` (at most 100,000 lines); refuse anything far beyond that
+            let data = v["data"].as_str().unwrap_or("");
+            crate::on_snapshot(session_of(&v), if data.len() <= 64 << 20 { data } else { "" });
+        }
         // Shift+click on a tab: move that shell into a window of its own.
         // (posted: a window cannot be created from inside this callback)
         Some("detach") => {
@@ -470,8 +512,8 @@ fn handle_term_message(hwnd: isize, m: &str) {
         Some("applied") => log(&format!("terminal applied settings: {v}")),
         Some("copied") => log(&format!("copy to clipboard: {v}")),
         Some("rightpaste") => crate::on_right_paste(),
-        Some("attention") => crate::on_attention(hwnd, v["kind"].as_str().unwrap_or("?"), v["text"].as_str().unwrap_or("")),
-        Some("osc52") => crate::on_osc52(v["b64"].as_str().unwrap_or("")),
+        Some("attention") => crate::on_attention(hwnd, session_of(&v), v["kind"].as_str().unwrap_or("?"), v["text"].as_str().unwrap_or("")),
+        Some("osc52") => crate::on_osc52(session_of(&v), v["b64"].as_str().unwrap_or("")),
         Some("note") => log(&format!("page: {v}")),
         Some("resize") => {
             let cols = v["cols"].as_i64().unwrap_or(0);
@@ -682,7 +724,8 @@ pub fn notify_exit(id: pty::SessionId) {
 
 /// Session a page message belongs to (the page puts it in `s`; messages without one mean session 1).
 fn session_of(v: &serde_json::Value) -> pty::SessionId {
-    v["s"].as_u64().unwrap_or(1) as pty::SessionId
+    // a number that does not fit is no session (0 is never one), instead of wrapping onto a real one
+    v["s"].as_u64().map(|n| pty::SessionId::try_from(n).unwrap_or(0)).unwrap_or(1)
 }
 
 /// The bounds the current window's web view has now (client coordinates), for the tests that compare them with the window's client area.

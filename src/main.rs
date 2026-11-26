@@ -139,8 +139,7 @@ fn log_path() -> &'static std::path::PathBuf {
         }
         #[cfg(not(feature = "harness"))]
         {
-            let base = std::env::var("LOCALAPPDATA").unwrap_or_else(|_| ".".into());
-            let dir = std::path::PathBuf::from(base).join("HUDshell");
+            let dir = config::local_app_data().join("HUDshell");
             let _ = std::fs::create_dir_all(&dir);
             dir.join("hudshell.log")
         }
@@ -364,10 +363,10 @@ fn covers_monitor(win: HWND) -> bool {
 }
 
 /// The window that had the keyboard when HUDshell took it, if it covered its monitor: if a grab minimizes it, the program runs in exclusive fullscreen.
-static GRAB_FULLSCREEN_PREV: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);
+static GRAB_FULLSCREEN_PREV: PerWin<AtomicIsize> = PerWin::new(|| AtomicIsize::new(0));
 
 /// How many times timer 13 has looked since the last grab.
-static GRAB_WATCH_TRIES: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+static GRAB_WATCH_TRIES: PerWin<AtomicU32> = PerWin::new(|| AtomicU32::new(0));
 /// Timer 13 looks every 300 ms for this many tries (a game takes a moment to minimize itself).
 const GRAB_WATCH_MAX: u32 = 14;
 
@@ -391,8 +390,18 @@ unsafe fn check_exclusive_after_grab(hwnd: HWND) {
         return;
     }
     stop();
+    // Only a minimize while HUDshell still holds the keyboard counts: Win+D, Alt+Tab or a click on the program's own minimize
+    // button take the keyboard away first (WM_ACTIVATE clears TERMINAL_FOCUS), and those are the user's doing, not the grab's.
+    if unsafe { GetForegroundWindow() } != hwnd {
+        log("GRAB watch: the program was minimized while something else had the keyboard; not learned");
+        return;
+    }
     if let Some(app) = app_of_window(prev) {
-        cfg_update(|c| gamepos::remember_exclusive(&mut c.exclusive_programs, &app));
+        if gamepos::shared_host(&app) {
+            log("GRAB watch: the minimized window belongs to a host of other programs; not learned");
+        } else {
+            cfg_update(|c| gamepos::remember_exclusive(&mut c.exclusive_programs, &app));
+        }
     }
     log("GRAB minimized the full-screen program that was in front (exclusive fullscreen): keyboard given back, program restored, remembered");
     unsafe {
@@ -401,7 +410,7 @@ unsafe fn check_exclusive_after_grab(hwnd: HWND) {
         tray_notify(
             hwnd,
             "HUDshell",
-            "That program runs in exclusive fullscreen and was minimized when HUDshell took the keyboard. HUDshell gave it back and will not take the keyboard from it again. Use the game's borderless or windowed mode to use HUDshell over it.",
+            "That program runs in exclusive fullscreen and was minimized when HUDshell took the keyboard. HUDshell gave it back and will not take the keyboard from it again (the tray menu can clear this list). Use the game's borderless or windowed mode to use HUDshell over it.",
         );
     }
 }
@@ -539,13 +548,19 @@ fn cfg() -> config::Config {
 }
 
 fn cfg_update(f: impl FnOnce(&mut config::Config)) {
-    if let Ok(mut g) = CFG.lock()
-        && let Some(c) = g.as_mut() {
+    // change under the lock, write the file outside it (a slow disk must not block every reader of the settings)
+    let snapshot = match CFG.lock() {
+        Ok(mut g) => g.as_mut().map(|c| {
             f(c);
-            if PERSIST.load(Ordering::SeqCst) {
-                config::save(c);
-            }
-        }
+            c.clone()
+        }),
+        Err(_) => None,
+    };
+    if let Some(c) = snapshot
+        && PERSIST.load(Ordering::SeqCst)
+    {
+        config::save(&c);
+    }
 }
 
 fn theme_json(c: &config::Config) -> serde_json::Value {
@@ -560,20 +575,39 @@ fn theme_json(c: &config::Config) -> serde_json::Value {
 
 /// Minimum time between attention cues, so a program ringing the bell in a loop cannot flash or spam.
 const ATTENTION_GAP_MS: u64 = 3000;
-static ATTENTION_LAST: AtomicU64 = AtomicU64::new(0);
+/// When each shell last got a cue or notification: one noisy shell must not use up another's.
+static ATTENTION_LAST: Mutex<Vec<(u32, u64)>> = Mutex::new(Vec::new());
+
+/// Invisible formatting characters (bidi overrides and isolates, zero-width characters, tags): a program could use them to make
+/// a notification read differently from what it says.
+pub fn is_invisible_format(c: char) -> bool {
+    matches!(c as u32,
+        0x00AD | 0x061C | 0x180E | 0x200B..=0x200F | 0x202A..=0x202E | 0x2060..=0x2064 | 0x2066..=0x206F | 0xFEFF | 0xFFF9..=0xFFFB
+        | 0xE0000..=0xE007F)
+}
+
+/// How a tab is called in a notification: its position in its window, and its name when it has one.
+fn tab_label(id: u32) -> String {
+    let sh = shells_lock();
+    match (sh.position(id), sh.entries().iter().find(|e| e.id == id).map(|e| e.name.clone()).filter(|n| !n.is_empty())) {
+        (Some(p), Some(n)) => format!("tab {} ({n})", p + 1),
+        (Some(p), None) => format!("tab {}", p + 1),
+        _ => "a tab".to_string(),
+    }
+}
 
 /// Keep only printable characters and cap the length: terminal output must never inject control
 /// characters or a wall of text into a system notification.
 fn sanitize_notice(s: &str) -> String {
-    s.chars().filter(|c| !c.is_control()).take(120).collect::<String>().trim().to_string()
+    s.chars().filter(|c| !c.is_control() && !is_invisible_format(*c)).take(120).collect::<String>().trim().to_string()
 }
 
 /// A program rang the bell or sent an OSC 9 / OSC 777 notification. If HUDshell does not hold the keyboard
 /// the user is probably elsewhere: pulse the window border, or (window hidden) raise a tray notification.
 /// The notification text is shown to the user but never written to the log.
-fn on_attention(hwnd_i: isize, kind: &str, text: &str) {
+fn on_attention(hwnd_i: isize, id: u32, kind: &str, text: &str) {
     let now = now_ms() as u64;
-    let last = ATTENTION_LAST.load(Ordering::SeqCst);
+    let last = ATTENTION_LAST.lock().unwrap_or_else(|p| p.into_inner()).iter().find(|(i, _)| *i == id).map(|(_, t)| *t).unwrap_or(0);
     if last != 0 && now.saturating_sub(last) < ATTENTION_GAP_MS {
         log(&format!("attention: {kind} ignored (rate limit)"));
         return;
@@ -585,7 +619,11 @@ fn on_attention(hwnd_i: isize, kind: &str, text: &str) {
         log(&format!("attention: {kind} while HUDshell has the keyboard: no cue"));
         return;
     }
-    ATTENTION_LAST.store(now, Ordering::SeqCst);
+    {
+        let mut l = ATTENTION_LAST.lock().unwrap_or_else(|p| p.into_inner());
+        l.retain(|(i, t)| *i != id && now.saturating_sub(*t) < 60_000);
+        l.push((id, now));
+    }
     if visible {
         if c.attention_cue {
             log(&format!("attention: {kind} -> border cue"));
@@ -594,8 +632,10 @@ fn on_attention(hwnd_i: isize, kind: &str, text: &str) {
             log(&format!("attention: {kind} (cue disabled in config)"));
         }
     } else if c.attention_toast {
+        // The text comes from a program: it is named as such, with the tab it came from, so it cannot pass for HUDshell's own words.
         let msg = sanitize_notice(text);
-        let msg = if msg.is_empty() { "A program asked for your attention".to_string() } else { msg };
+        let from = tab_label(id);
+        let msg = if msg.is_empty() { format!("A program in {from} asked for your attention") } else { format!("From {from}: {msg}") };
         log(&format!("attention: {kind} while hidden -> tray notification"));
         if !is_test_mode() {
             unsafe { tray_notify_icon(HWND(hwnd_i as *mut std::ffi::c_void), "HUDshell", &msg, false) };
@@ -627,7 +667,7 @@ fn open_clipboard_retry() -> bool {
 fn clipboard_text() -> Option<String> {
     use windows::Win32::Foundation::HGLOBAL;
     use windows::Win32::System::DataExchange::{CloseClipboard, GetClipboardData};
-    use windows::Win32::System::Memory::{GlobalLock, GlobalUnlock};
+    use windows::Win32::System::Memory::{GlobalLock, GlobalSize, GlobalUnlock};
     const CF_UNICODETEXT: u32 = 13;
     const MAX_CHARS: usize = 1_000_000;
     unsafe {
@@ -641,8 +681,10 @@ fn clipboard_text() -> Option<String> {
             if p.is_null() {
                 return None;
             }
+            // never read past the block, even if the program that wrote it left out the terminating zero
+            let limit = MAX_CHARS.min(GlobalSize(g) / 2);
             let mut n = 0;
-            while n < MAX_CHARS && *p.add(n) != 0 {
+            while n < limit && *p.add(n) != 0 {
                 n += 1;
             }
             let s = String::from_utf16_lossy(std::slice::from_raw_parts(p, n));
@@ -686,11 +728,21 @@ fn set_clipboard_text(text: &str) -> bool {
 }
 
 /// OSC 52 write from a program (only when `osc52` is "write"). Decodes the base64 text and sets the clipboard.
-pub fn on_osc52(b64: &str) {
+/// When a program last set the clipboard with OSC 52 (one write per second at most).
+static OSC52_LAST: AtomicU64 = AtomicU64::new(0);
+
+pub fn on_osc52(id: u32, b64: &str) {
     use base64::Engine;
     if cfg().osc52 != "write" {
         return;
     }
+    let now = now_ms() as u64;
+    let last = OSC52_LAST.load(Ordering::SeqCst);
+    if last != 0 && now.saturating_sub(last) < 1000 {
+        log("OSC 52 write refused: more than one a second");
+        return;
+    }
+    OSC52_LAST.store(now, Ordering::SeqCst);
     let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(b64.trim()) else {
         log("OSC 52 write refused: not valid base64");
         return;
@@ -702,6 +754,10 @@ pub fn on_osc52(b64: &str) {
     let text = String::from_utf8_lossy(&bytes).to_string();
     let ok = set_clipboard_text(&text);
     log(&format!("OSC 52 clipboard write from a program: {} characters, ok={ok}", text.chars().count()));
+    if ok {
+        // say so on screen: a clipboard that changes by itself is how a pasted command gets swapped
+        wv::post(&serde_json::json!({ "t": "flash", "text": format!("a program in {} set the clipboard", tab_label(id)) }).to_string());
+    }
 }
 
 /// Right-click paste requested by the page (only when `right_click` is "paste").
@@ -794,10 +850,24 @@ fn push_settings(open: bool) {
     );
 }
 
+/// Take the keyboard for a panel that needs it. False when the grab was refused (exclusive guard) or denied by Windows: the
+/// panel would then sit on a window that cannot be typed into. True with `grabbed` set when this call took the keyboard.
+unsafe fn grab_for_panel(hwnd: HWND, grabbed: &AtomicBool, what: &str) -> bool {
+    if TERMINAL_FOCUS.load(Ordering::SeqCst) {
+        return true;
+    }
+    unsafe { grab_focus(hwnd) };
+    if TERMINAL_FOCUS.load(Ordering::SeqCst) {
+        grabbed.store(true, Ordering::SeqCst);
+        return true;
+    }
+    log(&format!("{what} not opened: the keyboard could not be taken"));
+    false
+}
+
 unsafe fn open_settings(hwnd: HWND) {
-    if !TERMINAL_FOCUS.load(Ordering::SeqCst) {
-        unsafe { grab_focus(hwnd) };
-        SETTINGS_GRABBED.store(true, Ordering::SeqCst);
+    if !unsafe { grab_for_panel(hwnd, &SETTINGS_GRABBED, "settings panel") } {
+        return;
     }
     push_settings(true);
 }
@@ -808,7 +878,7 @@ pub fn on_settings_message(hwnd_i: isize, v: &serde_json::Value) {
     unsafe {
         match v["a"].as_str() {
             Some("opacity") => {
-                if let Some(p) = v["v"].as_u64() {
+                if let Some(p) = v["v"].as_u64().map(|p| p.min(u32::MAX as u64)) {
                     set_opacity(hwnd, p as u32, v["save"].as_bool().unwrap_or(false));
                 }
             }
@@ -821,7 +891,7 @@ pub fn on_settings_message(hwnd_i: isize, v: &serde_json::Value) {
                     }
             }
             Some("textscale") => {
-                if let Some(p) = v["v"].as_u64() {
+                if let Some(p) = v["v"].as_u64().map(|p| p.min(u32::MAX as u64)) {
                     let pct = (p as u32).clamp(50, 300);
                     cfg_update(|c| c.text_scale = pct);
                     log(&format!("text scale -> {pct}% (settings panel)"));
@@ -829,7 +899,7 @@ pub fn on_settings_message(hwnd_i: isize, v: &serde_json::Value) {
                 }
             }
             Some("uiscale") => {
-                if let Some(p) = v["v"].as_u64() {
+                if let Some(p) = v["v"].as_u64().map(|p| p.min(u32::MAX as u64)) {
                     let pct = (p as u32).clamp(50, 300);
                     cfg_update(|c| c.ui_scale = pct);
                     log(&format!("ui scale -> {pct}% (settings panel)"));
@@ -837,7 +907,7 @@ pub fn on_settings_message(hwnd_i: isize, v: &serde_json::Value) {
                 }
             }
             Some("ghost") => {
-                if let Some(p) = v["v"].as_u64() {
+                if let Some(p) = v["v"].as_u64().map(|p| p.min(u32::MAX as u64)) {
                     let pct = (p as u32).clamp(config::MIN_OPACITY, 100);
                     cfg_update(|c| c.ghost_opacity = pct);
                     log(&format!("ghost opacity -> {pct}% (settings panel)"));
@@ -859,7 +929,7 @@ pub fn on_settings_message(hwnd_i: isize, v: &serde_json::Value) {
                 }
             }
             Some("lineheight") => {
-                if let Some(p) = v["v"].as_u64() {
+                if let Some(p) = v["v"].as_u64().map(|p| p.min(u32::MAX as u64)) {
                     let pct = (p as u32).clamp(100, 200);
                     cfg_update(|c| c.line_height = pct);
                     log(&format!("line height -> {pct}% (settings panel)"));
@@ -867,7 +937,7 @@ pub fn on_settings_message(hwnd_i: isize, v: &serde_json::Value) {
                 }
             }
             Some("spacing") => {
-                if let Some(p) = v["v"].as_u64() {
+                if let Some(p) = v["v"].as_u64().map(|p| p.min(u32::MAX as u64)) {
                     let px = (p as u32).min(10);
                     cfg_update(|c| c.letter_spacing = px);
                     log(&format!("letter spacing -> {px} px (settings panel)"));
@@ -1298,6 +1368,7 @@ unsafe fn register_hotkeys(hwnd: HWND, hk: &config::Hotkeys) -> Vec<String> {
                 Some((mods, vk)) => {
                     if RegisterHotKey(Some(hwnd), HK_SHELL_JUMP + n - 1, HOT_KEY_MODIFIERS(mods), vk).is_err() {
                         log(&format!("hotkey {spec} (shell {n}) FAILED"));
+                        notice(&format!("Hotkey {spec} (jump to shell {n}) is already used by another program. Change shell_jump in {}", config::path().display()));
                     } else {
                         registered.push(spec.clone());
                     }
@@ -1419,14 +1490,24 @@ fn push_page_cfg() {
 unsafe fn apply_config_change(hwnd: HWND, new: &config::Config, changed: &[String]) {
     let has = |k: &str| changed.iter().any(|c| c == k);
     log(&format!("config reload: changed {}", changed.join(", ")));
-    if has("opacity") || has("active_opacity") || has("idle_dim_seconds") || has("idle_opacity") || has("ghost_opacity") {
-        unsafe { refresh_opacity(hwnd) };
-    }
-    if has("idle_dim_seconds") {
-        if new.idle_dim_seconds > 0 {
-            let _ = unsafe { SetTimer(Some(hwnd), 4, 1000, None) };
-        } else {
-            let _ = unsafe { KillTimer(Some(hwnd), 4) };
+    // window-level settings go to every window, not only the one that noticed the change
+    for (serial, h) in perwin::all() {
+        let _w = perwin::enter(serial);
+        let wh = HWND(h as *mut std::ffi::c_void);
+        if has("idle_dim_seconds") {
+            if new.idle_dim_seconds > 0 {
+                let _ = unsafe { SetTimer(Some(wh), 4, 1000, None) };
+            } else {
+                let _ = unsafe { KillTimer(Some(wh), 4) };
+                IDLE_DIM.store(false, Ordering::SeqCst); // a window dimmed for idleness must not stay dimmed
+            }
+        }
+        if has("click_through") {
+            CLICK_THROUGH.store(new.click_through, Ordering::SeqCst);
+            unsafe { refresh_pointer_style(wh) };
+        }
+        if has("opacity") || has("active_opacity") || has("idle_dim_seconds") || has("idle_opacity") || has("ghost_opacity") {
+            unsafe { refresh_opacity(wh) };
         }
     }
     if has("game_positions")
@@ -1438,10 +1519,6 @@ unsafe fn apply_config_change(hwnd: HWND, new: &config::Config, changed: &[Strin
         } else {
             let _ = unsafe { KillTimer(Some(h), 7) };
         }
-    }
-    if has("click_through") {
-        CLICK_THROUGH.store(new.click_through, Ordering::SeqCst);
-        unsafe { refresh_pointer_style(hwnd) };
     }
     if has("theme") || has("custom_colours") {
         push_theme();
@@ -1556,11 +1633,9 @@ fn save_session() {
     let mut s = windows.remove(0);
     s.windows = windows;
     let p = session_path();
-    let tmp = p.with_extension("json.tmp");
     let ok = serde_json::to_string_pretty(&s)
         .map_err(|e| e.to_string())
-        .and_then(|text| std::fs::write(&tmp, text).map_err(|e| e.to_string()))
-        .and_then(|_| std::fs::rename(&tmp, &p).map_err(|e| e.to_string()));
+        .and_then(|text| config::write_durable(&p, &text).map_err(|e| e.to_string()));
     if let Err(e) = ok {
         log(&format!("session: could not save ({e})"));
     }
@@ -1708,11 +1783,13 @@ fn apply_font(delta: Option<i32>) {
             };
             size = c.font_size;
         });
-        if let Ok(mut l) = FONT_SIZES.lock() {
-            l.clear(); // every terminal follows the common size again
+        for (serial, _) in perwin::all() {
+            if let Ok(mut l) = FONT_SIZES.of(serial).lock() {
+                l.clear(); // every terminal, in every window, follows the common size again
+            }
         }
         log(&format!("font size -> {size} (all terminals)"));
-        wv::post(&serde_json::json!({ "t": "font", "size": size, "all": true }).to_string());
+        post_all(&serde_json::json!({ "t": "font", "size": size, "all": true }).to_string());
     } else {
         let id = shells_lock().active();
         let size = match delta {
@@ -1732,7 +1809,10 @@ fn apply_font(delta: Option<i32>) {
 /// in an L shape the gap is not a screen).
 fn on_screen(g: &config::Geometry) -> bool {
     use windows::Win32::Graphics::Gdi::{GetMonitorInfoW, MonitorFromRect, MONITORINFO, MONITOR_DEFAULTTONULL};
-    let r = RECT { left: g.x, top: g.y, right: g.x + g.w.max(1), bottom: g.y + g.h.max(1) };
+    if g.w <= 0 || g.h <= 0 {
+        return false;
+    }
+    let r = RECT { left: g.x, top: g.y, right: g.x.saturating_add(g.w), bottom: g.y.saturating_add(g.h) };
     let mon = unsafe { MonitorFromRect(&r, MONITOR_DEFAULTTONULL) };
     if mon.0.is_null() {
         return false;
@@ -2438,9 +2518,8 @@ fn remove_shell_from_window(id: u32) {
 
 /// The picker hotkey: take the keyboard (like the settings panel) so a number key can choose a profile.
 unsafe fn open_picker(hwnd: HWND) {
-    if !TERMINAL_FOCUS.load(Ordering::SeqCst) {
-        unsafe { grab_focus(hwnd) };
-        PICKER_GRABBED.store(true, Ordering::SeqCst);
+    if !unsafe { grab_for_panel(hwnd, &PICKER_GRABBED, "profile picker") } {
+        return;
     }
     push_tabs();
     wv::post("{\"t\":\"picker\"}");
@@ -2520,9 +2599,11 @@ unsafe fn tray_notify(hwnd: HWND, title: &str, text: &str) {
 
 unsafe fn tray_notify_icon(hwnd: HWND, title: &str, text: &str, warning: bool) {
     use windows::Win32::UI::Shell::{Shell_NotifyIconW, NIF_INFO, NIIF_INFO, NIIF_WARNING, NIM_MODIFY, NOTIFYICONDATAW};
+    // The tray icon belongs to the first window: a notification from any other window goes through it.
+    let owner = perwin::all().first().map(|(_, h)| HWND(*h as *mut std::ffi::c_void)).unwrap_or(hwnd);
     let mut nid = NOTIFYICONDATAW::default();
     nid.cbSize = std::mem::size_of::<NOTIFYICONDATAW>() as u32;
-    nid.hWnd = hwnd;
+    nid.hWnd = owner;
     nid.uID = 1;
     nid.uFlags = NIF_INFO;
     nid.dwInfoFlags = if warning { NIIF_WARNING } else { NIIF_INFO };
@@ -2618,6 +2699,11 @@ unsafe fn tray_menu(hwnd: HWND) {
         let _ = AppendMenuW(menu, MF_STRING, 13, w!("Reload settings (config.json)"));
         let _ = AppendMenuW(menu, MF_STRING, 6, w!("Settings (opacity, colours)..."));
         let _ = AppendMenuW(menu, MF_STRING | auto_chk, 8, w!("Start with Windows"));
+        let learned = cfg().exclusive_programs.len();
+        if learned > 0 {
+            let label = windows::core::HSTRING::from(format!("Clear the exclusive-fullscreen list ({learned})"));
+            let _ = AppendMenuW(menu, MF_STRING, 18, PCWSTR(label.as_ptr()));
+        }
         let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
         let _ = AppendMenuW(menu, MF_STRING, 5, w!("Quit HUDshell"));
     }
@@ -2661,6 +2747,11 @@ unsafe fn tray_menu(hwnd: HWND) {
             11 => layout_cycle(),
             12 => pane_zoom(),
             13 => reload_now(hwnd),
+            18 => {
+                cfg_update(|c| c.exclusive_programs.clear());
+                log("exclusive-fullscreen list cleared from the tray menu");
+                tray_notify(hwnd, "HUDshell", "The exclusive-fullscreen list is empty: HUDshell takes the keyboard over every program again.");
+            }
             8 => {
                 let on = !autostart_enabled();
                 if !set_autostart(on) {
@@ -2789,6 +2880,9 @@ unsafe fn create_window(id: u32, profile: &str, at: Option<[i32; 4]>) -> Option<
         }
         Err(e) => {
             log(&format!("window {serial}: WebView2 init FAILED: {e}"));
+            // The shell still belongs to the window it was coming from (a detach) or has not started (a restored window): take it off this
+            // window's list first, or destroying the window would close it.
+            shells_lock().remove(id);
             let _ = unsafe { DestroyWindow(hwnd) };
             return None;
         }
@@ -2816,6 +2910,8 @@ fn begin_move(id: u32, kind: MoveKind) {
     if id == 0 || PENDING_MOVES.lock().unwrap_or_else(|p| p.into_inner()).iter().any(|(i, ..)| *i == id) {
         return;
     }
+    // a snapshot left from an earlier move that never finished must not stand in for this one
+    SNAPSHOTS.lock().unwrap_or_else(|p| p.into_inner()).retain(|(i, _)| *i != id);
     PENDING_MOVES.lock().unwrap_or_else(|p| p.into_inner()).push((id, kind, perwin::current(), std::time::Instant::now()));
     wv::post(&serde_json::json!({ "t": "snapshot", "s": id }).to_string());
     let hwnd = perwin::current_hwnd();
@@ -2849,6 +2945,20 @@ fn finish_move(id: u32) {
     match kind {
         MoveKind::Detach => detach_shell_now(id),
         MoveKind::ToNext => move_shell_now(id),
+    }
+    // a refused move (window limit, the shell went) leaves no new page to take the snapshot: drop it (it can be the whole scrollback)
+    if !PENDING_REDRAW.lock().unwrap_or_else(|p| p.into_inner()).contains(&id) {
+        SNAPSHOTS.lock().unwrap_or_else(|p| p.into_inner()).retain(|(i, _)| *i != id);
+    }
+}
+
+/// A shell is gone with its window: forget what was kept for it.
+fn forget_shell_state(id: u32) {
+    SNAPSHOTS.lock().unwrap_or_else(|p| p.into_inner()).retain(|(i, _)| *i != id);
+    PENDING_REDRAW.lock().unwrap_or_else(|p| p.into_inner()).retain(|i| *i != id);
+    PENDING_MOVES.lock().unwrap_or_else(|p| p.into_inner()).retain(|(i, ..)| *i != id);
+    if let Ok(mut l) = SPAWN_PROFILES.lock() {
+        l.retain(|(i, _)| *i != id);
     }
 }
 
@@ -3012,6 +3122,10 @@ static RESCUE_COUNT: AtomicU32 = AtomicU32::new(0);
 /// After a display change (a monitor unplugged, the resolution or arrangement changed): a window that is no longer on any screen goes back
 /// into the work area of the nearest monitor.
 unsafe fn keep_on_screen(hwnd: HWND) {
+    // a minimized window sits at about (-32000, -32000) on purpose; it is put back where it was when restored
+    if unsafe { IsIconic(hwnd) }.as_bool() {
+        return;
+    }
     let mut r = RECT::default();
     if unsafe { GetWindowRect(hwnd, &mut r) }.is_err() {
         return;
@@ -3071,7 +3185,12 @@ unsafe fn window_gone(hwnd: HWND) -> bool {
     let ids = window_shell_ids();
     for id in ids {
         pty::close(id); // a window that goes takes its shells with it (a detached shell that was already moved is in its new window's list)
+        forget_shell_state(id);
     }
+    wv::forget_current();
+    let gone_serial = perwin::current();
+    // moves that were waiting for this window can never finish: drop them so those shells can move again
+    PENDING_MOVES.lock().unwrap_or_else(|p| p.into_inner()).retain(|(_, _, from, _)| *from != gone_serial);
     perwin::unregister(hwnd.0 as isize);
     unsafe { remove_tray(hwnd) };
     unsafe { unregister_hotkeys(hwnd) };
@@ -3089,7 +3208,15 @@ unsafe fn window_gone(hwnd: HWND) -> bool {
             unsafe { add_tray(next_hwnd) };
             let _ = unsafe { SetTimer(Some(next_hwnd), 6, 1500, None) };
         }
+        if c.game_positions {
+            let _ = unsafe { SetTimer(Some(next_hwnd), 7, 1000, None) };
+        }
+        // a hotkey another program took in the meantime is reported, not lost silently
+        unsafe { flush_notices(next_hwnd) };
     }
+    // A wake posted to the window that went was discarded with it: clear the flag and drain what is waiting, or output would stop.
+    pty::clear_wake();
+    pump_all_windows();
     if ACTIVE_WINDOW.load(Ordering::SeqCst) == 0 || perwin::hwnd_of(ACTIVE_WINDOW.load(Ordering::SeqCst)).is_none() {
         ACTIVE_WINDOW.store(rest[0].0, Ordering::SeqCst);
     }
@@ -3177,6 +3304,9 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                     // Focus was taken away by something else (user clicked the game,
                     // or the game re-asserted itself). Never stay activatable.
                     TERMINAL_FOCUS.store(false, Ordering::SeqCst);
+                    // a panel opened by a grab no longer owns the keyboard: closing it later must not hand the keyboard back
+                    SETTINGS_GRABBED.store(false, Ordering::SeqCst);
+                    PICKER_GRABBED.store(false, Ordering::SeqCst);
                     refresh_opacity(hwnd);
                     set_ex_flag(hwnd, WS_EX_NOACTIVATE, true);
                     refresh_pointer_style(hwnd);
@@ -3395,9 +3525,11 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             }
             WM_ERASEBKGND => LRESULT(1),
             m if m != 0 && m == TASKBAR_MSG.load(Ordering::SeqCst) => {
-                // Explorer restarted: its tray is empty, so put our icon back.
-                log("TaskbarCreated received: re-adding the tray icon");
-                if PERSIST.load(Ordering::SeqCst) {
+                // Explorer restarted: its tray is empty, so put our icon back. Every top-level window gets this message; the icon belongs
+                // to the first window only.
+                let is_first = perwin::all().first().map(|(_, h)| *h) == Some(hwnd.0 as isize);
+                if is_first && PERSIST.load(Ordering::SeqCst) {
+                    log("TaskbarCreated received: re-adding the tray icon");
                     add_tray(hwnd);
                 }
                 LRESULT(0)
@@ -3446,12 +3578,26 @@ fn main() -> windows::core::Result<()> {
             true,
             w!("Local\\HUDshell"),
         );
-        if windows::Win32::Foundation::GetLastError()
-            == windows::Win32::Foundation::ERROR_ALREADY_EXISTS
-        {
+        let last = windows::Win32::Foundation::GetLastError();
+        // ALREADY_EXISTS: another copy runs. ACCESS_DENIED: the name exists but belongs to someone else (it cannot be opened), so it is not
+        // safe to run a second copy that would fight over the hotkeys either.
+        let taken = match &_guard {
+            Ok(_) => last == windows::Win32::Foundation::ERROR_ALREADY_EXISTS,
+            Err(e) => e.code() == windows::Win32::Foundation::ERROR_ACCESS_DENIED.to_hresult(),
+        };
+        if taken {
             log("ANOTHER INSTANCE IS ALREADY RUNNING - asking it to show itself, then exiting.");
-            if let Ok(other) = FindWindowW(w!("HUDshell"), PCWSTR::null()) {
-                let _ = PostMessageW(Some(other), ACTIVATE_MSG.load(Ordering::SeqCst), WPARAM(0), LPARAM(0));
+            // the running copy may still be creating its window: look for it for a moment
+            let mut asked = false;
+            for _ in 0..20 {
+                if let Ok(other) = FindWindowW(w!("HUDshell"), PCWSTR::null()) {
+                    asked = PostMessageW(Some(other), ACTIVATE_MSG.load(Ordering::SeqCst), WPARAM(0), LPARAM(0)).is_ok();
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            if !asked {
+                log("the running copy has no window to show (yet); exiting");
             }
             return Ok(());
         }
@@ -3615,7 +3761,14 @@ fn main() -> windows::core::Result<()> {
                     #[cfg(feature = "harness")]
                     harness::arm(hwnd);
                 }
-                Err(e) => log(&format!("WebView2 init FAILED: {e}")),
+                Err(e) => {
+                    log(&format!("WebView2 init FAILED: {e}"));
+                    tray_notify(
+                        hwnd,
+                        "HUDshell",
+                        "The terminal view could not be created, so no shell can run. Install or repair the Microsoft Edge WebView2 Runtime, then start HUDshell again (quit from the tray menu).",
+                    );
+                }
             }
             foreground_note("after WebView2 init");
         }

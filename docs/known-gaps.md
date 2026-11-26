@@ -51,6 +51,44 @@ Everything here is either untested or not implemented. Verified behaviour is in 
 - Installer, code signing, app icon and version resource, AppUserModelID (the notification header reads "hudshell.exe").
 - WebGL renderer (DOM renderer only), ligatures, bundled fonts, bundled ConPTY (`conpty.dll`/OpenConsole).
 
+## Robustness changes of 2026-11-26 that no input suite has exercised yet
+
+A whole-application code review on 2026-11-26 led to the changes below. They compile, clippy is clean (plain and harness), the unit tests
+pass (89), the `static` suite passes (17) and twelve desktop suites passed afterwards (173 checks: config, reload, shells, windows,
+winmove, winrestore, ui, clipboard, policy, attention, exclguard, hideshow; see test-results.md). Those suites do not reach every
+change; what no test has exercised is listed at the end of that run's entry, and the other desktop suites were not re-run:
+
+- Settings file: a wrong-typed value costs only that value; UTF-16 files are read; an unreadable file is never replaced; a file that
+  changed on disk since HUDshell read it (a hand edit not yet reloaded, or a broken file being fixed) is never saved over; saves are
+  flushed before the rename; at most 10 `.bad-N` copies. Covered by unit tests for the pieces (decoding, lenient parsing, the
+  may-replace rule, the durable write), not by a run that edits the file while HUDshell writes it.
+- Shells: the process, input and output handles are closed when a shell ends (they leaked before); a tab closed while its output queue
+  was full no longer leaves its reader thread waiting; resizing runs on a worker thread, never on the UI thread under the session lock
+  (a known ConPTY freeze pattern, never reproduced here); the shell starts suspended and joins its kill-on-close job before it runs; a
+  start that fails half-way closes everything it opened; the shell gets its environment block instead of HUDshell changing its own;
+  an unreachable network start folder is given up after 1.5 s; input to a shell that does not read is capped at 8 MB; a profile's start
+  command is typed once the shell has gone quiet (0.9-6 s) instead of after a fixed 0.9 s.
+- Shell search: Program Files first, then only full-path `PATH` folders; a configured shell must be a full path without quotes.
+- Windows: a closed window closes its WebView2 controller; a wake lost with a closing window no longer stops output in the others; a
+  failed detach no longer kills the moved shell; an Explorer restart adds one tray icon, not one per window; notifications from
+  windows 2-4 go through the first window's icon; config reloads, idle dimming and the "all" text size reach every window; game
+  positions keep working after the first window closes; stale move snapshots and pending moves are dropped.
+- Focus: the settings panel and the picker open only when the keyboard was really taken; losing the keyboard clears their grab.
+- Exclusive guard: learns only while HUDshell still holds the keyboard, never learns hosts of other programs' windows, keeps its state per
+  window, and the tray menu can clear the list.
+- Page: pasted text (Ctrl+V and right-click paste) loses bracketed-paste markers and control characters; tab titles and notifications
+  lose invisible formatting characters; notifications name their tab; OSC 52 only from a shell on screen, once a second, with a note on
+  screen; WebView2 external drops, autofill, password saving, host objects and the built-in error page are off; a request the asset
+  handler cannot read gets an error response; the CSP adds `base-uri` / `form-action` and is also sent as a header.
+- Single instance: a lock that exists but cannot be opened counts as "running"; a second launch waits up to 2 s for the first window.
+- Test runner: a changed display scaling is backed up to a file and put back by the next run; the IME test removes only the language
+  features it installed; PresentMon is copied and hashed again just before its elevated start; temp result files have random names;
+  the final clean-up runs after Ctrl+C. Not run (they change system settings and need the owner present).
+
+Left as they are (judged not worth the change): program labels can be fooled by PID reuse (cosmetic); the window procedure trusts
+messages from same-user processes (such a process could end HUDshell anyway); each window that was ever open keeps a few small
+per-window values until HUDshell quits.
+
 ## Partly verified
 
 - On a monitor shorter than the window (the 1920x480 strip), docking cuts the window to fit (900x464) and, because it then fills the height, the top and bottom corners are the same place: the hotkey alternates left and right instead of visiting four corners. The size hotkey's first press from such a window goes to the nearest preset (clamped to the work area) rather than the next one, by design. Fixed 2026-11-25 (docking used to leave the window hanging 48-96 px past the work area); tested on the strip with `tbmulti`, not with a real game.
@@ -66,6 +104,10 @@ Everything here is either untested or not implemented. Verified behaviour is in 
 - Continuous integration (`.github/workflows/ci.yml`: release build, harness build, `static` suite on `windows-latest`)
   ran green once on GitHub. The desktop suites cannot run in CI (they need an interactive session) and stay manual.
   `cargo clippy -D warnings` (normal and harness builds, tests included) runs in CI since 2026-11-21; there is no `cargo fmt` gate (the code is formatted by hand with long lines).
-- Workflow actions are pinned to major versions (`checkout@v7`, `setup-node@v7`, `rust-cache@v2`), not commit hashes.
+- Workflow actions are pinned to commit hashes (2026-11-26), and CI builds with `npm ci --ignore-scripts` and `cargo --locked`; a weekly
+  advisories job runs `npm audit` and `cargo audit`. None of this has run on GitHub yet (not pushed).
+- `rust-toolchain.toml` follows stable MSVC: rustup refuses an exact version together with the target in the channel name, and an exact
+  version alone picked a GNU toolchain on a machine whose default host is GNU. `rust-version` in Cargo.toml (1.99) says which release
+  builds were made with; the clippy and rustfmt components are listed.
 - GitHub private vulnerability reporting (linked from the issue template and CONTRIBUTING) has been enabled in the
   repository settings by the owner; the report flow itself has not been exercised.

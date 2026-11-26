@@ -251,9 +251,11 @@ impl Layout {
         }
         let (c, r) = p.shape();
         // The smaller share, less one cell for the gap between panes.
-        let w = if c == 2 { ac * self.split.0.min(100 - self.split.0) / 100 - 1 } else { ac };
-        let h = if r == 2 { ar * self.split.1.min(100 - self.split.1) / 100 - 1 } else { ar };
-        w >= self.min.0 && h >= self.min.1
+        // u64 and saturating: a window only a few cells wide must not wrap round to "fits" (or overflow for a huge area)
+        let share = |a: u32, pct: u32| (a as u64 * pct.min(100 - pct) as u64 / 100).saturating_sub(1);
+        let w = if c == 2 { share(ac, self.split.0) } else { ac as u64 };
+        let h = if r == 2 { share(ar, self.split.1) } else { ar as u64 };
+        w >= self.min.0 as u64 && h >= self.min.1 as u64
     }
 
     /// The preset actually drawn: the chosen one, or the largest fallback that fits the window.
@@ -718,5 +720,22 @@ mod tests {
         l.remove(42, &[2], 0);
         assert_eq!(l.slots(), &[0, 2], "unknown ids are ignored");
         assert!(l.is_shown(2) && !l.is_shown(0));
+    }
+
+    #[test]
+    fn a_window_only_a_few_cells_big_falls_back_to_one_pane() {
+        let mut l = Layout::new();
+        l.start(0);
+        l.set_preset(Preset::Grid, &[0, 1, 2, 3], 0);
+        l.set_min(1, 1);
+        l.set_area(1, 1);
+        assert_eq!(l.shown(), Preset::Single, "1 x 1 cell: the share less the gap is 0, not a wrapped huge number");
+        l.set_min(2, 2);
+        for (c, r) in [(2, 2), (4, 4)] {
+            l.set_area(c, r);
+            assert_eq!(l.shown(), Preset::Single, "{c} x {r} cells cannot hold two panes");
+        }
+        l.set_area(u32::MAX, u32::MAX);
+        assert_eq!(l.shown(), Preset::Grid, "a huge area does not overflow");
     }
 }

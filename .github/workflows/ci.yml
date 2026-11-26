@@ -4,6 +4,9 @@ on:
   push:
     branches: [main]
   pull_request:
+  # weekly, so a newly published advisory for a pinned dependency shows up without a code change
+  schedule:
+    - cron: '17 6 * * 1'
 
 permissions:
   contents: read
@@ -17,33 +20,58 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v7
+      # Actions are pinned to full commit hashes (a tag can be moved); the comment names the tag.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
 
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
           node-version: 22
           cache: npm
 
-      # rust-toolchain.toml selects the MSVC stable toolchain; rustup installs it on first use.
-      - uses: Swatinem/rust-cache@v2
+      # rust-toolchain.toml pins the MSVC toolchain and its components; rustup installs it on first use.
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
 
-      # Release exe: installs the pinned web assets, embeds them, strips build-machine paths.
+      # Release exe: installs the web assets exactly as locked, embeds them, strips build-machine paths.
       - name: Build release
         shell: pwsh
         run: scripts/build-release.ps1
 
       # Harness build: test code exists only with this feature.
       - name: Build harness
-        run: cargo build --features harness
+        run: cargo build --locked --features harness
 
       # Lints: every warning is an error, for the normal build and for the harness build (test code included).
       - name: Clippy
         run: |
-          cargo clippy --all-targets -- -D warnings
-          cargo clippy --all-targets --features harness -- -D warnings
+          cargo clippy --locked --all-targets -- -D warnings
+          cargo clippy --locked --all-targets --features harness -- -D warnings
 
       # Unit tests and release-binary checks. The desktop suites need a real interactive
       # session (hotkeys, mouse, clipboard, WebView2 window) and are run locally.
       - name: Static suite
         shell: pwsh
         run: scripts/test-all.ps1 -Suite static
+
+  advisories:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
+        with:
+          node-version: 22
+
+      # Known vulnerabilities in the locked dependencies (web assets and Rust crates).
+      - name: npm audit
+        run: npm audit --omit=dev
+
+      - name: cargo audit
+        shell: pwsh
+        run: |
+          cargo install cargo-audit --locked
+          cargo audit

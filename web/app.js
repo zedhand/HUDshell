@@ -61,6 +61,14 @@
   const shownIds = () => (haveLayout ? L.cells.map((c) => c.id).filter((id) => id) : [activeId]);
   const isShown = (id) => shownIds().includes(id);
 
+  // Invisible formatting characters (bidi overrides and isolates, zero-width characters, tags): text from a program must not use them
+  // to make a tab name or a notification read differently from what it is.
+  const INVISIBLE = /[­؜᠎​-‏‪-‮⁠-⁤⁦-⁯﻿￹-￻]|\udb40[\udc00-\udc7f]/g;
+  const CONTROLS = /[\u0000-\u001f\u007f-\u009f]/g;
+  // Pasted text: the bracketed-paste markers and control characters other than tab and line breaks are removed, so a clipboard
+  // holding ESC[201~ cannot end the paste early and have the rest run as typed input.
+  const cleanPaste = (t) => String(t || '').replace(/\x1b\[20[01]~/g, '').replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/g, '');
+
   // Tell the host something happened, at most once a minute per kind, never with terminal content.
   const noted = {};
   function noteOnce(what) {
@@ -125,7 +133,7 @@
                title: '', prog: '', unread: false, attn: false, profile: '', color: '' };
     // The program's own window title (OSC 0 / 2) names the tab; control characters are never shown.
     term.onTitleChange((t) => {
-      const clean = String(t).replace(/[\u0000-\u001f\u007f-\u009f]/g, '').trim();
+      const clean = String(t).replace(CONTROLS, '').replace(INVISIBLE, '').trim();
       v.title = isExePath(clean) ? '' : clean.slice(0, 60);
       renderTabs();
     });
@@ -226,6 +234,13 @@
     });
 
     term.open(pane);
+    // Ctrl+V and the browser paste go through the same cleaning as the host's paste (captured before xterm's own handler).
+    pane.addEventListener('paste', (e) => {
+      const text = e.clipboardData ? e.clipboardData.getData('text/plain') : '';
+      e.preventDefault();
+      e.stopPropagation();
+      if (text) term.paste(cleanPaste(text));
+    }, true);
 
     // Mouse policies. Copy on select copies when the button is released; right-click (opt-in) copies a
     // selection and clears it, or pastes when nothing is selected (the host reads the clipboard).
@@ -242,7 +257,7 @@
     // The host decides whether to pulse the window or show a tray notification; it never logs the text.
     const attention = (kind, text) => {
       if (!isShown(id) && !v.attn) { v.attn = true; renderTabs(); }
-      sendS(id, { t: 'attention', kind, text: String(text || '').slice(0, 200) });
+      sendS(id, { t: 'attention', kind, text: String(text || '').replace(INVISIBLE, '').slice(0, 200) });
     };
     term.onBell(() => attention('bell', ''));
     term.parser.registerOscHandler(9, (data) => {
@@ -263,9 +278,11 @@
       const payload = i < 0 ? '' : data.slice(i + 1);
       if (osc52Mode !== 'write') { noteOnce('osc52-refused'); return true; }
       if (!payload || payload === '?' || payload.length > 150000) return true;
+      // only a shell on screen may set the clipboard: a background tab doing it would go unnoticed
+      if (!isShown(id)) { noteOnce('osc52-hidden-tab'); return true; }
       // The host sets the clipboard: the page-side Clipboard API needs keyboard focus, which a passive
       // overlay does not have when a program asks.
-      send({ t: 'osc52', b64: payload });
+      sendS(id, { t: 'osc52', b64: payload });
       return true;
     });
 
@@ -695,7 +712,7 @@
         fitShown();
         requestAnimationFrame(reportArea);
         break;
-      case 'paste': { const a = active(); if (a) a.term.paste(m.text); break; }
+      case 'paste': { const a = active(); if (a) a.term.paste(cleanPaste(m.text)); break; }
       case 'selectall': { const a = active(); if (a) a.term.selectAll(); break; }
       case 'theme':
         // Live colour change from the host (hotkey / tray menu / settings).

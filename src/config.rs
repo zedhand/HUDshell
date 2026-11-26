@@ -1,8 +1,10 @@
 //! HUDshell configuration: `%APPDATA%\HUDshell\config.json`.
 //!
-//! * Missing file -> written with defaults. Unreadable/invalid file -> kept as `config.json.bad-<n>`
-//!   and defaults are used, so a typo never loses settings silently or blocks startup.
-//! * Saved atomically (temp file + rename). Unknown keys are ignored; missing keys take defaults.
+//! * Missing file -> written with defaults. A file that is not JSON -> renamed to `config.json.bad-<n>` and defaults are
+//!   used; a value of the wrong type -> only that setting takes its default (the file is copied aside first); a file that
+//!   cannot be read -> left alone and never written that run. A typo never loses settings silently or blocks startup.
+//! * Saved durably (temp file flushed, then renamed), and only over the version HUDshell last read or wrote, so a hand
+//!   edit that was not reloaded yet is never overwritten. Unknown keys are ignored; missing keys take defaults.
 //! * Values are validated/clamped on load. Never stores secrets.
 
 use serde::{Deserialize, Serialize};
@@ -346,9 +348,42 @@ pub fn next_theme(cfg: &Config) -> String {
 }
 
 pub fn path() -> PathBuf {
-    let base = std::env::var("APPDATA").unwrap_or_else(|_| ".".into());
-    PathBuf::from(base).join("HUDshell").join("config.json")
+    roaming_app_data().join("HUDshell").join("config.json")
 }
+
+/// A folder Windows knows (roaming or local app data). `None` only if the shell cannot tell.
+pub fn known_folder(id: &windows::core::GUID) -> Option<PathBuf> {
+    use windows::Win32::System::Com::CoTaskMemFree;
+    use windows::Win32::UI::Shell::{KF_FLAG_DEFAULT, SHGetKnownFolderPath};
+    unsafe {
+        let p = SHGetKnownFolderPath(id, KF_FLAG_DEFAULT, None).ok()?;
+        let s = p.to_string().ok();
+        CoTaskMemFree(Some(p.0 as *const _));
+        s.map(PathBuf::from).filter(|p| p.is_absolute())
+    }
+}
+
+/// `%APPDATA%` when it is an absolute path, else the roaming app-data folder Windows reports, else the temp folder.
+/// Never the current folder: a relative path would let a settings file in whatever folder HUDshell was started from take effect.
+pub fn roaming_app_data() -> PathBuf {
+    env_dir("APPDATA")
+        .or_else(|| known_folder(&windows::Win32::UI::Shell::FOLDERID_RoamingAppData))
+        .unwrap_or_else(std::env::temp_dir)
+}
+
+/// `%LOCALAPPDATA%` when absolute, else the local app-data folder Windows reports, else the temp folder.
+pub fn local_app_data() -> PathBuf {
+    env_dir("LOCALAPPDATA")
+        .or_else(|| known_folder(&windows::Win32::UI::Shell::FOLDERID_LocalAppData))
+        .unwrap_or_else(std::env::temp_dir)
+}
+
+fn env_dir(name: &str) -> Option<PathBuf> {
+    std::env::var_os(name).map(PathBuf::from).filter(|p| p.is_absolute())
+}
+
+/// Saved window coordinates beyond this (physical pixels) cannot be on any screen; clamping keeps the arithmetic far from overflow.
+pub const COORD_LIMIT: i32 = 100_000;
 
 /// Lowest opacity allowed, so the window can never be made invisible by accident.
 pub const MIN_OPACITY: u32 = 20;
@@ -436,6 +471,13 @@ fn validate(cfg: &mut Config) {
     if let Some(g) = &mut cfg.window {
         g.w = g.w.clamp(240, 8000);
         g.h = g.h.clamp(120, 8000);
+        g.x = g.x.clamp(-COORD_LIMIT, COORD_LIMIT);
+        g.y = g.y.clamp(-COORD_LIMIT, COORD_LIMIT);
+    }
+    if parse_hotkey(&format!("{}+1", cfg.hotkeys.shell_jump)).is_none() {
+        let fallback = Hotkeys::default().shell_jump;
+        crate::notice(&format!("shell_jump '{}' is not valid; using {fallback}", cfg.hotkeys.shell_jump));
+        cfg.hotkeys.shell_jump = fallback;
     }
     let def = Hotkeys::default();
     for (name, hk, fallback) in [
@@ -516,53 +558,177 @@ pub fn default_profile(cfg: &Config) -> &Profile {
         .unwrap_or(&cfg.profiles[0])
 }
 
+/// What identifies one version of the file on disk: modified time and length.
+pub type Stamp = (std::time::SystemTime, u64);
+
+/// The version of config.json HUDshell last read successfully or wrote itself. `save` only replaces the file while it is still
+/// that version, so a hand edit that has not been reloaded yet (or a broken file the user is fixing) is never overwritten.
+static KNOWN: std::sync::Mutex<Option<Stamp>> = std::sync::Mutex::new(None);
+/// Set when the file exists but could not be read or kept aside at start: HUDshell then never writes it.
+static SAVE_BLOCKED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// At most this many `config.json.bad-<n>` copies; the last one is reused after that.
+const MAX_BAD_COPIES: u32 = 10;
+
+pub fn stamp_of(p: &std::path::Path) -> Option<Stamp> {
+    let m = std::fs::metadata(p).ok()?;
+    Some((m.modified().ok()?, m.len()))
+}
+
+fn set_known(s: Option<Stamp>) {
+    *KNOWN.lock().unwrap_or_else(|p| p.into_inner()) = s;
+}
+
+/// Settings text from the file's bytes: UTF-8 (with or without a byte-order mark) or UTF-16 with a byte-order mark
+/// (what Windows PowerShell 5.1's `>` and `Out-File` write).
+pub fn decode_text(bytes: &[u8]) -> Result<String, String> {
+    let utf16 = |b: &[u8], le: bool| {
+        let units: Vec<u16> =
+            b.as_chunks::<2>().0.iter().map(|c| if le { u16::from_le_bytes(*c) } else { u16::from_be_bytes(*c) }).collect();
+        String::from_utf16(&units).map_err(|_| "it is not valid UTF-16 text".to_string())
+    };
+    match bytes {
+        [0xFF, 0xFE, rest @ ..] => utf16(rest, true),
+        [0xFE, 0xFF, rest @ ..] => utf16(rest, false),
+        [0xEF, 0xBB, 0xBF, rest @ ..] => String::from_utf8(rest.to_vec()).map_err(|_| "it is not valid UTF-8 text".to_string()),
+        _ => String::from_utf8(bytes.to_vec()).map_err(|_| "it is not valid UTF-8 text".to_string()),
+    }
+}
+
+/// Parse settings, keeping every top-level value that is valid on its own: one wrong value (say `"opacity": 85.5`)
+/// costs that one setting, not all of them. Returns the settings and the names of the values that were dropped.
+/// A file that is not a JSON object at all is an error.
+pub fn parse_lenient(text: &str) -> Result<(Config, Vec<String>), String> {
+    let text = text.trim_start_matches('\u{feff}');
+    if let Ok(cfg) = serde_json::from_str::<Config>(text) {
+        return Ok((cfg, Vec::new()));
+    }
+    let value: serde_json::Value = serde_json::from_str(text).map_err(|e| e.to_string())?;
+    let serde_json::Value::Object(given) = value else {
+        return Err("it is not a JSON object".into());
+    };
+    let Ok(serde_json::Value::Object(mut merged)) = serde_json::to_value(Config::default()) else {
+        return Err("internal: defaults could not be serialised".into());
+    };
+    let mut dropped = Vec::new();
+    for (k, v) in given {
+        let mut trial = merged.clone();
+        trial.insert(k.clone(), v.clone());
+        if serde_json::from_value::<Config>(serde_json::Value::Object(trial)).is_ok() {
+            merged.insert(k, v);
+        } else {
+            dropped.push(k);
+        }
+    }
+    let cfg = serde_json::from_value::<Config>(serde_json::Value::Object(merged)).map_err(|e| e.to_string())?;
+    dropped.sort();
+    Ok((cfg, dropped))
+}
+
+/// A free `config.json.bad-<n>` name (the last one is reused once there are `MAX_BAD_COPIES`).
+fn bad_copy_path(p: &std::path::Path) -> PathBuf {
+    let mut n = 1;
+    let mut bad = p.with_extension(format!("json.bad-{n}"));
+    while bad.exists() && n < MAX_BAD_COPIES {
+        n += 1;
+        bad = p.with_extension(format!("json.bad-{n}"));
+    }
+    bad
+}
+
 pub fn load() -> Config {
     let p = path();
-    match std::fs::read_to_string(&p) {
-        // Editors and PowerShell 5.1 can save UTF-8 with a byte-order mark; JSON parsing must not choke on it.
-        Ok(text) => match serde_json::from_str::<Config>(text.trim_start_matches('\u{feff}')) {
-            Ok(mut cfg) => {
-                validate(&mut cfg);
-                log(&format!("config: loaded {}", p.display()));
-                cfg
-            }
-            Err(e) => {
-                let mut n = 1;
-                let mut bad = p.with_extension(format!("json.bad-{n}"));
-                while bad.exists() {
-                    n += 1;
-                    bad = p.with_extension(format!("json.bad-{n}"));
-                }
-                let _ = std::fs::rename(&p, &bad);
-                crate::notice(&format!(
-                    "Your settings file was invalid ({e}); it was kept as {} and defaults are in use",
-                    bad.display()
-                ));
-                let cfg = Config::default();
-                save(&cfg);
-                cfg
-            }
-        },
-        Err(_) => {
+    let stamp = stamp_of(&p);
+    let bytes = match std::fs::read(&p) {
+        Ok(b) => b,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             log(&format!("config: no file yet, writing defaults to {}", p.display()));
             let cfg = Config::default();
             save(&cfg);
+            return cfg;
+        }
+        Err(e) => {
+            // Locked by an editor or a scanner, or no access: never replace a file HUDshell could not read.
+            SAVE_BLOCKED.store(true, std::sync::atomic::Ordering::SeqCst);
+            crate::notice(&format!(
+                "Your settings file could not be read ({e}); defaults are in use for this run and the file was left as it is. Restart HUDshell once it can be read."
+            ));
+            return Config::default();
+        }
+    };
+    let parsed = decode_text(&bytes).and_then(|t| parse_lenient(&t));
+    match parsed {
+        Ok((mut cfg, dropped)) => {
+            validate(&mut cfg);
+            if dropped.is_empty() {
+                set_known(stamp);
+                log(&format!("config: loaded {}", p.display()));
+            } else {
+                // Keep a copy of the file as written before HUDshell ever saves over the dropped values.
+                let bad = bad_copy_path(&p);
+                if std::fs::copy(&p, &bad).is_ok() {
+                    set_known(stamp);
+                    crate::notice(&format!(
+                        "These settings were not valid and their defaults are in use: {}. Your file was copied to {}",
+                        dropped.join(", "),
+                        bad.display()
+                    ));
+                } else {
+                    SAVE_BLOCKED.store(true, std::sync::atomic::Ordering::SeqCst);
+                    crate::notice(&format!(
+                        "These settings were not valid and their defaults are in use: {}. The file could not be copied, so HUDshell will not save settings this run.",
+                        dropped.join(", ")
+                    ));
+                }
+            }
             cfg
+        }
+        Err(e) => {
+            let bad = bad_copy_path(&p);
+            match std::fs::rename(&p, &bad) {
+                Ok(()) => {
+                    crate::notice(&format!(
+                        "Your settings file was invalid ({e}); it was kept as {} and defaults are in use",
+                        bad.display()
+                    ));
+                    let cfg = Config::default();
+                    save(&cfg);
+                    cfg
+                }
+                Err(re) => {
+                    SAVE_BLOCKED.store(true, std::sync::atomic::Ordering::SeqCst);
+                    crate::notice(&format!(
+                        "Your settings file is invalid ({e}) and could not be set aside ({re}); defaults are in use for this run and the file was left as it is."
+                    ));
+                    Config::default()
+                }
+            }
         }
     }
 }
 
 /// Parse and validate settings text without touching any file (a reload while HUDshell runs).
+/// Strict about values: a reload that would silently drop one of them is refused, so the settings in use stay.
 pub fn try_parse(text: &str) -> Result<Config, String> {
-    let mut cfg: Config = serde_json::from_str(text.trim_start_matches('\u{feff}')).map_err(|e| e.to_string())?;
+    let (mut cfg, dropped) = parse_lenient(text)?;
+    if !dropped.is_empty() {
+        return Err(format!("these values are not valid: {}", dropped.join(", ")));
+    }
     validate(&mut cfg);
     Ok(cfg)
 }
 
-/// Read the settings file for a reload: unlike `load`, a bad file is left alone (the settings in use stay in use).
+/// Read the settings file for a reload: unlike `load`, a bad file is left alone (the settings in use stay in use, and
+/// HUDshell does not write the file until it is valid again).
 pub fn try_load() -> Result<Config, String> {
-    let text = std::fs::read_to_string(path()).map_err(|e| format!("cannot read it: {e}"))?;
-    try_parse(&text)
+    let p = path();
+    let stamp = stamp_of(&p);
+    let bytes = std::fs::read(&p).map_err(|e| format!("cannot read it: {e}"))?;
+    let cfg = try_parse(&decode_text(&bytes)?)?;
+    // only a file that was read in full and is valid becomes the version `save` may replace
+    if stamp == stamp_of(&p) {
+        set_known(stamp);
+    }
+    Ok(cfg)
 }
 
 /// Top-level settings whose values differ between `a` and `b`, sorted. The window position is ignored: HUDshell writes it itself.
@@ -585,19 +751,59 @@ pub fn changed_keys(a: &Config, b: &Config) -> Vec<String> {
     keys
 }
 
-pub fn save(cfg: &Config) {
-    let p = path();
+/// Write `text` to `p` so that a crash or power loss leaves either the old file or the new one, never an empty or half
+/// one: a temp file is written and flushed to the disk, then renamed over `p`. The temp file is removed on failure.
+pub fn write_durable(p: &std::path::Path, text: &str) -> std::io::Result<()> {
+    use std::io::Write;
     if let Some(dir) = p.parent() {
-        let _ = std::fs::create_dir_all(dir);
+        std::fs::create_dir_all(dir)?;
     }
-    let tmp = p.with_extension("json.tmp");
-    match serde_json::to_string_pretty(cfg) {
-        Ok(text) => {
-            if std::fs::write(&tmp, text).and_then(|_| std::fs::rename(&tmp, &p)).is_err() {
-                log("config: could not save (continuing with in-memory settings)");
-            }
+    let mut name = p.file_name().map(|n| n.to_os_string()).unwrap_or_default();
+    name.push(format!(".{}.tmp", std::process::id()));
+    let tmp = p.with_file_name(name);
+    let res = (|| {
+        let mut f = std::fs::File::create(&tmp)?;
+        f.write_all(text.as_bytes())?;
+        f.sync_all()?;
+        drop(f);
+        std::fs::rename(&tmp, p)
+    })();
+    if res.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    res
+}
+
+/// Whether `save` may replace the file now: it is missing, or it is still the version HUDshell last read or wrote.
+fn may_replace(known: Option<Stamp>, on_disk: Option<Stamp>) -> bool {
+    match on_disk {
+        None => true,
+        Some(d) => known == Some(d),
+    }
+}
+
+pub fn save(cfg: &Config) {
+    if SAVE_BLOCKED.load(std::sync::atomic::Ordering::SeqCst) {
+        log("config: not saved (the file could not be read or set aside at start)");
+        return;
+    }
+    let p = path();
+    let text = match serde_json::to_string_pretty(cfg) {
+        Ok(t) => t,
+        Err(e) => {
+            log(&format!("config: could not serialise settings: {e}"));
+            return;
         }
-        Err(e) => log(&format!("config: could not serialise settings: {e}")),
+    };
+    let mut known = KNOWN.lock().unwrap_or_else(|p| p.into_inner());
+    if !may_replace(*known, stamp_of(&p)) {
+        // Changed by hand since HUDshell read it (the reload picks it up), or invalid and being fixed: leave it alone.
+        log("config: not saved (the file changed on disk and has not been reloaded yet)");
+        return;
+    }
+    match write_durable(&p, &text) {
+        Ok(()) => *known = stamp_of(&p),
+        Err(e) => log(&format!("config: could not save ({e}); continuing with in-memory settings")),
     }
 }
 
@@ -652,8 +858,9 @@ pub fn parse_hotkey(s: &str) -> Option<(u32, u32)> {
             }
         }
     }
-    if mods & 0xF == 0 {
-        return None; // require at least one modifier so a bare key is never swallowed globally
+    if mods & 0xB == 0 {
+        // require Ctrl, Alt or Win: a bare key, or Shift+key (every capital letter), would be swallowed system-wide
+        return None;
     }
     key.map(|k| (mods, k))
 }
@@ -940,5 +1147,75 @@ mod tests {
         }
         assert!(crate::assets::find("/../secret").is_none());
         assert!(crate::assets::find("/index.html?x=1").is_none(), "the query string is stripped by the caller");
+    }
+
+    #[test]
+    fn shift_alone_is_not_enough_for_a_global_hotkey() {
+        assert_eq!(parse_hotkey("Shift+A"), None);
+        assert_eq!(parse_hotkey("Shift+Space"), None);
+        assert!(parse_hotkey("Win+A").is_some());
+        assert!(parse_hotkey("Alt+Shift+A").is_some());
+    }
+
+    #[test]
+    fn utf16_and_bom_files_are_read() {
+        let json = r#"{"opacity": 70}"#;
+        let mut le = vec![0xFF, 0xFE];
+        le.extend(json.encode_utf16().flat_map(|u| u.to_le_bytes()));
+        let mut be = vec![0xFE, 0xFF];
+        be.extend(json.encode_utf16().flat_map(|u| u.to_be_bytes()));
+        let mut u8bom = vec![0xEF, 0xBB, 0xBF];
+        u8bom.extend(json.as_bytes());
+        for b in [le, be, u8bom, json.as_bytes().to_vec()] {
+            assert_eq!(decode_text(&b).unwrap(), json);
+        }
+        assert!(decode_text(&[0xC3, 0x28]).is_err(), "invalid UTF-8 is an error, not an empty file");
+    }
+
+    #[test]
+    fn one_wrong_value_costs_only_that_value() {
+        let (cfg, dropped) = parse_lenient(r#"{"opacity": 85.5, "font_size": 18, "window": {"x": 1}, "theme": "amber"}"#).unwrap();
+        assert_eq!(dropped, vec!["opacity".to_string(), "window".to_string()]);
+        assert_eq!(cfg.font_size, 18);
+        assert_eq!(cfg.theme, "amber");
+        assert_eq!(cfg.opacity, Config::default().opacity);
+        assert!(cfg.window.is_none());
+        assert!(parse_lenient("{not json").is_err());
+        assert!(parse_lenient("[1, 2]").is_err());
+        assert!(try_parse(r#"{"opacity": 85.5}"#).is_err(), "a reload refuses a file with a wrong value");
+        assert!(try_parse(r#"{"opacity": 85}"#).is_ok());
+    }
+
+    #[test]
+    fn save_replaces_only_the_version_it_knows() {
+        let t0 = std::time::SystemTime::UNIX_EPOCH;
+        let t1 = t0 + std::time::Duration::from_secs(1);
+        assert!(may_replace(None, None), "no file yet");
+        assert!(may_replace(Some((t0, 10)), Some((t0, 10))), "unchanged since read");
+        assert!(!may_replace(Some((t0, 10)), Some((t1, 10))), "edited by hand since");
+        assert!(!may_replace(Some((t0, 10)), Some((t0, 11))), "same time, other length");
+        assert!(!may_replace(None, Some((t0, 10))), "never read successfully (invalid or unreadable)");
+    }
+
+    #[test]
+    fn durable_write_replaces_and_leaves_no_temp_file() {
+        let dir = std::env::temp_dir().join(format!("hudshell-cfgtest-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let p = dir.join("config.json");
+        write_durable(&p, "one").unwrap();
+        write_durable(&p, "two").unwrap();
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), "two");
+        let names: Vec<_> = std::fs::read_dir(&dir).unwrap().map(|e| e.unwrap().file_name()).collect();
+        assert_eq!(names.len(), 1, "no temp file left: {names:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn saved_coordinates_and_shell_jump_are_validated() {
+        let mut cfg: Config = serde_json::from_str(r#"{"window": {"x": 2000000000, "y": -2000000000, "w": 0, "h": 99999}, "hotkeys": {"shell_jump": "Shift"}}"#).unwrap();
+        validate(&mut cfg);
+        let g = cfg.window.unwrap();
+        assert_eq!((g.x, g.y, g.w, g.h), (COORD_LIMIT, -COORD_LIMIT, 240, 8000));
+        assert_eq!(cfg.hotkeys.shell_jump, Hotkeys::default().shell_jump);
     }
 }

@@ -28,3 +28,6 @@ graphify-out/
 .idea/
 *.swp
 Thumbs.db
+
+# Local audit reports (kept out of the public repo)
+Audit Reports/

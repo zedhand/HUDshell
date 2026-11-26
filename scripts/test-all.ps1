@@ -315,6 +315,8 @@ function Suite-Static {
   foreach ($s in @($env:USERNAME, $env:USERPROFILE, $root)) {
     if ($s) { Check 'static' "release exe has no build-machine string '$s'" (-not (InExe $s)) }
   }
+  # any user folder at all (not only this machine's), in either spelling of the separator
+  Check 'static' 'release exe has no user-folder path (Users\ or Users/)' (-not ((InExe 'Users\') -or (InExe 'Users/') -or (InExe 'users\')))
   # Debug (harness) binary must have the harness; sanity check the feature split really differs.
   try { $db = [IO.File]::ReadAllBytes($dbg); Check 'static' 'harness build does contain the harness' ([Text.Encoding]::ASCII.GetString($db).Contains('AUTOTEST')) }
   catch { Check 'static' 'harness exe can be read' $false "$_" }
@@ -2141,6 +2143,15 @@ function Set-DisplayScale([int]$x, [int]$y, [int]$percent) {
   return (Wait-Until { $m = @(Get-Monitors) | Where-Object { $_.L -eq $x -and $_.T -eq $y } | Select-Object -First 1; $m -and $m.Dpi -eq $want } 25)
 }
 
+# The scaling a test changed is written to a backup file first (screen position and its percent before the test) and the file is deleted once the
+# scaling is back: one that is still there means a run was stopped (window closed, power loss) before it could put the scaling back.
+$script:ScaleBackup = Join-Path $root '.claude\scratch-archive\display-scale-backup.txt'
+function Save-ScaleBackup([int]$x, [int]$y, [int]$percent) {
+  New-Item -ItemType Directory -Force (Split-Path $script:ScaleBackup) | Out-Null
+  [IO.File]::WriteAllText($script:ScaleBackup, "$x,$y,$percent")
+}
+function Clear-ScaleBackup([bool]$restored) { if ($restored) { Remove-Item -LiteralPath $script:ScaleBackup -Force -ErrorAction SilentlyContinue } }
+
 # The same for any screen (by the top-left of its physical rectangle).
 function Auto-ScaleAt([int]$x, [int]$y, [int]$percent, [string]$what, [scriptblock]$tests) {
   $orig = Get-DisplayScales | Where-Object { $_.X -eq $x -and $_.Y -eq $y } | Select-Object -First 1
@@ -2149,6 +2160,7 @@ function Auto-ScaleAt([int]$x, [int]$y, [int]$percent, [string]$what, [scriptblo
   if ($orig.Max -lt $percent) { Warn 'scaling' "$percent% is not offered for $what (up to $($orig.Max)%): skipped"; return }
   Write-Host ""
   Write-Host "----- $what at $percent% (set by the script; it is $($orig.Percent)% now and will be put back) -----"
+  Save-ScaleBackup $x $y $orig.Percent
   try {
     if (-not (Set-DisplayScale $x $y $percent)) { Warn 'scaling' "$what did not switch to $percent%: its tests were skipped"; return }
     Write-Host "reached: $percent% (letting Windows settle for 8 s)"
@@ -2160,6 +2172,7 @@ function Auto-ScaleAt([int]$x, [int]$y, [int]$percent, [string]$what, [scriptblo
     Start-Sleep 5
     $now = Get-DisplayScales | Where-Object { $_.X -eq $x -and $_.Y -eq $y } | Select-Object -First 1
     Check 'scaling' "$what is back at $($orig.Percent)% after the $percent% tests" ($now -and $now.Percent -eq $orig.Percent) $(if ($now) { "now $($now.Percent)%" } else { 'unknown' })
+    Clear-ScaleBackup ([bool]($now -and $now.Percent -eq $orig.Percent))
   }
 }
 
@@ -2171,6 +2184,7 @@ function Auto-Scale([int]$percent, [scriptblock]$tests) {
   if ($orig.Max -lt $percent) { Warn 'scaling' "$percent% is not offered for the main screen (up to $($orig.Max)%): skipped"; return }
   Write-Host ""
   Write-Host "----- main screen scaling $percent% (set by the script; it is $($orig.Percent)% now and will be put back) -----"
+  Save-ScaleBackup $primary.L $primary.T $orig.Percent
   try {
     if (-not (Set-DisplayScale $primary.L $primary.T $percent)) { Warn 'scaling' "the main screen did not switch to $percent%: its tests were skipped"; return }
     Write-Host "reached: $percent% (letting Windows settle for 8 s)"
@@ -2182,6 +2196,7 @@ function Auto-Scale([int]$percent, [scriptblock]$tests) {
     Start-Sleep 5
     $now = Get-DisplayScales | Where-Object { $_.X -eq $primary.L -and $_.Y -eq $primary.T } | Select-Object -First 1
     Check 'scaling' "the main screen's scaling is back at $($orig.Percent)% after the $percent% tests" ($now -and $now.Percent -eq $orig.Percent) $(if ($now) { "now $($now.Percent)%" } else { 'unknown' })
+    Clear-ScaleBackup ([bool]($now -and $now.Percent -eq $orig.Percent))
   }
 }
 
@@ -2203,6 +2218,15 @@ $script:MmTaskbarBackup = Join-Path $root '.claude\scratch-archive\mmtaskbar-bac
 # The backup files are deleted once the setting is back. One that is still there means an earlier run was stopped before it could put the setting back:
 # do it now, and say so.
 function Restore-LeftoverSettings {
+  if ($script:ScaleBackup -and (Test-Path -LiteralPath $script:ScaleBackup)) {
+    try {
+      $v = ((Get-Content -LiteralPath $script:ScaleBackup -Raw).Trim() -split ',') | ForEach-Object { [int]$_ }
+      if (Set-DisplayScale $v[0] $v[1] $v[2]) {
+        Remove-Item -LiteralPath $script:ScaleBackup -Force
+        Warn 'runner' "an earlier run was stopped before it put a screen's scaling back: it is back at $($v[2])% now"
+      } else { Warn 'runner' "an earlier run left a screen's scaling changed and it could not be put back to $($v[2])% (backup kept: $($script:ScaleBackup))" }
+    } catch { Warn 'runner' "the scaling backup of an earlier run could not be applied: $_ ($($script:ScaleBackup))" }
+  }
   if (Test-Path -LiteralPath $script:TaskbarBackup) {
     try {
       $bytes = [byte[]]((Get-Content -LiteralPath $script:TaskbarBackup -Raw).Trim() -split '-' | ForEach-Object { [Convert]::ToByte($_, 16) })
@@ -2268,36 +2292,54 @@ function Invoke-Elevated([string]$command) {
   $enc = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($command))
   Start-Process powershell -Verb RunAs -WindowStyle Hidden -Wait -ArgumentList @('-NoProfile', '-EncodedCommand', $enc)
 }
+# A file name nobody can guess or prepare in advance (the elevated helper writes its result there).
+function New-TempResultPath([string]$what) { Join-Path $env:TEMP ("hudshell-$what-" + [guid]::NewGuid().ToString('N') + '.txt') }
 function Install-ImeForTest([string[]]$langs = @('ja-JP')) {
-  $script:ImeLangs = $langs
   $script:ImeOrigObj = Get-WinUserLanguageList
   $script:ImeOrigList = @($script:ImeOrigObj | ForEach-Object { $_.LanguageTag })
-  Write-Host "language list now: $($script:ImeOrigList -join ', '); installing: $($langs -join ', ')"
-  $txt = Join-Path $env:TEMP 'hudshell-ime-install.txt'
+  # Only the language features that are not installed yet are installed, and only those are removed afterwards: one the person already had stays.
+  $script:ImeLangs = @()
+  try { $had = @(Get-InstalledLanguage -ErrorAction Stop | ForEach-Object { $_.LanguageId }) }
+  catch { Warn 'ime' "the installed languages could not be read ($_): no IME test, so nothing is installed or removed"; return $false }
+  $missing = @($langs | Where-Object { $had -notcontains $_ })
+  Write-Host "language list now: $($script:ImeOrigList -join ', '); installed already: $(@($langs | Where-Object { $had -contains $_ }) -join ', '); installing: $($missing -join ', ')"
+  if ($missing.Count -eq 0) {
+    $l = Get-WinUserLanguageList; foreach ($t in $langs) { if (@($l | ForEach-Object { $_.LanguageTag }) -notcontains $t) { $l.Add($t) } }; Set-WinUserLanguageList $l -Force
+    Start-Sleep 5
+    return $true
+  }
+  $langs = $missing
+  $txt = New-TempResultPath 'ime-install'
   $cmd = 'try { foreach ($l in @(' + (($langs | ForEach-Object { ConvertTo-PsLiteral $_ }) -join ',') + ')) { Install-Language -Language $l -ErrorAction Stop | Out-Null }; ''done'' | Set-Content -LiteralPath ' + (ConvertTo-PsLiteral $txt) + ' } catch { "error: $_" | Set-Content -LiteralPath ' + (ConvertTo-PsLiteral $txt) + ' }'
   Remove-Item $txt -ErrorAction SilentlyContinue
   Say ('A Windows prompt will ask to allow a PowerShell window (it installs the language feature(s) for the IME test: ' + ($langs -join ', ') + '). Accept it (Yes).')
   try { Invoke-Elevated $cmd } catch { Warn 'ime' 'the install prompt was declined: no IME test'; return $false }
   $res = if (Test-Path $txt) { Get-Content $txt -Raw } else { '' }
+  Remove-Item -LiteralPath $txt -ErrorAction SilentlyContinue
   if ($res -notmatch 'done') { Warn 'ime' ("installing the language feature did not work: " + ($res -replace '\s+', ' ')); return $false }
+  $script:ImeLangs = $langs
   # add the languages to the language list (it is put back exactly afterwards)
-  $l = Get-WinUserLanguageList; foreach ($t in $langs) { $l.Add($t) }; Set-WinUserLanguageList $l -Force
+  $l = Get-WinUserLanguageList; foreach ($t in $langs) { if (@($l | ForEach-Object { $_.LanguageTag }) -notcontains $t) { $l.Add($t) } }; Set-WinUserLanguageList $l -Force
   Start-Sleep 5
   return $true
 }
 
 function Remove-ImeAfterTest {
   if ($script:ImeOrigObj) { Set-WinUserLanguageList $script:ImeOrigObj -Force }
-  $langs = if ($script:ImeLangs) { $script:ImeLangs } else { @('ja-JP') }
-  $txt = Join-Path $env:TEMP 'hudshell-ime-uninstall.txt'
+  $langs = @($script:ImeLangs)
+  $now = @((Get-WinUserLanguageList) | ForEach-Object { $_.LanguageTag })
+  Check 'ime' 'your language list is back to what it was before the test' (($now -join ',') -eq ($script:ImeOrigList -join ',')) ("was " + ($script:ImeOrigList -join ',') + ", now " + ($now -join ','))
+  if ($langs.Count -eq 0) { Write-Host 'the language feature(s) were installed before the test: nothing to remove'; return }
+  $txt = New-TempResultPath 'ime-uninstall'
   $cmd = 'try { foreach ($l in @(' + (($langs | ForEach-Object { ConvertTo-PsLiteral $_ }) -join ',') + ')) { Uninstall-Language -Language $l -ErrorAction Stop | Out-Null }; ''done'' | Set-Content -LiteralPath ' + (ConvertTo-PsLiteral $txt) + ' } catch { "error: $_" | Set-Content -LiteralPath ' + (ConvertTo-PsLiteral $txt) + ' }'
   Remove-Item $txt -ErrorAction SilentlyContinue
   Say 'A Windows prompt will ask once more to remove the language feature(s) again. Accept it (Yes).'
   try { Invoke-Elevated $cmd } catch { Warn 'ime' 'the removal prompt was declined: the language feature(s) are still installed (remove them in Settings > Time & language)' }
   $removed = (Test-Path $txt) -and ((Get-Content $txt -Raw) -match 'done')
-  $now = @((Get-WinUserLanguageList) | ForEach-Object { $_.LanguageTag })
-  Check 'ime' 'your language list is back to what it was before the test' (($now -join ',') -eq ($script:ImeOrigList -join ',')) ("was " + ($script:ImeOrigList -join ',') + ", now " + ($now -join ','))
-  Check 'ime' 'the language feature(s) added for the test were removed again' $removed $(if ($removed) { '' } else { ((Get-Content $txt -ErrorAction SilentlyContinue) -join ' ') })
+  $detail = if ($removed) { '' } else { ((Get-Content $txt -ErrorAction SilentlyContinue) -join ' ') }
+  Remove-Item -LiteralPath $txt -ErrorAction SilentlyContinue
+  $script:ImeLangs = @()
+  Check 'ime' 'the language feature(s) added for the test were removed again' $removed $detail
 }
 
 # ---- a real game (MANUAL) -----------------------------------------------------------------------------------------------------------------------
@@ -2489,7 +2531,13 @@ function Suite-GameSession {
       $csv = Join-Path $scratch 'presentmon.csv'
       Remove-Item -LiteralPath $csv -ErrorAction SilentlyContinue
       Stop-HUDshell
-      try { Start-Process -FilePath $pm.FullName -ArgumentList @('--process_id', "$gamePid", '--output_file', "`"$csv`"", '--timed', '230', '--terminate_after_timed', '--no_console_stats') -Verb RunAs -WindowStyle Hidden } catch { Warn 'gamesession' "PresentMon could not be started (the prompt was declined?): frame times not measured" }
+      # the elevated copy is made in a new folder and hashed again just before the prompt: the checked file cannot be swapped in between
+      $pmRun = Join-Path $env:TEMP ('hudshell-pm-' + [guid]::NewGuid().ToString('N'))
+      New-Item -ItemType Directory -Force $pmRun | Out-Null
+      $pmExe = Join-Path $pmRun $script:PresentMonName
+      Copy-Item -LiteralPath $pm.FullName -Destination $pmExe
+      if ((Get-FileHash -LiteralPath $pmExe -Algorithm SHA256).Hash -ne $script:PresentMonSha256) { Warn 'gamesession' 'PresentMon copy did not match the pinned SHA256: not run'; $pmExe = $null }
+      if ($pmExe) { try { Start-Process -FilePath $pmExe -ArgumentList @('--process_id', "$gamePid", '--output_file', "`"$csv`"", '--timed', '230', '--terminate_after_timed', '--no_console_stats') -Verb RunAs -WindowStyle Hidden } catch { Warn 'gamesession' "PresentMon could not be started (the prompt was declined?): frame times not measured" } }
       $started = Wait-Until { Test-Path -LiteralPath $csv } 90
       if ($started) {
         $capT0 = Get-Date
@@ -3277,6 +3325,7 @@ function Preflight {
 if (@($want | Where-Object { $manualSuites -notcontains $_ -and $_ -ne 'static' }).Count -gt 0) { if (-not (Preflight)) { Write-Host 'The run did not start (preflight).'; exit 3 } }
 if (@($want | Where-Object { $_ -ne 'static' }).Count -gt 0) { Restore-LeftoverSettings }
 
+try {
 foreach ($s in $want) {
   # The static suite only reads files and runs cargo: it never sends keys or clicks, so it needs no neutral window.
   $script:NeutralOn = ($manualSuites -notcontains $s -and $s -ne 'static')
@@ -3350,8 +3399,11 @@ foreach ($s in $want) {
   }
   }
 }
-Stop-HUDshell
-Stop-Neutral
+} finally {
+  # also after Ctrl+C: no test HUDshell or neutral window is left running
+  Stop-HUDshell
+  Stop-Neutral
+}
 Write-Host ''
 Write-Host '================ RESULTS ================'
 $script:R | Format-Table Suite, Status, Check, Detail -AutoSize -Wrap | Out-String -Width 220 | Write-Host

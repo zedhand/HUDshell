@@ -34,3 +34,19 @@ Source: an audit of `scripts/build-release.ps1` and `scripts/test-all.ps1`. Numb
 | (check) | Full run after the audit fixes (2026-11-26) | done: 506 pass, 3 fail, 6 warn; the 3 fails were a drag-restore bug in the product, fixed and re-tested (see test-results) |
 | (check) | Mixed scaling re-run (2026-11-26) | done: `mixscale` suite (left monitor at 150%, put back); place, dpi, input and snap pass; one test drop point fixed |
 | L9 | `Stop-Process -Name explorer` kills File Explorer windows; taskbar backups never read back | done: open File Explorer folders are reopened; a backup left by an interrupted run is applied at the next start |
+
+## Whole-application review (2026-11-26)
+
+A code review of the application, the build and the test runner. The changes are listed in [known-gaps.md](known-gaps.md)
+("Robustness changes of 2026-11-26"). Status: code changed, unit tests (89), clippy and the `static` suite pass.
+
+| Area | Status (2026-11-26) |
+|---|---|
+| Settings file safety (lost settings on an unreadable or UTF-16 file, a hand edit overwritten, no flush before rename) | done, unit-tested |
+| Shell handles, reader thread, resize off the UI thread, job before the shell runs, failed-start clean-up | done, not run with input suites |
+| Multi-window clean-up (web view, wake, failed detach, tray icon and notifications, reload to every window) | done, not run with input suites |
+| Exclusive-fullscreen guard (wrong program learned, no way to undo) | done, not run with input suites |
+| Page hardening (paste markers, invisible characters, OSC 52, WebView2 settings, CSP) | done, not run with input suites |
+| Build and CI (locked installs, pinned actions, advisories job, `build.rs` checks `web/dist`) | done locally; CI not yet run |
+| Test runner (scaling backup, IME languages, PresentMon, clean-up after Ctrl+C) | done, not run |
+| (check) Targeted input suites for the above: `config`, `reload`, `shells`, `windows`, `winmove`, `winrestore`, `ui`, `clipboard`, `policy`, `attention`, `exclguard`, `hideshow` | done: 173 pass, 0 fail, 0 warn; the other suites were not re-run |

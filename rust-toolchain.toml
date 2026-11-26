@@ -1,2 +1,5 @@
 [toolchain]
+# The MSVC toolchain. rustup does not accept an exact version together with the target in the channel name, so the
+# version follows stable; Cargo.toml's rust-version says which release builds are made and tested with.
 channel = "stable-x86_64-pc-windows-msvc"
+components = ["clippy", "rustfmt"]

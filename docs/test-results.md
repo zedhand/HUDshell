@@ -4,6 +4,18 @@ Machine: Windows 11 build 26300, WebView2 Runtime 157.x, Rust 1.99 (MSVC), Power
 Codex CLI 0.170.0, three displays (all at 100% scaling on 2026-11-26). Latest full regression: 2026-11-26 with `scripts/test-all.ps1` (506 pass, 3 fail, 6 warnings; the three fails are fixed, see the next section).
 "Tested" means observed in a log, a cell-text dump or a screenshot; anything not listed is in [known-gaps.md](known-gaps.md).
 
+## Whole-application review fixes (2026-11-26, not yet run with the desktop suites)
+
+After the review changes (see known-gaps.md, "Robustness changes of 2026-11-26"): `scripts/build-release.ps1` (now `npm ci
+--ignore-scripts` and `cargo build --release --locked`) built the release exe; `cargo build --locked --features harness` built the harness;
+`cargo clippy --locked --all-targets -D warnings` is clean for both; `cargo test`: **89 pass, 0 fail** (new: Shift-only hotkeys refused,
+UTF-16 and BOM files read, one wrong value costs only that value, the may-replace rule, the durable write leaves no temp file, saved
+coordinates and `shell_jump` validated, a 1x1-cell window falls back to one pane); `-Suite static`: **17 pass, 0 fail** (new check: no
+user-folder path in the release exe). The compiler was 1.100.0 (rustup updated the stable MSVC toolchain when the components were
+listed.
+
+**Targeted input suites after these changes (same day, release and harness rebuilt first): 173 pass, 0 fail, 0 warn.** Suites run: `config` 24, `reload` 9, `shells` 34, `windows` 19, `winmove` 11, `winrestore` 9, `ui` 33, `clipboard` 3, `policy` 12, `attention` 10, `exclguard` 6, `hideshow` 3 (real hotkeys, mouse and clipboard; no HUDshell left running, `config.json` untouched). **Not run:** the other suites (`snap`, `windowsnap`, `input`, `place`, `kbd`, `clickfocus`, `autotest`, `qol`, `layout`, `sessions`, `text`, `restore`, `recover`, and the rest), the manual suites, and the full run. Not exercised by any test: the 1.5 s-gap overwrite race of the settings file against a real hand edit, the resize-during-flood freeze (never reproduced before either), an Explorer restart with several windows, the detach-with-WebView2-failure path, the ACCESS_DENIED single-instance case, the runner's scaling backup and IME changes (they change system settings), and CI on GitHub.
+
 ## Mixed scaling: the left monitor at 150% (2026-11-26, `-Suite mixscale`, new manual suite)
 
 The script set the left 1920x1080 monitor (the one that had been at 100%) to 150% with the same display-scaling call as the older scaling suites (the owner allowed it), ran `place`, `dpi`, `input` and `snap` with the main screen at 100%, and put the left monitor back at 100% (checked: "is back at 100%"). First run: **127 pass, 1 fail**. The fail was a test assumption: `place`'s "dragging far from every edge is left alone" dropped the 900x520 window (1350x780 at 150%) at a fixed y of 300 on a 1080 px monitor, so its bottom edge sat on the work area's bottom and it snapped (in=400,300, out=400,288). The drop point is now y 150 (`src/harness.rs`, the check in the script). Repeat with only `place` at 150% (`HUDSHELL_EV_ONLY=place`): 29 pass, 0 fail, 0 warn. `dpi`, `input` and `snap` ran in the first run only (passed there, with the real mouse across the monitors at mixed scalings); they were not repeated after the small test change, which does not touch them. Other scalings of this monitor (125%, 175%) were not repeated; 150% on the third (480 px) monitor is not offered.

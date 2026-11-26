@@ -48,7 +48,11 @@ pub fn sanitize(places: &mut Vec<Place>) {
     let mut out: Vec<Place> = Vec::new();
     for p in places.drain(..) {
         let app = app_key(&p.app);
-        if ignored(&app) || p.rect[2] < 50 || p.rect[3] < 50 {
+        if ignored(&app) || p.rect[2] < 50 || p.rect[3] < 50 || p.rect[2] > 16000 || p.rect[3] > 16000 {
+            continue;
+        }
+        let lim = crate::config::COORD_LIMIT;
+        if !(-lim..=lim).contains(&p.rect[0]) || !(-lim..=lim).contains(&p.rect[1]) {
             continue;
         }
         out.retain(|q| q.app != app);
@@ -68,9 +72,27 @@ pub fn is_exclusive(list: &[String], app: &str) -> bool {
     !app.is_empty() && list.iter().any(|a| a == app)
 }
 
-/// Add `app` to the list (once). The desktop shell is never added.
+/// Programs that host the windows of many others (store apps, browsers, script and runtime hosts): learning one of them as
+/// "exclusive fullscreen" would refuse the keyboard for everything it hosts, so they are never learned (a hand-edited entry stays).
+pub fn shared_host(app: &str) -> bool {
+    matches!(
+        app,
+        "applicationframehost.exe"
+            | "wwahost.exe"
+            | "dllhost.exe"
+            | "rundll32.exe"
+            | "msedge.exe"
+            | "chrome.exe"
+            | "firefox.exe"
+            | "brave.exe"
+            | "opera.exe"
+            | "msedgewebview2.exe"
+    )
+}
+
+/// Add `app` to the list (once). The desktop shell and shared hosts are never added.
 pub fn remember_exclusive(list: &mut Vec<String>, app: &str) {
-    if ignored(app) || is_exclusive(list, app) {
+    if ignored(app) || shared_host(app) || is_exclusive(list, app) {
         return;
     }
     list.push(app.to_string());

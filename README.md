@@ -33,7 +33,7 @@ click-through by default, an explicit keyboard-focus toggle, and an adjustable o
 ## Requirements
 
 - Windows 11 (built and tested on build 26300).
-- PowerShell 7 (`pwsh`). Found via `PATH`, the Store alias, Program Files, or a path you set in `config.json`.
+- PowerShell 7 (`pwsh`). Looked for in this order: a full path you set in `config.json` (a name without a folder, or a path with a quote in it, is skipped), the Program Files install, folders on `PATH` that are full paths, the Store alias, then Windows PowerShell as a last resort.
 - Microsoft Edge WebView2 Runtime (included with Windows 11).
 - To build: Rust (MSVC toolchain, see `rust-toolchain.toml`) and Node.js (only to copy the pinned xterm.js files).
 
@@ -91,10 +91,19 @@ scroll a page, **Ctrl+Shift+Up / Down** a line, **Ctrl+Shift+Home / End** jump t
 
 ## Configuration
 
-`%APPDATA%\HUDshell\config.json` is created on first run. Missing keys take defaults, unknown keys are ignored,
-values are range-checked, and an unreadable file is kept as `config.json.bad-N` while defaults are used.
+`%APPDATA%\HUDshell\config.json` is created on first run. Missing keys take defaults, unknown keys are ignored and
+values are range-checked. The file may be UTF-8 (with or without a byte-order mark) or UTF-16 with a byte-order mark (what Windows
+PowerShell 5.1's `>` writes). At start:
 
-**Edits apply while HUDshell runs** (it checks the file every 1.5 seconds; the tray menu has "Reload settings" to do it at once): opacity, colours, hotkeys, tabs, profiles, layout options, text sizes, line and letter spacing, font, scrollback, clipboard options and the other pointer and notification settings. A few are read only at start and a notice names them if you change them: `shell`, `unicode`, `shift_enter`, `pane_shells`, `layout`, `start_hidden`, `start_ghost`. If the file is not valid JSON when you save it, the settings in use are kept and a notice says so.
+- **A value of the wrong type** (for example `"opacity": 85.5`) costs only that setting. Its default is used, a notice names it, and the file is copied to `config.json.bad-N` before HUDshell ever saves over it.
+- **A file that is not JSON** is renamed to `config.json.bad-N` and defaults are used. If it cannot be renamed, it is left alone and HUDshell does not save settings for that run.
+- **A file that exists but cannot be read** (locked, no access) is never replaced. Defaults are used for that run.
+
+At most 10 `.bad-N` copies are kept; the last one is reused after that. HUDshell saves the file itself (window position, hotkey changes) only while it is still the version HUDshell last read or wrote: a hand edit that has not been reloaded yet, or a broken file you are fixing, is never overwritten. Saves are flushed to the disk before they replace the file, so a power cut leaves the old file or the new one.
+
+Starting `hudshell.exe --interactive` starts with click-through off (the window takes mouse clicks from the start).
+
+**Edits apply while HUDshell runs** (it checks the file every 1.5 seconds; the tray menu has "Reload settings" to do it at once): opacity, colours, hotkeys, tabs, profiles, layout options, text sizes, line and letter spacing, font, scrollback, clipboard options and the other pointer and notification settings. A few are read only at start and a notice names them if you change them: `shell`, `unicode`, `shift_enter`, `pane_shells`, `layout`, `start_hidden`, `start_ghost`. If the file is not valid JSON when you save it, or a value in it has the wrong type, the settings in use are kept and a notice says so.
 
 | Key | Default | Notes |
 |---|---|---|
@@ -109,14 +118,14 @@ values are range-checked, and an unreadable file is kept as `config.json.bad-N` 
 | `ui_scale` | `100` | percent, 50-300, for HUDshell's own text: tab names, pane names, overlays, the picker and the settings panel |
 | `scrollback` | `2000` | lines, 100-100000 |
 | `shell` | none | full path of a shell to use instead of PowerShell 7 |
-| `hotkeys` | see table above | `click_through`, `grab_focus`, `show_hide`, `cycle_colours`, `opacity_up`, `opacity_down`, `settings`, `ghost`, `quit`, `corner_next`, `corner_prev`, `size_cycle`, `font_bigger`, `font_smaller`, `font_reset`, `shell_next`, `shell_prev`, `shell_new`, `shell_close`, `shell_list`, `shell_picker`, `shell_attention`, `layout_cycle`, `pane_zoom`, `pane_next`, `window_detach`, `window_next`, `shell_move`, `ghost_all`, `show_hide_all`, `shell_jump` (modifiers only; `Ctrl+Alt` means Ctrl+Alt+1..9); every chord needs at least one modifier |
+| `hotkeys` | see table above | `click_through`, `grab_focus`, `show_hide`, `cycle_colours`, `opacity_up`, `opacity_down`, `settings`, `ghost`, `quit`, `corner_next`, `corner_prev`, `size_cycle`, `font_bigger`, `font_smaller`, `font_reset`, `shell_next`, `shell_prev`, `shell_new`, `shell_close`, `shell_list`, `shell_picker`, `shell_attention`, `layout_cycle`, `pane_zoom`, `pane_next`, `window_detach`, `window_next`, `shell_move`, `ghost_all`, `show_hide_all`, `shell_jump` (modifiers only; `Ctrl+Alt` means Ctrl+Alt+1..9); every chord needs Ctrl, Alt or Win (Shift alone is not enough: it would take every capital letter); an invalid `shell_jump` falls back to `Ctrl+Alt` |
 | `ghost_opacity` | `40` | percent used by the ghost preset (20-100); never brightens a window that is already dimmer; never saved over `opacity` |
 | `copy_on_select` | `false` | copy the selection when the mouse button is released |
 | `right_click` | `"off"` | `"paste"`: right-click copies a selection, or pastes when nothing is selected |
-| `osc52` | `"off"` | `"write"`: let programs set the clipboard (OSC 52). Reads are never answered |
+| `osc52` | `"off"` | `"write"`: let programs set the clipboard (OSC 52). Only a shell that is on screen can, at most once a second, and a short note on screen names its tab. Reads are never answered |
 | `snap_distance` / `snap_margin` | `16` / `8` | pixels (96-dpi): dragging this close to a screen edge snaps to it (0 = off); gap kept from the edge. Within 3 x `snap_distance` + `snap_margin` of a corner the window goes flush into the corner instead (no gap) |
 | `game_positions` | `false` | opt in: HUDshell remembers where the first window was put while a given program was in front, and puts it back there when that program comes to the front again (looks only at the program's executable name, never window titles; the names are kept in `game_places` in this file and never logged) |
-| `exclusive_guard` | `true` | a game in exclusive fullscreen cannot show HUDshell, and taking the keyboard from it (Ctrl+Alt+G) minimizes it. With this on, HUDshell does not take the keyboard from a program listed in `exclusive_programs`, and it learns a program when a grab minimizes a full-screen program (it gives the keyboard back, brings the program back and adds it to the list). A tray notice says why. Use the game's borderless or windowed mode to use HUDshell over it |
+| `exclusive_guard` | `true` | a game in exclusive fullscreen cannot show HUDshell, and taking the keyboard from it (Ctrl+Alt+G) minimizes it. With this on, HUDshell does not take the keyboard from a program listed in `exclusive_programs`, and it learns a program when a grab minimizes a full-screen program while HUDshell still holds the keyboard (it gives the keyboard back, brings the program back and adds it to the list). A minimize after something else took the keyboard (Win+D, Alt+Tab, a click on the program) is not learned, and programs that host other programs' windows (browsers, the store-app frame host) are never learned. A tray notice says why. The tray menu's "Clear the exclusive-fullscreen list" empties the list. Use the game's borderless or windowed mode to use HUDshell over it |
 | `exclusive_programs` | `[]` | executable file names (lower case, for example `game.exe`) of programs that run in exclusive fullscreen; edit by hand, HUDshell adds the ones it learns; names are never logged |
 | `game_places` | `[]` | the places `game_positions` keeps, written by HUDshell: `{ "app": "game.exe", "rect": [x, y, width, height] }` |
 | `edge_tiling` | `true` | dropping the window with the cursor on the left or right edge of a screen makes it fill that half (drag it away to restore its size); the top edge maximizes |
@@ -136,7 +145,7 @@ values are range-checked, and an unreadable file is kept as `config.json.bad-N` 
 | `split` | `[50, 50]` | share in percent (20-80) of the first column and of the first row |
 | `pane_dividers` | `false` | draggable dividers between panes (needs the mouse, so the window must not be click-through) |
 | `pane_min` | `[30, 6]` | smallest pane worth drawing, in columns and rows; a smaller window shows fewer panes |
-| `attention_cue` / `attention_toast` | `true` / `true` | pulse the border, and show a tray notification while hidden, when a program rings the bell or sends OSC 9 / OSC 777 |
+| `attention_cue` / `attention_toast` | `true` / `true` | pulse the border, and show a tray notification while hidden, when a program rings the bell or sends OSC 9 / OSC 777. The notification starts with the tab it came from ("From tab 2: ..."), and invisible formatting characters are removed, so a program's text cannot pass for HUDshell's own. Each shell is limited to one cue every 3 seconds |
 | `window` | remembered | position and size in physical pixels |
 
 OSC 8 hyperlinks are drawn but clicking them does nothing (copy the text instead); HUDshell denies every browser permission request.
