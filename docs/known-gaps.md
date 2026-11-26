@@ -105,7 +105,7 @@ per-window values until HUDshell quits.
   ran green once on GitHub. The desktop suites cannot run in CI (they need an interactive session) and stay manual.
   `cargo clippy -D warnings` (normal and harness builds, tests included) runs in CI since 2026-11-21; there is no `cargo fmt` gate (the code is formatted by hand with long lines).
 - Workflow actions are pinned to commit hashes (2026-11-26), and CI builds with `npm ci --ignore-scripts` and `cargo --locked`; a weekly
-  advisories job runs `npm audit` and `cargo audit`. None of this has run on GitHub yet (not pushed).
+  advisories job runs `npm audit` and `cargo audit`. It ran green on GitHub for commit 55cf18d (both jobs: build, clippy, static suite, `npm audit`, `cargo audit`). The weekly scheduled run has not happened yet.
 - `rust-toolchain.toml` follows stable MSVC: rustup refuses an exact version together with the target in the channel name, and an exact
   version alone picked a GNU toolchain on a machine whose default host is GNU. `rust-version` in Cargo.toml (1.99) says which release
   builds were made with; the clippy and rustfmt components are listed.

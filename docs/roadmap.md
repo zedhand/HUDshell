@@ -47,6 +47,6 @@ A code review of the application, the build and the test runner. The changes are
 | Multi-window clean-up (web view, wake, failed detach, tray icon and notifications, reload to every window) | done, not run with input suites |
 | Exclusive-fullscreen guard (wrong program learned, no way to undo) | done, not run with input suites |
 | Page hardening (paste markers, invisible characters, OSC 52, WebView2 settings, CSP) | done, not run with input suites |
-| Build and CI (locked installs, pinned actions, advisories job, `build.rs` checks `web/dist`) | done locally; CI not yet run |
+| Build and CI (locked installs, pinned actions, advisories job, `build.rs` checks `web/dist`) | done; CI green on GitHub (55cf18d), the weekly scheduled run not seen yet |
 | Test runner (scaling backup, IME languages, PresentMon, clean-up after Ctrl+C) | done, not run |
 | (check) Targeted input suites for the above: `config`, `reload`, `shells`, `windows`, `winmove`, `winrestore`, `ui`, `clipboard`, `policy`, `attention`, `exclguard`, `hideshow` | done: 173 pass, 0 fail, 0 warn; the other suites were not re-run |
