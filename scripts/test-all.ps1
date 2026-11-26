@@ -1,8 +1,15 @@
+#Requires -Version 7.0
 <#
-HUDshell full test runner (Windows PowerShell 5.1 or PowerShell 7).
+HUDshell full test runner (PowerShell 7; the script needs 7.0 or later and is not tested on Windows PowerShell 5.1).
 
-  scripts\test-all.ps1 [-Suite static,keys,width,hideshow,clickfocus,clipboard,autotest,ui,scrollback,ghost,attention,policy,place,dpi,text,reload,restore,recover,qol,sessions,shells,layout,input,snap,kbd,cost,release,config,soak,real | all]
+  scripts\test-all.ps1 [-Suite <name>[,<name>...] | all]
                        [-Sandbox <folder both Claude Code and Codex already trust>] [-SoakSeconds 300]
+
+  Suites run by `all`: static keys width hideshow clickfocus clipboard autotest ui scrollback ghost attention policy place dpi text reload
+    restore recover windows winrestore winmove costwin tileoff tabsedit tabsui gamepos exclguard altmove wvbounds qol sessions shells layout
+    input snap windowsnap kbd cost release config soak (+ real with -Sandbox).
+  Manual suites (named on purpose, never in `all`): exclreal monitorunplug maxwork tbmulti sleepresume hardware kbdany gamesession
+    everything remaining finale scaleprobe. A name that is not a suite is a FAIL of the run (exit code 1 or more), never a silent pass.
 
 What it touches (read before running):
   * `ui`, `clickfocus`, `autotest`, `clipboard`, `hideshow` send real hotkeys (Ctrl+Alt+<letter>) and some
@@ -20,11 +27,16 @@ param(
   [int]$SoakSeconds = 300
 )
 $ErrorActionPreference = 'Continue'
+# The default (256) forgets the oldest errors in a long run, and Invoke-Suite counts the errors a suite produced.
+$MaximumErrorCount = 32768
 $root = Split-Path -Parent $PSScriptRoot
 Set-Location $root
 $dbg = Join-Path $root 'target\debug\hudshell.exe'
 $rel = Join-Path $root 'target\release\hudshell.exe'
 $log = Join-Path $root 'hudshell-test.log'
+# The app appends to this log and never truncates it, and every check reads it in full: start each run with a fresh one
+# (the previous run's log is kept as hudshell-test.log.old, which git ignores).
+try { if (Test-Path -LiteralPath $log) { Move-Item -LiteralPath $log -Destination "$log.old" -Force -ErrorAction Stop } } catch { Write-Host "note: could not set the old test log aside: $_" }
 $prodLog = Join-Path $env:LOCALAPPDATA 'HUDshell\hudshell.log'
 $cfgDir = Join-Path $env:APPDATA 'HUDshell'
 $cfgPath = Join-Path $cfgDir 'config.json'
@@ -47,6 +59,21 @@ function Check([string]$suite, [string]$name, [bool]$ok, [string]$detail = '') {
 function Warn([string]$suite, [string]$name, [string]$detail = '') {
   $script:R.Add([pscustomobject]@{ Suite = $suite; Check = $name; Status = 'WARN'; Detail = $detail })
   Write-Host ("[WARN] {0}: {1} {2}" -f $suite, $name, $detail)
+}
+# Runs one suite and makes a check that went missing visible. With $ErrorActionPreference = 'Continue' an expression that throws inside a Check(...)
+# call (indexing $null, a method on $null) skips the whole statement: the check is not recorded as FAIL, it just disappears. So: a suite that stops
+# with an exception, a suite that recorded nothing, and any such script error raised while the suite ran are each a FAIL.
+function Invoke-Suite([string]$name, [scriptblock]$body) {
+  $rows0 = $script:R.Count; $err0 = $Error.Count
+  try { & $body } catch { Check $name 'suite finished without stopping' $false "$_" }
+  $n = $Error.Count - $err0
+  $new = if ($n -gt 0) { @($Error[0..($n - 1)]) } else { @() }
+  $bugs = @($new | Where-Object { $_.FullyQualifiedErrorId -match '^(InvokeMethodOnNull|NullArray|PropertyNotFoundStrict|VariableIsUndefined)' })
+  if ($bugs.Count) {
+    $what = ($bugs | Select-Object -First 3 | ForEach-Object { "line $($_.InvocationInfo.ScriptLineNumber): $($_.Exception.Message)" }) -join '; '
+    Check $name 'no check was lost to a script error' $false $what
+  }
+  if ($script:R.Count -eq $rows0) { Check $name 'suite recorded at least one result' $false }
 }
 
 # Per-monitor aware, so the window rectangles and mouse positions this script uses are physical pixels on every monitor
@@ -78,7 +105,13 @@ public static class GT {
   [StructLayout(LayoutKind.Sequential)] public struct RECT { public int L, T, R, B; }
   public static Point Saved;
   public static void SaveCursor() { POINT p; GetCursorPos(out p); Saved = new Point(p.X, p.Y); }
-  public static void RestoreCursor() { SetCursorPos(Saved.X, Saved.Y); }
+  // Every suite calls this in a finally block: besides putting the cursor back it lets go of the left button and of Shift, Ctrl and Alt, so a run that is
+  // stopped during a drag (Ctrl+C) does not leave a button or a modifier held down. Releasing something that is not held does nothing.
+  public static void RestoreCursor() {
+    mouse_event(0x4,0,0,0,UIntPtr.Zero);
+    keybd_event(0x10,0,2,UIntPtr.Zero); keybd_event(0x11,0,2,UIntPtr.Zero); keybd_event(0x12,0,2,UIntPtr.Zero);
+    SetCursorPos(Saved.X, Saved.Y);
+  }
   public static void Hotkey(byte vk) { keybd_event(0x11,0,0,UIntPtr.Zero); keybd_event(0x12,0,0,UIntPtr.Zero); keybd_event(vk,0,0,UIntPtr.Zero); keybd_event(vk,0,2,UIntPtr.Zero); keybd_event(0x12,0,2,UIntPtr.Zero); keybd_event(0x11,0,2,UIntPtr.Zero); }
   public static void Key(byte vk) { keybd_event(vk,0,0,UIntPtr.Zero); keybd_event(vk,0,2,UIntPtr.Zero); }
   public static void ShiftDown() { keybd_event(0x10,0,0,UIntPtr.Zero); }
@@ -175,7 +208,17 @@ function Alt-Monitor {
   return ($m | Where-Object { -not $_.Primary -and $_.Dpi -ne $p.Dpi -and ($_.WR - $_.WL) -ge 1000 -and ($_.WB - $_.WT) -ge 600 } | Select-Object -First 1)
 }
 
-function Stop-HUDshell { Get-Process hudshell -ErrorAction SilentlyContinue | Stop-Process -Force; Start-Sleep -Milliseconds 400; if ($script:NeutralOn) { Ensure-Neutral } }
+# The HUDshell processes that belong to the tests: started from this repository's build folders or from the run's scratch folder.
+# Any other hudshell.exe is the person's own copy: it is never stopped here (Preflight reports it).
+function Test-HUDshellProcesses {
+  $roots = @($root, $scratch) | ForEach-Object { $_.TrimEnd('\') + '\' }
+  @(Get-Process hudshell -ErrorAction SilentlyContinue | Where-Object { $p = $_.Path; $p -and @($roots | Where-Object { $p.StartsWith($_, [StringComparison]::OrdinalIgnoreCase) }).Count -gt 0 })
+}
+function Other-HUDshellProcesses {
+  $mine = @(Test-HUDshellProcesses | ForEach-Object { $_.Id })
+  @(Get-Process hudshell -ErrorAction SilentlyContinue | Where-Object { $mine -notcontains $_.Id })
+}
+function Stop-HUDshell { Test-HUDshellProcesses | Stop-Process -Force -ErrorAction SilentlyContinue; Start-Sleep -Milliseconds 400; if ($script:NeutralOn) { Ensure-Neutral } }
 function Read-Lines([string]$p) {
   if (-not (Test-Path -LiteralPath $p)) { return @() }
   # The app may be appending to the log right now: open it shared, and try again if it is locked for a moment.
@@ -194,11 +237,20 @@ function Cut([string]$p, [int]$from) { $a = Read-Lines $p; if ($a.Count -le $fro
 function LineCount([string]$p) { (Read-Lines $p).Count }
 function Strip($l) { $l -replace '^\d+ ', '' }
 
+# Starts a program with each argument passed as one argument. Start-Process -ArgumentList joins its strings with spaces and adds no quotes, so
+# a path with a space in it (a user profile such as C:\Users\John Smith) would reach the program as two arguments.
+function Start-App([string]$exe, [string[]]$argv = @()) {
+  # The launch is the same Start-Process as before (a different launch changed the window focus order in the keys suite); an argument with a space or a
+  # quote in it, or an empty one, is quoted first.
+  $quoted = @($argv | ForEach-Object { if ($_ -eq '' -or $_ -match '[\s"]') { '"' + ($_ -replace '"', '\"') + '"' } else { $_ } })
+  if ($quoted.Count -eq 0) { return Start-Process $exe -PassThru }
+  return Start-Process $exe -ArgumentList $quoted -PassThru
+}
 # Runs a harness scenario and returns the log lines it produced.
 function Run-Scenario([string[]]$argv, [int]$timeoutMs = 120000) {
   Stop-HUDshell
   $n = LineCount $log
-  $p = Start-Process $dbg -ArgumentList $argv -PassThru
+  $p = Start-App $dbg ($argv)
   $null = $p.WaitForExit($timeoutMs)
   $timedOut = -not $p.HasExited
   if ($timedOut) { Stop-Process -Id $p.Id -Force }
@@ -206,11 +258,24 @@ function Run-Scenario([string[]]$argv, [int]$timeoutMs = 120000) {
   if ($timedOut) { Warn 'harness' ("scenario " + ($argv -join ' ') + " did not finish in time") }
   return , $run
 }
-# Screen text captured by a "dump:<label>" action. The page answers asynchronously, so other log
-# lines can come in between: take the rows after the first "terminal dump:" header that follows the request.
-function Get-Dump($run, [string]$label) {
-  $i = -1
-  for ($k = 0; $k -lt $run.Count; $k++) { if ($run[$k] -match ("DUMP label=" + [regex]::Escape($label) + '(\s|$)')) { $i = $k; break } }
+# The index of the "DUMP label=<label>" request line in a log slice (the first one, or the last with -Last), or -1. The label is matched literally.
+function Find-DumpLabel($run, [string]$label, [switch]$Last) {
+  $re = 'DUMP label=' + [regex]::Escape($label) + '(\s|$)'
+  if ($Last) { for ($k = $run.Count - 1; $k -ge 0; $k--) { if ($run[$k] -match $re) { return $k } } }
+  else { for ($k = 0; $k -lt $run.Count; $k++) { if ($run[$k] -match $re) { return $k } } }
+  return -1
+}
+# The regex match of the first line after the label's request that matches $pattern (normally the "terminal dump:" header the page logs for it), or $null.
+# The page answers asynchronously, so other log lines can come in between: every dump helper below goes through this one.
+function Find-DumpHeader($run, [string]$label, [string]$pattern = 'terminal dump:', [switch]$Last) {
+  $i = Find-DumpLabel $run $label -Last:$Last
+  if ($i -lt 0) { return $null }
+  for ($k = $i + 1; $k -lt $run.Count; $k++) { $m = [regex]::Match([string]$run[$k], $pattern); if ($m.Success) { return $m } }
+  return $null
+}
+# Screen text captured by a "dump:<label>" action: the rows after the first "terminal dump:" header that follows the request (the last request with -Last).
+function Get-Dump($run, [string]$label, [switch]$Last) {
+  $i = Find-DumpLabel $run $label -Last:$Last
   if ($i -lt 0) { return @() }
   $h = -1
   for ($k = $i + 1; $k -lt $run.Count; $k++) { if ($run[$k] -match '^\d+ terminal dump:') { $h = $k; break } }
@@ -221,20 +286,25 @@ function Get-Dump($run, [string]$label) {
     if ($run[$j] -match '^\d+   \| ?(.*)$') { $out.Add($Matches[1]) }
   }
   return $out.ToArray()
-}function Dump-Has($run, [string]$label, [string]$text) { (@(Get-Dump $run $label) -join "`n") -match [regex]::Escape($text) }
+}
+
+function Dump-Has($run, [string]$label, [string]$text) { (@(Get-Dump $run $label) -join "`n") -match [regex]::Escape($text) }
 function Dump-Count($run, [string]$label, [string]$text) { ([regex]::Matches((@(Get-Dump $run $label) -join "`n"), [regex]::Escape($text))).Count }
 
 # ---------------------------------------------------------------------------------------------
 function Suite-Static {
   Write-Host "=== static ==="
-  $o = & cargo test 2>&1 | ForEach-Object { $_.ToString() }
+  # Nothing to check without the files that are checked: fail at once, never pass on missing input.
+  foreach ($f in $rel, $dbg) { if (-not (Test-Path -LiteralPath $f)) { Check 'static' "exe exists: $f" $false 'build it first (scripts\build-release.ps1, cargo build --features harness)'; return } }
+  $o = & cargo test 2>&1 | ForEach-Object { $_.ToString() }; $cargoOk = ($LASTEXITCODE -eq 0)
   $line = ($o | Select-String 'test result:' | Select-Object -First 1)
   # name the failing tests in the result (the summary line alone does not say which one failed)
   $failedTests = @($o | Where-Object { $_ -match '^test .* \.\.\. FAILED' } | ForEach-Object { ($_ -replace '^test ', '') -replace ' \.\.\. FAILED.*', '' })
   $why = if ($failedTests.Count -gt 0) { ' | failed: ' + ($failedTests -join ', ') } else { '' }
-  Check 'static' 'cargo unit tests' ($line -and $line.ToString() -match 'ok\. \d+ passed; 0 failed') (($line.ToString().Trim()) + $why)
+  $summary = if ($line) { $line.ToString().Trim() } else { 'no test summary (did it compile?)' }
+  Check 'static' 'cargo unit tests' ($cargoOk -and $line -and $line.ToString() -match 'ok\. \d+ passed; 0 failed') ($summary + $why)
   Stop-HUDshell
-  $b = [IO.File]::ReadAllBytes($rel)
+  try { $b = [IO.File]::ReadAllBytes($rel) } catch { Check 'static' 'release exe can be read' $false "$_"; return }
   $ascii = [Text.Encoding]::ASCII.GetString($b); $uni = [Text.Encoding]::Unicode.GetString($b)
   function InExe($s) { $ascii.Contains($s) -or $uni.Contains($s) }
   Check 'static' 'release exe size under 3 MB' ($b.Length -lt 3MB) ("{0:N2} MB" -f ($b.Length / 1MB))
@@ -246,15 +316,17 @@ function Suite-Static {
     if ($s) { Check 'static' "release exe has no build-machine string '$s'" (-not (InExe $s)) }
   }
   # Debug (harness) binary must have the harness; sanity check the feature split really differs.
-  $db = [IO.File]::ReadAllBytes($dbg)
-  Check 'static' 'harness build does contain the harness' ([Text.Encoding]::ASCII.GetString($db).Contains('AUTOTEST'))
+  try { $db = [IO.File]::ReadAllBytes($dbg); Check 'static' 'harness build does contain the harness' ([Text.Encoding]::ASCII.GetString($db).Contains('AUTOTEST')) }
+  catch { Check 'static' 'harness exe can be read' $false "$_" }
   # Every UI file is embedded byte-for-byte (search the exe for the whole file, not just a prefix).
   $lat = [Text.Encoding]::GetEncoding(28591)
   $exeText = $lat.GetString($b)
   $dist = Join-Path $root 'web\dist'
   $bad = @()
   foreach ($f in 'index.html', 'app.js', 'xterm.js', 'xterm.css', 'addon-fit.js', 'addon-serialize.js', 'addon-unicode11.js', 'addon-unicode-graphemes.js') {
-    $bytes = [IO.File]::ReadAllBytes((Join-Path $dist $f))
+    $path = Join-Path $dist $f
+    if (-not (Test-Path -LiteralPath $path)) { $bad += "$f (missing)"; continue }
+    $bytes = [IO.File]::ReadAllBytes($path)
     if (-not $exeText.Contains($lat.GetString($bytes))) { $bad += $f }
   }
   Check 'static' 'every UI file is embedded in the release exe byte-for-byte' ($bad.Count -eq 0) ($bad -join ',')
@@ -307,12 +379,48 @@ function Suite-ClickFocus {
 }
 function GTSave { [GT]::SaveCursor() }
 
+# The clipboard is changed by the clipboard and policy suites. Save what is on it (text, a list of files or an image: not only text) and put it back,
+# trying again a few times because the clipboard is often locked for a moment by another program.
+function Set-ClipRetry([string]$text) {
+  for ($i = 0; $i -lt 8; $i++) { try { Set-Clipboard -Value $text -ErrorAction Stop; return $true } catch { Start-Sleep -Milliseconds 150 } }
+  Warn 'clipboard' 'the clipboard could not be set (locked by another program?)'
+  return $false
+}
+function Save-Clip {
+  Add-Type -AssemblyName System.Windows.Forms, System.Drawing -ErrorAction SilentlyContinue
+  for ($i = 0; $i -lt 8; $i++) {
+    try {
+      if ([Windows.Forms.Clipboard]::ContainsFileDropList()) { return @{ Kind = 'files'; Value = @([Windows.Forms.Clipboard]::GetFileDropList() | ForEach-Object { "$_" }) } }
+      if ([Windows.Forms.Clipboard]::ContainsText()) { return @{ Kind = 'text'; Value = (Get-Clipboard -Raw -ErrorAction Stop) } }
+      if ([Windows.Forms.Clipboard]::ContainsImage()) { return @{ Kind = 'image'; Value = [Drawing.Bitmap]::new([Windows.Forms.Clipboard]::GetImage()) } }
+      return @{ Kind = 'empty' }
+    } catch { Start-Sleep -Milliseconds 150 }
+  }
+  # the Windows.Forms clipboard needs an STA thread: fall back to plain text
+  try { $t = Get-Clipboard -Raw -ErrorAction Stop; if ($null -ne $t) { return @{ Kind = 'text'; Value = $t } } } catch { }
+  return @{ Kind = 'unknown' }
+}
+function Restore-Clip($saved) {
+  if (-not $saved -or $saved.Kind -eq 'unknown') { Warn 'clipboard' 'what was on the clipboard could not be read before the test, so it was left as the test set it'; return }
+  for ($i = 0; $i -lt 8; $i++) {
+    try {
+      switch ($saved.Kind) {
+        'text' { Set-Clipboard -Value $saved.Value -ErrorAction Stop }
+        'files' { Set-Clipboard -Path $saved.Value -ErrorAction Stop }
+        'image' { [Windows.Forms.Clipboard]::SetImage($saved.Value) }
+        default { [Windows.Forms.Clipboard]::Clear() }
+      }
+      return
+    } catch { Start-Sleep -Milliseconds 150 }
+  }
+  Warn 'clipboard' "the clipboard ($($saved.Kind)) could not be put back: it still holds what the test set"
+}
+
 function Suite-Clipboard {
   Write-Host "=== clipboard ==="
-  $had = $null
-  try { $had = Get-Clipboard -Raw -ErrorAction Stop } catch { $had = $null }
+  $had = Save-Clip
   try {
-    Set-Clipboard -Value 'echo CLIPBOARD-PASTE-OK'
+    Set-ClipRetry 'echo CLIPBOARD-PASTE-OK'
     $run = Run-Scenario @('--term', '--autotest', '--clipboard', '--delay', '3') 60000
     Check 'clipboard' 'Ctrl+V pasted the clipboard text into the shell (typed + output)' ((Dump-Count $run 'after-paste' 'CLIPBOARD-PASTE-OK') -ge 2) ("occurrences " + (Dump-Count $run 'after-paste' 'CLIPBOARD-PASTE-OK'))
     $cp = @($run | Where-Object { $_ -match 'copy to clipboard' })
@@ -321,7 +429,7 @@ function Suite-Clipboard {
     try { $now = Get-Clipboard -Raw } catch { }
     Check 'clipboard' 'clipboard now holds the selected screen text' ($now -match 'CLIPBOARD-PASTE-OK')
   } finally {
-    if ($null -ne $had) { Set-Clipboard -Value $had } else { Set-Clipboard -Value ' ' }
+    Restore-Clip $had
   }
 }
 
@@ -342,8 +450,9 @@ function Suite-Autotest {
     Check 'autotest' "$prog started and drew its screen" ($start -match $prog)
     Check 'autotest' "$prog exited back to the PowerShell prompt" (Dump-Has $run "$prog-exited" 'PS ') ''
     $uS = Get-Ui $run "$prog-start"; $uE = Get-Ui $run "$prog-exited2"
-    Check 'autotest' "$prog (the real program): its tab is labelled '$prog' while it runs" ($uS -and $uS.progs -ceq $prog) ("progs=[" + $uS.progs + "] label=" + $uS.labels[0])
-    Check 'autotest' "$prog (the real program): the label is gone once it has exited" ($uE -and $uE.progs -ceq '') ("progs=[" + $uE.progs + "]")
+    $label0 = if ($uS -and $uS.labels) { @($uS.labels)[0] } else { '' }
+    Check 'autotest' "$prog (the real program): its tab is labelled '$prog' while it runs" ($uS -and $uS.progs -ceq $prog) $(if ($uS) { "progs=[" + $uS.progs + "] label=" + $label0 } else { 'no UI state was logged' })
+    Check 'autotest' "$prog (the real program): the label is gone once it has exited" ($uE -and $uE.progs -ceq '') $(if ($uE) { "progs=[" + $uE.progs + "]" } else { 'no UI state was logged' })
     if ($skipped) { Warn 'autotest' "${prog}: a step was skipped (dialog or protocol guard)" }
   }
   foreach ($n in 1, 2, 3) { Check 'autotest' "grab cycle $n typed text" (Dump-Has $run 'after-grab-cycles' "GRAB-$n") }
@@ -363,7 +472,7 @@ function Suite-Ui {
   $p = $null
   try {
     $n = LineCount $log
-    $p = Start-Process $dbg -ArgumentList '--idle' -PassThru
+    $p = Start-App $dbg ('--idle')
     Start-Sleep 6
     $h = [GT]::Find([uint32]$p.Id)
     Check 'ui' 'window found' ($h -ne [IntPtr]::Zero)
@@ -459,15 +568,30 @@ function Suite-Ui {
   }
 }
 
-function Backup-Config { $script:cfgExtras = @(Get-ChildItem $cfgDir -Force -ErrorAction SilentlyContinue | Where-Object { $_.Name -like 'config.json.*' } | ForEach-Object { $_.Name }); $script:hadCfg = Test-Path -LiteralPath $cfgPath; if ($script:hadCfg) { $script:cfgBak = Join-Path $scratch 'config.backup.json'; Copy-Item $cfgPath $script:cfgBak -Force; $script:cfgHash = (Get-FileHash $cfgPath).Hash } }
+function Backup-Config {
+  $script:cfgExtras = @(Get-ChildItem $cfgDir -Force -ErrorAction SilentlyContinue | Where-Object { $_.Name -like 'config.json.*' } | ForEach-Object { $_.Name })
+  $script:hadCfg = Test-Path -LiteralPath $cfgPath
+  if ($script:hadCfg) {
+    $script:cfgBak = Join-Path $scratch 'config.backup.json'
+    Copy-Item -LiteralPath $cfgPath -Destination $script:cfgBak -Force -ErrorAction Stop
+    $script:cfgHash = (Get-FileHash -LiteralPath $cfgPath).Hash
+    Write-Host "config.json backed up to $($script:cfgBak) (put back when the suite ends)"
+  }
+}
 function Restore-Config {
   Stop-HUDshell
+  # Remove what the tests themselves left beside the config (.bad-N, .tmp), but never a file that was already there before the tests started.
+  foreach ($f in Get-ChildItem $cfgDir -Force -ErrorAction SilentlyContinue) {
+    if ($f.Name -like 'config.json.*' -and $script:cfgExtras -notcontains $f.Name) { Remove-Item -LiteralPath $f.FullName -Force -ErrorAction SilentlyContinue }
+  }
   if ($script:hadCfg) {
-    # Put the user's file back, and remove what the tests themselves left beside it (.bad-N, .tmp) -
-    # but never a file that was already there before the tests started.
-    foreach ($f in Get-ChildItem $cfgDir -Force -ErrorAction SilentlyContinue) { if ($f.Name -like 'config.json.*' -and $script:cfgExtras -notcontains $f.Name) { Remove-Item -LiteralPath $f.FullName -Force } }
-    Copy-Item $script:cfgBak $cfgPath -Force
-  } else { foreach ($f in Get-ChildItem $cfgDir -Force -ErrorAction SilentlyContinue) { if ($f.Name -like 'config.json*') { Remove-Item -LiteralPath $f.FullName -Force } } }
+    # -ErrorAction Stop: a restore that fails must not look like success (the run then keeps the backup folder and says where it is).
+    try { Copy-Item -LiteralPath $script:cfgBak -Destination $cfgPath -Force -ErrorAction Stop }
+    catch { Write-Host ">>> could NOT restore your config.json: $_ . The backup is $($script:cfgBak)"; Check 'config' 'config.json restored from the backup' $false "$_ (backup: $($script:cfgBak))" }
+  } else {
+    # there was no config.json before: remove the one the tests made, not the older config.json.* files (those are in cfgExtras)
+    Remove-Item -LiteralPath $cfgPath -Force -ErrorAction SilentlyContinue
+  }
 }
 function Start-Rel([string]$exe = $rel) { $p = Start-Process $exe -PassThru; Start-Sleep 7; return $p }
 function Quit-Rel($p) { [GT]::Hotkey(0x51); $null = $p.WaitForExit(8000); if (-not $p.HasExited) { Stop-Process -Id $p.Id -Force } }
@@ -481,7 +605,7 @@ function Suite-Release {
     $copy = Join-Path $scratch 'relcopy'; New-Item -ItemType Directory -Force $copy | Out-Null
     Copy-Item $rel (Join-Path $copy 'hudshell.exe') -Force
     Remove-Item -LiteralPath $prodLog -ErrorAction SilentlyContinue
-    $p = Start-Process (Join-Path $copy 'hudshell.exe') -ArgumentList '--autotest', '--keys', '--soak', '5', '--real', '--log-input', '--pty-flags', '0x10', '--idle' -PassThru
+    $p = Start-App (Join-Path $copy 'hudshell.exe') @('--autotest', '--keys', '--soak', '5', '--real', '--log-input', '--pty-flags', '0x10', '--idle')
     Start-Sleep 8
     Check 'release' 'runs from an unrelated folder with the UI embedded' (-not $p.HasExited)
     $l = Read-Lines $prodLog
@@ -633,23 +757,19 @@ function Suite-Config {
 
 # View position [top, bottom] from the dump header that follows "DUMP label=<label>".
 function Get-View($run, [string]$label) {
-  $i = -1
-  for ($k = 0; $k -lt $run.Count; $k++) { if ($run[$k] -match ("DUMP label=" + [regex]::Escape($label) + '(\s|$)')) { $i = $k; break } }
-  if ($i -lt 0) { return $null }
-  for ($k = $i + 1; $k -lt $run.Count; $k++) { if ($run[$k] -match 'terminal dump:.* view=\[(\d+),(\d+)\]') { return @([int]$Matches[1], [int]$Matches[2]) } }
+  $m = Find-DumpHeader $run $label 'terminal dump:.* view=\[(\d+),(\d+)\]'
+  if ($m) { return @([int]$m.Groups[1].Value, [int]$m.Groups[2].Value) }
   return $null
 }
 function Get-DumpField($run, [string]$label, [string]$field) {
-  $i = -1
-  for ($k = 0; $k -lt $run.Count; $k++) { if ($run[$k] -match ("DUMP label=" + [regex]::Escape($label) + '(\s|$)')) { $i = $k; break } }
-  if ($i -lt 0) { return $null }
-  for ($k = $i + 1; $k -lt $run.Count; $k++) { if ($run[$k] -match ('terminal dump:.* ' + $field + '=(\S+)')) { return $Matches[1] } }
+  $m = Find-DumpHeader $run $label ('terminal dump:.* ' + [regex]::Escape($field) + '=(\S+)')
+  if ($m) { return $m.Groups[1].Value }
   return $null
 }
 # STATE lines logged by the ghost scenario, keyed by label.
 function Get-States($run) {
   $h = @{}
-  foreach ($l in $run) { if ($l -match 'STATE label=(\S+) (.*)$') { $o = @{}; foreach ($kv in ($Matches[2] -split ' ')) { $p = $kv -split '=', 2; if ($p.Count -eq 2) { $o[$p[0]] = $p[1] } }; $h[$Matches[1]] = $o } }
+  foreach ($l in $run) { if ($l -match 'STATE label=(\S+) (.*)$') { $o = @{}; foreach ($kv in ($Matches[2] -split ' (?=[\w.-]+=)')) { $p = $kv -split '=', 2; if ($p.Count -eq 2) { $o[$p[0]] = $p[1] } }; $h[$Matches[1]] = $o } }
   return $h
 }
 
@@ -708,13 +828,12 @@ function Suite-Attention {
 
 function Suite-Policy {
   Write-Host "=== policy: OSC 52, OSC 8, copy-on-select, right-click (DevTools mouse events; temporarily uses the clipboard) ==="
-  $had = $null
-  try { $had = Get-Clipboard -Raw -ErrorAction Stop } catch { $had = $null }
+  $had = Save-Clip
   try {
     $sentinel = 'echo RCLICK-PASTE-OK'
     function ClipNow { try { (Get-Clipboard -Raw) } catch { '' } }
     # a) defaults: everything opt-in is off
-    Set-Clipboard -Value $sentinel
+    Set-ClipRetry $sentinel
     $run = Run-Scenario @('--term', '--policytest', '--delay', '2') 60000
     $applied = @($run | Where-Object { $_ -match 'terminal applied settings' }) -join ' '
     Check 'policy' 'defaults reported by the page: copyOnSelect off, rightClick off, osc52 off, link handler installed' ($applied -match '"copyOnSelect":false' -and $applied -match '"rightClick":"off"' -and $applied -match '"osc52":"off"' -and $applied -match '"linkHandler":true') ''
@@ -724,17 +843,17 @@ function Suite-Policy {
     Check 'policy' 'right-click with right_click=off does not paste' ((Dump-Count $run 'after-right-click-no-selection' 'RCLICK-PASTE-OK') -eq 0)
     Check 'policy' 'copy on select is off by default (a drag leaves the clipboard alone)' ((ClipNow).Trim() -eq $sentinel)
     # b) OSC 52 write allowed; reads never answered
-    Set-Clipboard -Value $sentinel
+    Set-ClipRetry $sentinel
     $run = Run-Scenario @('--term', '--policytest', '--osc52', 'write', '--log-input', '--delay', '2') 60000
     Check 'policy' 'osc52=write: a program can set the clipboard (hello)' (((ClipNow).Trim() -eq 'hello') -and @($run | Where-Object { $_ -match 'OSC 52 clipboard write from a program' }).Count -eq 1) ("clipboard '" + (ClipNow).Trim() + "'")
     Check 'policy' 'osc52=write: the read query (OSC 52;c;?) is not answered' (@($run | Where-Object { $_ -match 'PTY-IN' -and $_ -match ']52;' }).Count -eq 0)
     # c) copy on select
-    Set-Clipboard -Value $sentinel
+    Set-ClipRetry $sentinel
     $run = Run-Scenario @('--term', '--policytest', '--copy-on-select', '--delay', '2') 60000
     $now = (ClipNow).Trim()
     Check 'policy' 'copy-on-select: releasing a drag selection copies it' ($now.Length -gt 0 -and $now -ne $sentinel -and $now -ne 'hello') ("clipboard " + $now.Length + " chars")
     # d) right-click paste / copy
-    Set-Clipboard -Value $sentinel
+    Set-ClipRetry $sentinel
     $run = Run-Scenario @('--term', '--policytest', '--right-click', 'paste', '--delay', '2') 60000
     Check 'policy' 'right_click=paste: right-click with no selection pastes the clipboard' ((Dump-Count $run 'after-right-click-no-selection' 'RCLICK-PASTE-OK') -ge 1) ("occurrences " + (Dump-Count $run 'after-right-click-no-selection' 'RCLICK-PASTE-OK'))
     $took = @($run | Where-Object { $_ -match 'right-click paste: .*clipboard read took (\d+) ms' } | ForEach-Object { [int]$Matches[1] })
@@ -742,7 +861,7 @@ function Suite-Policy {
     $now = (ClipNow).Trim()
     Check 'policy' 'right_click=paste: right-click with a selection copies it instead' ($now.Length -gt 0 -and $now -ne $sentinel) ("clipboard " + $now.Length + " chars")
   } finally {
-    if ($null -ne $had) { Set-Clipboard -Value $had } else { Set-Clipboard -Value ' ' }
+    Restore-Clip $had
   }
 }
 
@@ -802,7 +921,7 @@ function Place-Once([string[]]$extra) {
   Check 'place' 'font hotkeys: 14 -> 16 -> 15' (($s['font-up'].font -eq '16') -and ($s['font-down'].font -eq '15')) ("up=" + $s['font-up'].font + " down=" + $s['font-down'].font)
   $fsB = Get-DumpField $run 'font-base' 'fs'; $fsU = Get-DumpField $run 'font-up' 'fs'; $fsD = Get-DumpField $run 'font-down' 'fs'
   Check 'place' 'the page applied the font size (14 -> 16 -> 15)' (($fsB -eq '14') -and ($fsU -eq '16') -and ($fsD -eq '15')) "$fsB,$fsU,$fsD"
-  $colsOf = { param($label) $i = -1; for ($k = 0; $k -lt $run.Count; $k++) { if ($run[$k] -match ("DUMP label=" + $label + '(\s|$)')) { $i = $k; break } }; for ($k = $i + 1; $k -lt $run.Count; $k++) { if ($run[$k] -match 'terminal dump: (\d+)x(\d+)') { return [int]$Matches[1] } } }
+  $colsOf = { param($label) $m = Find-DumpHeader $run $label 'terminal dump: (\d+)x(\d+)'; if ($m) { [int]$m.Groups[1].Value } }
   $cb = [int](@(& $colsOf 'font-base' | Where-Object { $null -ne $_ })[-1]); $cu = [int](@(& $colsOf 'font-up' | Where-Object { $null -ne $_ })[-1])
   Check 'place' 'a bigger font gives fewer columns (the shell is told the new size)' ($cb -gt 0 -and $cu -gt 0 -and $cu -lt $cb) "$cb -> $cu columns"
   $mv = @($run | Where-Object { $_ -match 'MOVING in=' } | ForEach-Object { Strip $_ })
@@ -869,11 +988,9 @@ function Suite-Sessions {
 
 # The page's `ui` object from the dump header that follows "DUMP label=<label>".
 function Get-Ui($run, [string]$label) {
-  $i = -1
-  for ($k = 0; $k -lt $run.Count; $k++) { if ($run[$k] -match ("DUMP label=" + [regex]::Escape($label) + '(\s|$)')) { $i = $k; break } }
-  if ($i -lt 0) { return $null }
-  for ($k = $i + 1; $k -lt $run.Count; $k++) { if ($run[$k] -match 'terminal dump:.* ui=(\{.*\})\s*$') { try { return ($Matches[1] | ConvertFrom-Json) } catch { return $null } } }
-  return $null
+  $m = Find-DumpHeader $run $label 'terminal dump:.* ui=(\{.*\})\s*$'
+  if (-not $m) { return $null }
+  try { return ($m.Groups[1].Value | ConvertFrom-Json) } catch { return $null }
 }
 
 function Suite-Shells {
@@ -1043,7 +1160,7 @@ function Input-Once([string[]]$extra) {
   $p = $null
   try {
     $n = LineCount $log
-    $p = Start-Process $dbg -ArgumentList (@('--term', '--inputtest', '--interactive', '--layout', 'side-by-side', '--dividers', '--tabs', 'always', '--delay', '2') + $extra) -PassThru
+    $p = Start-App $dbg ((@('--term', '--inputtest', '--interactive', '--layout', 'side-by-side', '--dividers', '--tabs', 'always', '--delay', '2') + $extra))
     $ready = $null
     for ($i = 0; $i -lt 60 -and -not $ready; $i++) {
       Start-Sleep 1
@@ -1078,7 +1195,7 @@ function Input-Once([string[]]$extra) {
     Check 'input' 'Esc closes the picker without starting a shell, and the keyboard is given back' ($open -and -not $u.picker -and @($u.labels).Count -eq 3 -and -not [GT]::IsFg($h))
     # 2. a real mouse click on a tab
     $u = Now-Ui; $st = Now-State; $dpr = $u.rects.dpr
-    $t1 = @($u.rects.tabs | Where-Object { $_.id -eq 1 })[0]; $t2 = @($u.rects.tabs | Where-Object { $_.id -eq 2 })[0]
+    $t1 = @($u.rects.tabs | Where-Object { $_.id -eq 1 })[0]
     Click-At (Pt $st $dpr $t1.r)
     $a = (Now-Ui).active
     $u = Now-Ui; $st = Now-State
@@ -1140,10 +1257,8 @@ function Input-Once([string[]]$extra) {
 
 # "cols,rows" of the page dump that follows "DUMP label=<label>".
 function Dump-Dim($run, [string]$label) {
-  $i = -1
-  for ($k = 0; $k -lt $run.Count; $k++) { if ($run[$k] -match ("DUMP label=" + [regex]::Escape($label) + '(\s|$)')) { $i = $k; break } }
-  if ($i -lt 0) { return $null }
-  for ($k = $i + 1; $k -lt $run.Count; $k++) { if ($run[$k] -match 'terminal dump: (\d+)x(\d+)') { return @([int]$Matches[1], [int]$Matches[2]) } }
+  $m = Find-DumpHeader $run $label 'terminal dump: (\d+)x(\d+)'
+  if ($m) { return @([int]$m.Groups[1].Value, [int]$m.Groups[2].Value) }
   return $null
 }
 
@@ -1191,23 +1306,27 @@ function Drag-Mouse($x0, $y0, $x1, $y1) {
 # When $crossTo is given, the window is then dragged onto each of those monitors and snapped into the bottom-right corner there.
 # Screenshots of the real screen (what the owner sees) for the corner checks; saved to a git-ignored folder, never committed.
 $shotDir = Join-Path $root '.claude\scratch-archive\shots'
-New-Item -ItemType Directory -Force $shotDir | Out-Null
 function Shot([string]$name, [int]$l, [int]$t, [int]$r, [int]$b, [int]$zoom = 1) {
+  $bmp = $null; $g = $null; $big = $null; $g2 = $null
   try {
+    # made when the first screenshot is taken, not when the script is loaded (a run without screenshots, or in CI, creates nothing)
+    New-Item -ItemType Directory -Force $shotDir | Out-Null
     $pad = 24; $x = $l - $pad; $y = $t - $pad; $w = ($r - $l) + 2 * $pad; $h = ($b - $t) + 2 * $pad
     $bmp = New-Object System.Drawing.Bitmap $w, $h
     $g = [System.Drawing.Graphics]::FromImage($bmp)
     $g.CopyFromScreen($x, $y, 0, 0, (New-Object System.Drawing.Size $w, $h))
-    $g.Dispose()
+    $out = $bmp
     if ($zoom -gt 1) {
       $big = New-Object System.Drawing.Bitmap ($w * $zoom), ($h * $zoom)
       $g2 = [System.Drawing.Graphics]::FromImage($big)
       $g2.InterpolationMode = [System.Drawing.Drawing2D.InterpolationMode]::NearestNeighbor
       $g2.PixelOffsetMode = [System.Drawing.Drawing2D.PixelOffsetMode]::Half
-      $g2.DrawImage($bmp, 0, 0, $w * $zoom, $h * $zoom); $g2.Dispose(); $bmp.Dispose(); $bmp = $big
+      $g2.DrawImage($bmp, 0, 0, $w * $zoom, $h * $zoom)
+      $out = $big
     }
-    $bmp.Save((Join-Path $shotDir ($name + '.png')), [System.Drawing.Imaging.ImageFormat]::Png); $bmp.Dispose()
+    $out.Save((Join-Path $shotDir ($name + '.png')), [System.Drawing.Imaging.ImageFormat]::Png)
   } catch { Write-Host "screenshot $name failed: $_" }
+  finally { foreach ($o in $g2, $g, $big, $bmp) { if ($o) { $o.Dispose() } } }
 }
 # The last "window corners: square|rounded" line of a log slice.
 function Last-Corners($lines) { $c = @($lines | Where-Object { $_ -match 'window corners: (square|rounded)' }); if ($c.Count) { ($c[-1] -replace '^.*window corners: ', '').Trim() } else { 'none' } }
@@ -1221,7 +1340,7 @@ function Snap-Monitor($m, $others) {
   try {
     $n = LineCount $log
     $at = "{0},{1}" -f ($m.WL + 150), ($m.WT + 100)
-    $p = Start-Process $dbg -ArgumentList @('--term', '--inputtest', '--interactive', '--size', '640,360', '--at', $at, '--delay', '2') -PassThru
+    $p = Start-App $dbg (@('--term', '--inputtest', '--interactive', '--size', '640,360', '--at', $at, '--delay', '2'))
     $st = $null
     for ($i = 0; $i -lt 40 -and -not $st; $i++) {
       Start-Sleep 1
@@ -1231,7 +1350,6 @@ function Snap-Monitor($m, $others) {
     }
     Check 'snap' "$name`: window started on it at 640x360 (96 dpi)" ($null -ne $st) $(if ($st) { "{0}x{1}" -f ($st.R - $st.L), ($st.B - $st.T) } else { 'no state' })
     if (-not $st) { return }
-    $mg = [int]($m.Dpi * 8 / 96)
     $ins = [int](6 * $dpr)
     foreach ($c in 'top-left', 'top-right', 'bottom-right', 'bottom-left') {
       $st = Last-State @(Cut $log $n); $w = $st.R - $st.L; $h = $st.B - $st.T
@@ -1327,13 +1445,12 @@ function Snap-Monitor($m, $others) {
       $u = Last-Ui @(Cut $log $n)
       $inside = ($s3.L -ge $o.L -and $s3.R -le $o.R -and $s3.T -ge $o.T -and $s3.B -le $o.B)
       Check 'snap' "$name -> $oname`: dragging the window across the border puts it wholly on the other monitor, at that monitor's scaling" ($inside -and $u -and [Math]::Abs($u.rects.dpr - $odpr) -lt 0.01 -and [Math]::Abs(($s3.R - $s3.L) - $w0 * $o.Dpi / $m.Dpi) -le 3) ("window {0},{1},{2},{3}; width {4} -> {5}; page ratio {6}" -f $s3.L, $s3.T, $s3.R, $s3.B, $w0, ($s3.R - $s3.L), $u.rects.dpr)
-      $omg = 0
       $w = $s3.R - $s3.L; $h = $s3.B - $s3.T
       $nl = $o.WR - [int](6 * $odpr) - $w; $nt = $o.WB - [int](6 * $odpr) - $h
       $gx = $s3.L + [int](200 * $odpr); $gy = $s3.T + [int](10 * $odpr)
       Drag-Mouse $gx $gy ($gx + $nl - $s3.L) ($gy + $nt - $s3.T)
       $s4 = Last-State @(Cut $log $n)
-      Check 'snap' "$name -> $oname`: and a drag from there into its bottom-right corner snaps flush (no gap)" (([Math]::Abs(($o.WR - $s4.R) - $omg) -le 1) -and ([Math]::Abs(($o.WB - $s4.B) - $omg) -le 1)) ("window {0},{1},{2},{3} in work {4},{5},{6},{7}" -f $s4.L, $s4.T, $s4.R, $s4.B, $o.WL, $o.WT, $o.WR, $o.WB)
+      Check 'snap' "$name -> $oname`: and a drag from there into its bottom-right corner snaps flush (no gap)" (([Math]::Abs($o.WR - $s4.R) -le 1) -and ([Math]::Abs($o.WB - $s4.B) -le 1)) ("window {0},{1},{2},{3} in work {4},{5},{6},{7}" -f $s4.L, $s4.T, $s4.R, $s4.B, $o.WL, $o.WT, $o.WR, $o.WB)
       # back to this monitor for the next one
       $gx = $s4.L + [int](200 * $odpr); $gy = $s4.T + [int](10 * $odpr)
       Drag-Mouse $gx $gy ($m.WL + [int](($m.WR - $m.WL) / 2)) ($m.WT + [int](100 * $dpr))
@@ -1348,7 +1465,6 @@ function Snap-Monitor($m, $others) {
 function Suite-Snap {
   Write-Host "=== snap: real mouse drags into the four corners of every monitor, and across the borders between monitors - do not touch mouse/keyboard ==="
   $mons = @(Get-Monitors)
-  $prim = $mons | Where-Object { $_.Primary } | Select-Object -First 1
   # HUDSHELL_SNAP_ONLY="1920x480" runs just the monitor with that work-area size (for investigating one monitor).
   foreach ($m in $mons) {
     if ($env:HUDSHELL_SNAP_ONLY -and ((($m.WR - $m.WL).ToString() + 'x' + ($m.WB - $m.WT).ToString()) -ne $env:HUDSHELL_SNAP_ONLY)) { continue }
@@ -1380,11 +1496,10 @@ function Suite-Restore {
   Remove-Item -LiteralPath $file -ErrorAction SilentlyContinue
   $args2 = @('--test-profiles', '--restore-session', 'shells', '--session-file', $file, '--delay', '2')
   # run 1: open shells from three profiles and a 2 x 2 layout, then quit
-  $r1 = Run-Scenario (@('--term', '--sessionsave') + $args2) 90000
+  $null = Run-Scenario (@('--term', '--sessionsave') + $args2) 90000
   $j = $null
   if (Test-Path -LiteralPath $file) { try { $j = Get-Content -LiteralPath $file -Raw | ConvertFrom-Json } catch { } }
   Check 'restore' 'the first run saved a session file: four shells (pwsh, work, cmd, pwsh) in a 2 x 2 layout, the second pane focused' ($j -and (@($j.shells) -join ',') -ceq 'pwsh,work,cmd,pwsh' -and $j.layout -ceq 'grid' -and $j.focus -eq 1 -and @($j.slots).Count -eq 4) $(if ($j) { (@($j.shells) -join ',') + ' / ' + $j.layout + ' / focus ' + $j.focus } else { 'no file' })
-  $saved1 = if (Test-Path -LiteralPath $file) { Get-Content -LiteralPath $file -Raw } else { '' }
   # run 2: start again with the same file
   $r2 = Run-Scenario (@('--term', '--sessionload') + $args2) 90000
   $u = Get-Ui $r2 'sl-restored'
@@ -1408,7 +1523,7 @@ function Suite-Recover {
   Write-Host "=== recover: this HUDshell's web view process is killed while it runs; the window and the shells come back (no OS input) ==="
   Stop-HUDshell
   $n = LineCount $log
-  $p = Start-Process $dbg -ArgumentList @('--term', '--recovertest', '--delay', '2') -PassThru
+  $p = Start-App $dbg (@('--term', '--recovertest', '--delay', '2'))
   $killed = 0
   for ($i = 0; $i -lt 60 -and $killed -eq 0; $i++) {
     Start-Sleep 1
@@ -1479,11 +1594,8 @@ function Suite-Windows {
 # Moving a shell into another window, the theme reaching every window, and a window rescued after a display change (no OS input).
 # The scrollback length (the page's baseY) in the dump with a label.
 function Dump-Base($run, [string]$label) {
-  for ($k = 0; $k -lt $run.Count; $k++) {
-    if ($run[$k] -match ('DUMP label=' + [regex]::Escape($label) + '(\s|$)')) {
-      for ($j = $k + 1; $j -lt [Math]::Min($k + 6, $run.Count); $j++) { if ($run[$j] -match 'terminal dump:.*view=\[(\d+),(\d+)\]') { return [int]$Matches[2] } }
-    }
-  }
+  $m = Find-DumpHeader $run $label 'terminal dump:.*view=\[(\d+),(\d+)\]'
+  if ($m) { return [int]$m.Groups[2].Value }
   return -1
 }
 
@@ -1520,7 +1632,6 @@ function Suite-WindowsRestore {
   Check 'winrestore' 'the first run had three windows: shells 1,2 / 3,5 / 4' ($s1 -and $s1.N -eq 3 -and (($s1.Wins | ForEach-Object { $_.Shells }) -join ' / ') -eq '1,2 / 3,5 / 4') $(if ($s1) { ($s1.Wins | ForEach-Object { $_.Shells }) -join ' / ' } else { 'no state' })
   $names = if ($j) { (@($j.shells) -join ',') + ' / ' + (@($j.windows | ForEach-Object { (@($_.shells) -join ',') }) -join ' / ') } else { 'no file' }
   Check 'winrestore' 'the session file lists the first window (pwsh, pwsh) and the two others (work, cmd / cmd), each with a position and size' ($j -and $names -ceq 'pwsh,pwsh / work,cmd / cmd' -and @($j.windows).Count -eq 2 -and @($j.windows | Where-Object { @($_.rect).Count -eq 4 }).Count -eq 2) $names
-  $saved = if (Test-Path -LiteralPath $file) { Get-Content -LiteralPath $file -Raw } else { '' }
   $r2 = Run-Scenario (@('--term', '--windowsload') + $args2) 120000
   $s2 = Get-Windows $r2 'restored'
   Check 'winrestore' 'the next start brings all three windows back, with 2, 2 and 1 shells' ($s2 -and $s2.N -eq 3 -and (($s2.Wins | ForEach-Object { ($_.Shells -split ',').Count }) -join ',') -eq '2,2,1') $(if ($s2) { "n=$($s2.N): " + (($s2.Wins | ForEach-Object { ($_.Shells -split ',').Count }) -join ',') } else { 'no state' })
@@ -1529,11 +1640,11 @@ function Suite-WindowsRestore {
   $names2 = if ($j2) { (@($j2.shells) -join ',') + ' / ' + (@($j2.windows | ForEach-Object { (@($_.shells) -join ',') }) -join ' / ') } else { 'no file' }
   Check 'winrestore' 'the restored windows have the same profiles in the same order (read back from the file written when that run ended)' ($names2 -ceq $names) $names2
   $placed = $true
-  if ($j -and $j2) { for ($i = 0; $i -lt 2; $i++) { for ($k = 0; $k -lt 4; $k++) { if ([Math]::Abs([int]$j.windows[$i].rect[$k] - [int]$j2.windows[$i].rect[$k]) -gt 2) { $placed = $false } } } } else { $placed = $false }
+  if ($j -and $j2 -and @($j.windows).Count -ge 2 -and @($j2.windows).Count -ge 2 -and @($j.windows | Where-Object { @($_.rect).Count -eq 4 }).Count -ge 2 -and @($j2.windows | Where-Object { @($_.rect).Count -eq 4 }).Count -ge 2) { for ($i = 0; $i -lt 2; $i++) { for ($k = 0; $k -lt 4; $k++) { if ([Math]::Abs([int]$j.windows[$i].rect[$k] - [int]$j2.windows[$i].rect[$k]) -gt 2) { $placed = $false } } } } else { $placed = $false }
   Check 'winrestore' 'and each restored window is where it was (position and size within 2 px)' $placed
   Check 'winrestore' 'the log says each restored window got its shells back' (@($r2 | Where-Object { $_ -match 'session restored: 2 shell' }).Count -eq 2 -or @($r2 | Where-Object { $_ -match 'session restored: ' }).Count -ge 3)
   # a saved window whose place is on no screen now (its monitor is gone): it is opened at the default place instead, on a screen
-  if ($j2) {
+  if ($j2 -and @($j2.windows).Count -ge 1) {
     $j2.windows[0].rect = @(-30000, -30000, 700, 420)
     [IO.File]::WriteAllText($file, ($j2 | ConvertTo-Json -Depth 10))
     $r4 = Run-Scenario (@('--term', '--windowsload') + $args2) 120000
@@ -1558,7 +1669,7 @@ function Suite-WindowSnap {
   try {
     $n = LineCount $log
     $at = "{0},{1}" -f ($m.WL + 200), ($m.WT + 150)
-    $p = Start-Process $dbg -ArgumentList @('--term', '--windowsnap', '--interactive', '--size', '420,260', '--at', $at, '--delay', '2') -PassThru
+    $p = Start-App $dbg (@('--term', '--windowsnap', '--interactive', '--size', '420,260', '--at', $at, '--delay', '2'))
     $w = $null
     for ($i = 0; $i -lt 50 -and -not ($w -and $w.N -eq 2 -and $w.Wins.Count -eq 2); $i++) { Start-Sleep 1; $w = Get-Windows @(Cut $log $n) 'snap' }
     Check 'windowsnap' 'two windows are open (the second made by detaching a shell)' ($w -and $w.N -eq 2 -and $w.Wins.Count -eq 2) $(if ($w) { "n=$($w.N)" } else { 'no state' })
@@ -1570,7 +1681,9 @@ function Suite-WindowSnap {
     $tl = $w1.R + [int](8 * $dpr); $tt = $w1.T + [int](5 * $dpr)
     Drag-Mouse $gx $gy ($gx + $tl - $w2.L) ($gy + $tt - $w2.T)
     Start-Sleep 1
-    $w = Get-Windows @(Cut $log $n) 'snap'; $w1 = $w.Wins[0]; $w2 = $w.Wins[1]
+    $w = Get-Windows @(Cut $log $n) 'snap'
+    if (-not ($w -and $w.Wins.Count -eq 2)) { Check 'windowsnap' 'both windows are still reported after the drag' $false; return }
+    $w1 = $w.Wins[0]; $w2 = $w.Wins[1]
     Check 'windowsnap' 'dragging a window to 8 px from another snaps it flush against that window (left edge on its right edge) and lines up the tops' (([Math]::Abs($w2.L - $w1.R) -le 1) -and ([Math]::Abs($w2.T - $w1.T) -le 1)) ("window 2 at {0},{1}; window 1 right {2}, top {3}" -f $w2.L, $w2.T, $w1.R, $w1.T)
     Check 'windowsnap' 'the size did not change' ((($w2.R - $w2.L) -eq ($w1.R - $w1.L)) -and (($w2.B - $w2.T) -eq ($w1.B - $w1.T)))
     Shot 'windows-snapped' ([Math]::Min($w1.L, $w2.L)) ([Math]::Min($w1.T, $w2.T)) ([Math]::Max($w1.R, $w2.R)) ([Math]::Max($w1.B, $w2.B))
@@ -1580,7 +1693,9 @@ function Suite-WindowSnap {
     $dx = [int](120 * $dpr); $dy = [int](90 * $dpr)
     Drag-Mouse $gx $gy ($gx + $dx) ($gy + $dy)
     Start-Sleep 1
-    $w = Get-Windows @(Cut $log $n) 'snap'; $w1 = $w.Wins[0]; $w2 = $w.Wins[1]
+    $w = Get-Windows @(Cut $log $n) 'snap'
+    if (-not ($w -and $w.Wins.Count -eq 2)) { Check 'windowsnap' 'both windows are still reported after the drag' $false; return }
+    $w1 = $w.Wins[0]; $w2 = $w.Wins[1]
     $m1x = $w1.L - $o1.L; $m1y = $w1.T - $o1.T; $m2x = $w2.L - $o2.L; $m2y = $w2.T - $o2.T
     Check 'windowsnap' 'dragging window 1 moves it by the drag distance' (([Math]::Abs($m1x - $dx) -le 3) -and ([Math]::Abs($m1y - $dy) -le 3)) "moved $m1x,$m1y for a drag of $dx,$dy"
     Check 'windowsnap' 'and the window touching it moved with it, by the same amount' (([Math]::Abs($m2x - $m1x) -le 1) -and ([Math]::Abs($m2y - $m1y) -le 1)) "window 2 moved $m2x,$m2y"
@@ -1592,7 +1707,9 @@ function Suite-WindowSnap {
     $gx = $w2.L + [int](150 * $dpr); $gy = $w2.T + [int](10 * $dpr)
     Drag-Mouse $gx $gy ($gx + [int](60 * $dpr)) ($gy + [int](260 * $dpr))
     Start-Sleep 1
-    $w = Get-Windows @(Cut $log $n) 'snap'; $w1 = $w.Wins[0]; $w2 = $w.Wins[1]
+    $w = Get-Windows @(Cut $log $n) 'snap'
+    if (-not ($w -and $w.Wins.Count -eq 2)) { Check 'windowsnap' 'both windows are still reported after the drag' $false; return }
+    $w1 = $w.Wins[0]; $w2 = $w.Wins[1]
     Check 'windowsnap' 'with the pair touching, dragging window 2 moves both again (a group)' (([Math]::Abs(($w1.L - $o1.L) - ($w2.L - $o2.L)) -le 1) -and (($w1.L - $o1.L) -ne 0))
     # Shift held at the start of the drag: only the dragged window moves (the pair is left alone)
     $o1 = $w1; $o2 = $w2
@@ -1600,7 +1717,9 @@ function Suite-WindowSnap {
     [GT]::ShiftDown(); Start-Sleep -Milliseconds 300
     try { Drag-Mouse $gx $gy ($gx + [int](40 * $dpr)) ($gy + [int](150 * $dpr)) } finally { [GT]::ShiftUp() }
     Start-Sleep 1
-    $w = Get-Windows @(Cut $log $n) 'snap'; $w1 = $w.Wins[0]; $w2 = $w.Wins[1]
+    $w = Get-Windows @(Cut $log $n) 'snap'
+    if (-not ($w -and $w.Wins.Count -eq 2)) { Check 'windowsnap' 'both windows are still reported after the drag' $false; return }
+    $w1 = $w.Wins[0]; $w2 = $w.Wins[1]
     Check 'windowsnap' 'with Shift held, dragging window 2 moves only window 2 and leaves the touching window 1 where it was' (([Math]::Abs($w1.L - $o1.L) -le 1) -and ([Math]::Abs($w1.T - $o1.T) -le 1) -and ([Math]::Abs($w2.T - $o2.T) -ge [int](100 * $dpr))) ("window 1 moved {0},{1}; window 2 moved {2},{3}" -f ($w1.L - $o1.L), ($w1.T - $o1.T), ($w2.L - $o2.L), ($w2.T - $o2.T))
     Check 'windowsnap' 'no start failures logged' (@(Cut $log $n | Where-Object { $_ -match 'FAILED to start' }).Count -eq 0)
   } finally {
@@ -1658,26 +1777,25 @@ function Suite-Kbd {
   GTSave
   $origLayout = [GT]::ForegroundLayout()
   $p = $null
-  $us = [GT]::LoadLayout('00000409')
   try {
     # 0. The warning about AltGr characters at start: first with German active (it must name the hotkeys that clash), then on the
     # normal layout (it must stay silent).
     $hklDe0 = [GT]::LoadLayout('00000407')
-    [GT]::RestoreSystemLayout($hklDe0.ToInt64() -band 0xFFFFFFFF); Start-Sleep -Milliseconds 1800
+    [GT]::RestoreSystemLayout($hklDe0.ToInt64() -band 0xFFFFFFFFL); Start-Sleep -Milliseconds 1800
     $n0 = LineCount $log
-    $null = Start-Process $dbg -ArgumentList @('--term', '--inputtest', '--delay', '2') -PassThru
+    $null = Start-App $dbg (@('--term', '--inputtest', '--delay', '2'))
     Start-Sleep 9
     $seg0 = @(Cut $log $n0)
     Check 'kbd' 'started with German active, HUDshell warns that some hotkeys also type AltGr characters (Ctrl+Alt+Q gives @)' (@($seg0 | Where-Object { $_ -match 'notice: .*AltGr key' -and $_ -match 'Ctrl\+Alt\+Q \(@\)' }).Count -ge 1) ((@($seg0 | Where-Object { $_ -match 'AltGr clash' }) | Select-Object -First 1) -join '')
     Stop-HUDshell
     [GT]::RestoreSystemLayout($origLayout); Start-Sleep -Milliseconds 1800
     $n0 = LineCount $log
-    $null = Start-Process $dbg -ArgumentList @('--term', '--inputtest', '--delay', '2') -PassThru
+    $null = Start-App $dbg (@('--term', '--inputtest', '--delay', '2'))
     Start-Sleep 9
     Check 'kbd' 'started on the normal layout, HUDshell says nothing about AltGr' (@(Cut $log $n0 | Where-Object { $_ -match 'AltGr' }).Count -eq 0)
     Stop-HUDshell
     $n = LineCount $log
-    $p = Start-Process $dbg -ArgumentList @('--term', '--inputtest', '--interactive', '--delay', '2') -PassThru
+    $p = Start-App $dbg (@('--term', '--inputtest', '--interactive', '--delay', '2'))
     $h = [IntPtr]::Zero
     for ($i = 0; $i -lt 40 -and $h -eq [IntPtr]::Zero; $i++) { Start-Sleep 1; if ($p.HasExited) { break }; $h = [GT]::Find([uint32]$p.Id) }
     Start-Sleep 8
@@ -1727,7 +1845,6 @@ function Suite-Kbd {
     [GT]::RequestLayout($hkl); Start-Sleep -Milliseconds 1500
     Grab
     $at = [GT]::NeedsAltGr('@', $hkl)
-    $nq = LineCount $log
     [GT]::AltGrKey(0x51); Start-Sleep -Milliseconds 2500
     $gone = $p.HasExited
     if ($at -and $gone) { Warn 'kbd' 'German: AltGr+Q (which types @) is also HUDshell''s quit hotkey Ctrl+Alt+Q: the hotkey wins, so @ cannot be typed while HUDshell runs and HUDshell quits' 'known limit of Ctrl+Alt hotkeys on layouts with AltGr' }
@@ -1743,6 +1860,17 @@ function Suite-Kbd {
   }
 }
 
+# Programs that are never "the game": the test's own windows and the Windows shell. Preflight and the game suites use the same list; the game suites also
+# leave out browsers (a full-screen browser is not a game), the preflight does not (a full-screen browser would get the test's keys).
+$script:ShellProcessRx = '^(hudshell|explorer|WindowsTerminal|pwsh|powershell|claude|conhost|OpenConsole|ApplicationFrameHost|TextInputHost|SearchHost|ShellExperienceHost|StartMenuExperienceHost|SystemSettings)$'
+$script:BrowserProcessRx = '^(msedge|chrome|firefox)$'
+# True when the foreground window is a program (not the shell, not a browser) whose window fills the monitor $m exactly.
+function Test-GameInFront($m) {
+  $fg = [GT]::ForegroundWindow(); $pid_ = [GT]::ForegroundPid(); $l = 0; $t = 0; $r = 0; $b = 0
+  [void][GT]::WindowRect($fg, [ref]$l, [ref]$t, [ref]$r, [ref]$b)
+  $pr = Get-Process -Id $pid_ -ErrorAction SilentlyContinue
+  return [bool]($pr -and $pr.ProcessName -notmatch $script:ShellProcessRx -and $pr.ProcessName -notmatch $script:BrowserProcessRx -and [Math]::Abs($l - $m.L) -le 2 -and [Math]::Abs($t - $m.T) -le 2 -and [Math]::Abs($r - $m.R) -le 2 -and [Math]::Abs($b - $m.B) -le 2)
+}
 function Tree-Ids([int]$rootPid) {
   $all = Get-CimInstance Win32_Process -Property ProcessId, ParentProcessId
   $ids = New-Object System.Collections.Generic.HashSet[int]; [void]$ids.Add($rootPid)
@@ -1761,7 +1889,7 @@ function Suite-Cost {
   $p = $null
   try {
     $n = LineCount $log
-    $p = Start-Process $dbg -ArgumentList '--idle' -PassThru
+    $p = Start-App $dbg ('--idle')
     Start-Sleep 10
     $h = [GT]::Find([uint32]$p.Id)
     Check 'cost' 'window found' ($h -ne [IntPtr]::Zero)
@@ -1791,7 +1919,7 @@ function Suite-CostWindows {
   $p = $null
   try {
     $n = LineCount $log
-    $p = Start-Process $dbg -ArgumentList @('--term', '--costwindows', '--delay', '2') -PassThru
+    $p = Start-App $dbg (@('--term', '--costwindows', '--delay', '2'))
     $waitFor = { param($label) for ($i = 0; $i -lt 150; $i++) { Start-Sleep 1; if ($p.HasExited) { return $false }; if (@(Cut $log $n | Where-Object { $_ -match ('WINDOWS label=' + $label + ' ') }).Count -ge 1) { return $true } }; return $false }
     $sample = {
       Start-Sleep 3
@@ -1832,7 +1960,7 @@ function Suite-WvBounds {
 function Suite-AltMove {
   Write-Host "=== altmove: a shell in the alternate screen is detached into its own window (no OS input) ==="
   $r = Run-Scenario @('--term', '--altmove', '--delay', '2') 90000
-  $hdr = { param($label) for ($k = 0; $k -lt $r.Count; $k++) { if ($r[$k] -match ('DUMP label=' + $label + '(\s|$)')) { for ($j = $k + 1; $j -lt [Math]::Min($k + 6, $r.Count); $j++) { if ($r[$j] -match 'terminal dump:.*buffer="(\w+)"') { return $Matches[1] } } } }; return '?' }
+  $hdr = { param($label) $m = Find-DumpHeader $r $label 'terminal dump:.*buffer="(\w+)"'; if ($m) { $m.Groups[1].Value } else { '?' } }
   $b0 = & $hdr 'alt-before'; $b1 = & $hdr 'alt-after'
   Check 'altmove' 'before the move the shell is in the alternate screen and shows its text' ($b0 -eq 'alternate' -and (Dump-Has $r 'alt-before' 'ALT-SCREEN-LINE')) "buffer $b0"
   Check 'altmove' 'after the move, in the new window, it is still in the alternate screen with the same text' ($b1 -eq 'alternate' -and (Dump-Has $r 'alt-after' 'ALT-SCREEN-LINE')) "buffer $b1"
@@ -1848,8 +1976,8 @@ function Suite-KbdAny {
   # layouts that need no language pack: loaded for this session only (the language list is not touched) and unloaded again at the end
   $loaded = New-Object System.Collections.Generic.List[IntPtr]
   $before = @([GT]::InstalledLayouts())
-  foreach ($klid in '00000419', '0000041D', '00000411', '00000804', '00000412') { $h0 = [GT]::LoadLayout($klid); if ($h0 -ne [IntPtr]::Zero -and ($before -notcontains ($h0.ToInt64() -band 0xFFFFFFFF))) { $loaded.Add($h0) } }
-  foreach ($ime in @($script:ImeHkl)) { if ($ime) { $h0 = [GT]::LoadLayout($ime); if ($h0 -ne [IntPtr]::Zero -and ($before -notcontains ($h0.ToInt64() -band 0xFFFFFFFF))) { $loaded.Add($h0) } } }
+  foreach ($klid in '00000419', '0000041D', '00000411', '00000804', '00000412') { $h0 = [GT]::LoadLayout($klid); if ($h0 -ne [IntPtr]::Zero -and ($before -notcontains ($h0.ToInt64() -band 0xFFFFFFFFL))) { $loaded.Add($h0) } }
+  foreach ($ime in @($script:ImeHkl)) { if ($ime) { $h0 = [GT]::LoadLayout($ime); if ($h0 -ne [IntPtr]::Zero -and ($before -notcontains ($h0.ToInt64() -band 0xFFFFFFFFL))) { $loaded.Add($h0) } } }
   $installed = @([GT]::InstalledLayouts())
   # a layout handle is (layout / device id) << 16 | language id: US keyboards (0x0409 in the high half, whatever the language) and the German and French
   # layouts (tested in `kbd`) are left out
@@ -1862,7 +1990,7 @@ function Suite-KbdAny {
   $p = $null
   try {
     $n = LineCount $log
-    $p = Start-Process $dbg -ArgumentList @('--term', '--inputtest', '--interactive', '--delay', '2') -PassThru
+    $p = Start-App $dbg (@('--term', '--inputtest', '--interactive', '--delay', '2'))
     $h = [IntPtr]::Zero
     for ($i = 0; $i -lt 40 -and $h -eq [IntPtr]::Zero; $i++) { Start-Sleep 1; if ($p.HasExited) { break }; $h = [GT]::Find([uint32]$p.Id) }
     Start-Sleep 8
@@ -2026,7 +2154,7 @@ function Auto-ScaleAt([int]$x, [int]$y, [int]$percent, [string]$what, [scriptblo
     Write-Host "reached: $percent% (letting Windows settle for 8 s)"
     Start-Sleep 8
     $script:CheckTag = " [$what $percent%]"
-    try { & $tests } catch { Write-Host "a test in this state stopped with an error: $_" } finally { $script:CheckTag = '' }
+    try { & $tests } catch { Check 'runner' "a test in this state stopped with an error" $false "$_" } finally { $script:CheckTag = '' }
   } finally {
     [void](Set-DisplayScale $x $y $orig.Percent)
     Start-Sleep 5
@@ -2048,7 +2176,7 @@ function Auto-Scale([int]$percent, [scriptblock]$tests) {
     Write-Host "reached: $percent% (letting Windows settle for 8 s)"
     Start-Sleep 8
     $script:CheckTag = " [main screen $percent%]"
-    try { & $tests } catch { Write-Host "a test in this state stopped with an error: $_" } finally { $script:CheckTag = '' }
+    try { & $tests } catch { Check 'runner' "a test in this state stopped with an error" $false "$_" } finally { $script:CheckTag = '' }
   } finally {
     [void](Set-DisplayScale $primary.L $primary.T $orig.Percent)
     Start-Sleep 5
@@ -2060,22 +2188,55 @@ function Auto-Scale([int]$percent, [scriptblock]$tests) {
 # ---- the taskbar edge, set by the script through the registry (and always put back) -------------------------------------------------------------------
 # StuckRects3 holds the taskbar's edge (byte 12: 0 left, 1 top, 2 right, 3 bottom) and auto-hide (byte 8, bit 0). The original value is copied to a backup file first
 # and put back (and Explorer restarted) in a finally block. A Windows version that ignores the setting is reported as such, not as a failure.
+# Restarts Explorer (the taskbar and the desktop live in the same process as the File Explorer windows, so those close too): the folders that are open are
+# noted first and opened again afterwards.
+function Restart-Explorer {
+  $open = @()
+  try { $open = @((New-Object -ComObject Shell.Application).Windows() | ForEach-Object { $u = $_.LocationURL; if ($u -like 'file:///*') { [Uri]::UnescapeDataString($u.Substring(8)) -replace '/', '\' } } | Where-Object { $_ }) } catch { }
+  Stop-Process -Name explorer -Force -ErrorAction SilentlyContinue
+  Start-Sleep 4
+  if (-not (Get-Process explorer -ErrorAction SilentlyContinue)) { Start-Process explorer.exe }
+  if ($open.Count -gt 0) { Start-Sleep 3; foreach ($d in $open) { if (Test-Path -LiteralPath $d) { Start-Process explorer.exe -ArgumentList @($d) } } }
+}
+$script:TaskbarBackup = Join-Path $root '.claude\scratch-archive\taskbar-settings-backup.txt'
+$script:MmTaskbarBackup = Join-Path $root '.claude\scratch-archive\mmtaskbar-backup.txt'
+# The backup files are deleted once the setting is back. One that is still there means an earlier run was stopped before it could put the setting back:
+# do it now, and say so.
+function Restore-LeftoverSettings {
+  if (Test-Path -LiteralPath $script:TaskbarBackup) {
+    try {
+      $bytes = [byte[]]((Get-Content -LiteralPath $script:TaskbarBackup -Raw).Trim() -split '-' | ForEach-Object { [Convert]::ToByte($_, 16) })
+      Set-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\StuckRects3' -Name Settings -Value $bytes
+      Restart-Explorer; Start-Sleep 6
+      Remove-Item -LiteralPath $script:TaskbarBackup -Force
+      Warn 'runner' 'an earlier run was stopped before it put the taskbar setting back: it was restored from its backup now'
+    } catch { Warn 'runner' "the taskbar backup of an earlier run could not be applied: $_ ($($script:TaskbarBackup))" }
+  }
+  if (Test-Path -LiteralPath $script:MmTaskbarBackup) {
+    try {
+      $v = (Get-Content -LiteralPath $script:MmTaskbarBackup -Raw).Trim(); $k = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced'
+      if ($v -eq 'absent') { Remove-ItemProperty -Path $k -Name MMTaskbarEnabled -ErrorAction SilentlyContinue } else { Set-ItemProperty -Path $k -Name MMTaskbarEnabled -Type DWord -Value ([int]$v) }
+      Restart-Explorer; Start-Sleep 6
+      Remove-Item -LiteralPath $script:MmTaskbarBackup -Force
+      Warn 'runner' 'an earlier run was stopped before it put the "taskbar on all displays" setting back: it was restored from its backup now'
+    } catch { Warn 'runner' "the taskbar-on-all-displays backup of an earlier run could not be applied: $_" }
+  }
+}
+
 function Set-TaskbarEdge([int]$edge, [bool]$hide) {
   $k = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\StuckRects3'
   $b = [byte[]](Get-ItemProperty $k).Settings
   $b[12] = [byte]$edge
   if ($hide) { $b[8] = [byte]($b[8] -bor 1) } else { $b[8] = [byte]($b[8] -band 0xFE) }
   Set-ItemProperty -Path $k -Name Settings -Value $b
-  Stop-Process -Name explorer -Force -ErrorAction SilentlyContinue
-  Start-Sleep 4
-  if (-not (Get-Process explorer -ErrorAction SilentlyContinue)) { Start-Process explorer.exe }
+  Restart-Explorer
   Start-Sleep 6
 }
 
 function Auto-Taskbar([string]$tag, [int]$edge, [scriptblock]$tests) {
   $k = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\StuckRects3'
   $orig = [byte[]](Get-ItemProperty $k).Settings
-  $backup = Join-Path $root '.claude\scratch-archive\taskbar-settings-backup.txt'
+  $backup = $script:TaskbarBackup
   New-Item -ItemType Directory -Force (Split-Path $backup) | Out-Null
   [IO.File]::WriteAllText($backup, ([BitConverter]::ToString($orig)))
   Write-Host ""
@@ -2087,30 +2248,36 @@ function Auto-Taskbar([string]$tag, [int]$edge, [scriptblock]$tests) {
     Write-Host "reached: taskbar $tag (letting Windows settle for 8 s)"
     Start-Sleep 8
     $script:CheckTag = " [taskbar $tag]"
-    try { & $tests } catch { Write-Host "a test in this state stopped with an error: $_" } finally { $script:CheckTag = '' }
+    try { & $tests } catch { Check 'runner' "a test in this state stopped with an error" $false "$_" } finally { $script:CheckTag = '' }
   } finally {
     Set-ItemProperty -Path $k -Name Settings -Value $orig
-    Stop-Process -Name explorer -Force -ErrorAction SilentlyContinue
-    Start-Sleep 4
-    if (-not (Get-Process explorer -ErrorAction SilentlyContinue)) { Start-Process explorer.exe }
+    Restart-Explorer
     Start-Sleep 6
     $nowB = [byte[]](Get-ItemProperty $k).Settings
-    Check 'taskbar' 'the taskbar setting is back exactly as it was' ([BitConverter]::ToString($nowB) -eq [BitConverter]::ToString($orig)) ''
+    $restored = ([BitConverter]::ToString($nowB) -eq [BitConverter]::ToString($orig))
+    Check 'taskbar' 'the taskbar setting is back exactly as it was' $restored ''
+    if ($restored) { Remove-Item -LiteralPath $backup -Force -ErrorAction SilentlyContinue }
   }
 }
 
 # ---- the Japanese input method, installed for the test and removed again (two elevated prompts the person accepts) --------------------------------------
+# Elevated commands are passed as an encoded command (Base64 of UTF-16), never written to a script file in %TEMP%: another program running as the same user
+# could change such a file between it being written and the Windows prompt being accepted. Each value is quoted as a literal.
+function ConvertTo-PsLiteral([string]$s) { "'" + ($s -replace "'", "''") + "'" }
+function Invoke-Elevated([string]$command) {
+  $enc = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($command))
+  Start-Process powershell -Verb RunAs -WindowStyle Hidden -Wait -ArgumentList @('-NoProfile', '-EncodedCommand', $enc)
+}
 function Install-ImeForTest([string[]]$langs = @('ja-JP')) {
   $script:ImeLangs = $langs
   $script:ImeOrigObj = Get-WinUserLanguageList
   $script:ImeOrigList = @($script:ImeOrigObj | ForEach-Object { $_.LanguageTag })
   Write-Host "language list now: $($script:ImeOrigList -join ', '); installing: $($langs -join ', ')"
-  $ps1 = Join-Path $scratch 'ime-install.ps1'
   $txt = Join-Path $env:TEMP 'hudshell-ime-install.txt'
-  Set-Content -LiteralPath $ps1 -Value ('try { foreach ($l in "' + ($langs -join '","') + '") { Install-Language -Language $l -ErrorAction Stop | Out-Null }; "done" | Set-Content "' + $txt + '" } catch { "error: $_" | Set-Content "' + $txt + '" }')
+  $cmd = 'try { foreach ($l in @(' + (($langs | ForEach-Object { ConvertTo-PsLiteral $_ }) -join ',') + ')) { Install-Language -Language $l -ErrorAction Stop | Out-Null }; ''done'' | Set-Content -LiteralPath ' + (ConvertTo-PsLiteral $txt) + ' } catch { "error: $_" | Set-Content -LiteralPath ' + (ConvertTo-PsLiteral $txt) + ' }'
   Remove-Item $txt -ErrorAction SilentlyContinue
   Say ('A Windows prompt will ask to allow a PowerShell window (it installs the language feature(s) for the IME test: ' + ($langs -join ', ') + '). Accept it (Yes).')
-  try { Start-Process powershell -Verb RunAs -WindowStyle Hidden -Wait -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "`"$ps1`"") } catch { Warn 'ime' 'the install prompt was declined: no IME test'; return $false }
+  try { Invoke-Elevated $cmd } catch { Warn 'ime' 'the install prompt was declined: no IME test'; return $false }
   $res = if (Test-Path $txt) { Get-Content $txt -Raw } else { '' }
   if ($res -notmatch 'done') { Warn 'ime' ("installing the language feature did not work: " + ($res -replace '\s+', ' ')); return $false }
   # add the languages to the language list (it is put back exactly afterwards)
@@ -2122,12 +2289,11 @@ function Install-ImeForTest([string[]]$langs = @('ja-JP')) {
 function Remove-ImeAfterTest {
   if ($script:ImeOrigObj) { Set-WinUserLanguageList $script:ImeOrigObj -Force }
   $langs = if ($script:ImeLangs) { $script:ImeLangs } else { @('ja-JP') }
-  $ps1 = Join-Path $scratch 'ime-uninstall.ps1'
   $txt = Join-Path $env:TEMP 'hudshell-ime-uninstall.txt'
-  Set-Content -LiteralPath $ps1 -Value ('try { foreach ($l in "' + ($langs -join '","') + '") { Uninstall-Language -Language $l -ErrorAction Stop | Out-Null }; "done" | Set-Content "' + $txt + '" } catch { "error: $_" | Set-Content "' + $txt + '" }')
+  $cmd = 'try { foreach ($l in @(' + (($langs | ForEach-Object { ConvertTo-PsLiteral $_ }) -join ',') + ')) { Uninstall-Language -Language $l -ErrorAction Stop | Out-Null }; ''done'' | Set-Content -LiteralPath ' + (ConvertTo-PsLiteral $txt) + ' } catch { "error: $_" | Set-Content -LiteralPath ' + (ConvertTo-PsLiteral $txt) + ' }'
   Remove-Item $txt -ErrorAction SilentlyContinue
   Say 'A Windows prompt will ask once more to remove the language feature(s) again. Accept it (Yes).'
-  try { Start-Process powershell -Verb RunAs -WindowStyle Hidden -Wait -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "`"$ps1`"") } catch { Warn 'ime' 'the removal prompt was declined: the language feature(s) are still installed (remove them in Settings > Time & language)' }
+  try { Invoke-Elevated $cmd } catch { Warn 'ime' 'the removal prompt was declined: the language feature(s) are still installed (remove them in Settings > Time & language)' }
   $removed = (Test-Path $txt) -and ((Get-Content $txt -Raw) -match 'done')
   $now = @((Get-WinUserLanguageList) | ForEach-Object { $_.LanguageTag })
   Check 'ime' 'your language list is back to what it was before the test' (($now -join ',') -eq ($script:ImeOrigList -join ',')) ("was " + ($script:ImeOrigList -join ',') + ", now " + ($now -join ','))
@@ -2138,18 +2304,27 @@ function Remove-ImeAfterTest {
 # HUDshell over a game that runs borderless (windowed fullscreen) on the main screen, with the game in front. The game is found by itself (the
 # foreground program that fills the main screen); its name is never written anywhere. The person keeps their hands off while it runs.
 
-# PresentMon (a free frame-time tool from Intel's GameTechDev, MIT) from its official GitHub release, kept in a git-ignored folder; the file's hash is
-# printed so it can be checked before it is run.
+# PresentMon (a free frame-time tool from Intel's GameTechDev, MIT), a pinned release kept in a git-ignored folder. It is run elevated, so it is only run when
+# its SHA256 equals the one pinned here (the value GitHub publishes for that release asset, checked 2026-11-25); any other file is deleted, never run.
+$script:PresentMonTag = 'v2.6.0'
+$script:PresentMonName = 'PresentMon-2.6.0-x64.exe'
+$script:PresentMonSha256 = 'B2A706BC6AD475749E3B7E3409263AA1E6906D45BDCF993F6DBC0F660188F1AF'
 function Get-PresentMon {
   $dir = Join-Path $root '.claude\scratch-archive\tools'
   New-Item -ItemType Directory -Force $dir | Out-Null
-  $exe = Get-ChildItem $dir -Filter 'PresentMon*.exe' -ErrorAction SilentlyContinue | Select-Object -First 1
-  if (-not $exe) {
-    try { & gh release download -R GameTechDev/PresentMon --pattern '*x64.exe' --dir $dir --clobber 2>&1 | Out-Null } catch { }
-    $exe = Get-ChildItem $dir -Filter 'PresentMon*.exe' -ErrorAction SilentlyContinue | Select-Object -First 1
+  $path = Join-Path $dir $script:PresentMonName
+  if (-not (Test-Path -LiteralPath $path)) {
+    try { & gh release download $script:PresentMonTag -R GameTechDev/PresentMon --pattern $script:PresentMonName --dir $dir --clobber 2>&1 | Out-Null } catch { }
   }
-  if ($exe) { Write-Host ("PresentMon: {0} sha256 {1}" -f $exe.Name, (Get-FileHash $exe.FullName -Algorithm SHA256).Hash) }
-  return $exe
+  if (-not (Test-Path -LiteralPath $path)) { return $null }
+  $hash = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash
+  if ($hash -ne $script:PresentMonSha256) {
+    Warn 'gamesession' "PresentMon was not run: the SHA256 of $($script:PresentMonName) is $hash, not the pinned $($script:PresentMonSha256); the file was deleted"
+    Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
+    return $null
+  }
+  Write-Host ("PresentMon: {0} sha256 {1} (matches the pinned value)" -f $script:PresentMonName, $hash)
+  return Get-Item -LiteralPath $path
 }
 
 # mean frame time, mean frames per second and the 1% low (frames per second of the slowest 1% of frames) from a list of frame times in ms
@@ -2252,13 +2427,11 @@ function Game-ExclAsk($h, $gameWnd) {
 function Suite-GameSession {
   Write-Host "=== gamesession: HUDshell over a real game (borderless) - do not touch mouse/keyboard once the game is found ==="
   $m = @(Get-Monitors) | Where-Object { $_.Primary } | Select-Object -First 1
-  $isGame = { $fg = [GT]::ForegroundWindow(); $pid_ = [GT]::ForegroundPid(); $l = 0; $t = 0; $r = 0; $b = 0; [void][GT]::WindowRect($fg, [ref]$l, [ref]$t, [ref]$r, [ref]$b); $pr = Get-Process -Id $pid_ -ErrorAction SilentlyContinue
-    $pr -and $pr.ProcessName -notmatch '^(hudshell|explorer|WindowsTerminal|pwsh|powershell|claude|conhost|OpenConsole|ApplicationFrameHost|SystemSettings|msedge|chrome|firefox)$' -and [Math]::Abs($l - $m.L) -le 2 -and [Math]::Abs($t - $m.T) -le 2 -and [Math]::Abs($r - $m.R) -le 2 -and [Math]::Abs($b - $m.B) -le 2 }
+  $isGame = { Test-GameInFront $m }
   Say 'Start your game in BORDERLESS (windowed fullscreen) mode on the MAIN screen and get to a steady scene (a menu is fine). Leave it in front; then keep your hands off the keyboard and mouse.'
   if (-not (Wait-Until $isGame 600)) { Warn 'gamesession' 'no borderless game was found in front on the main screen within 10 minutes: skipped'; return }
   Start-Sleep 5
   $gamePid = [GT]::ForegroundPid(); $gameWnd = [GT]::ForegroundWindow()
-  $gameProc = (Get-Process -Id $gamePid).ProcessName
   Write-Host "a borderless game was found in front (process id $gamePid; its name is not recorded)"
   Check 'gamesession' 'a borderless game fills the main screen and is in front' $true
   $pm = Get-PresentMon
@@ -2268,7 +2441,7 @@ function Suite-GameSession {
   try {
     $n = LineCount $log
     $at = "{0},{1}" -f ($m.L + 200), ($m.T + 200)
-    $p = Start-Process $dbg -ArgumentList @('--term', '--inputtest', '--interactive', '--size', '900,520', '--at', $at, '--delay', '2') -PassThru
+    $p = Start-App $dbg (@('--term', '--inputtest', '--interactive', '--size', '900,520', '--at', $at, '--delay', '2'))
     $h = [IntPtr]::Zero
     for ($i = 0; $i -lt 40 -and $h -eq [IntPtr]::Zero; $i++) { Start-Sleep 1; if ($p.HasExited) { break }; $h = [GT]::Find([uint32]$p.Id) }
     Start-Sleep 8
@@ -2278,7 +2451,7 @@ function Suite-GameSession {
     $cx = [int](($st.L + $st.R) / 2); $cy = [int](($st.T + $st.B) / 2)
     Check 'gamesession' 'HUDshell did not take the keyboard from the game when it appeared (the game is still in front)' ([GT]::ForegroundPid() -eq $gamePid)
     # visible over the game: the pixels of its area differ from the same area with HUDshell hidden (Ctrl+Alt+V)
-    $grab = { param($r) $bmp = New-Object System.Drawing.Bitmap ($r[2] - $r[0]), ($r[3] - $r[1]); $g = [System.Drawing.Graphics]::FromImage($bmp); $g.CopyFromScreen($r[0], $r[1], 0, 0, (New-Object System.Drawing.Size ($r[2] - $r[0]), ($r[3] - $r[1]))); $g.Dispose(); $bmp }
+    $grab = { param($r) $bmp = New-Object System.Drawing.Bitmap ($r[2] - $r[0]), ($r[3] - $r[1]); $g = $null; try { $g = [System.Drawing.Graphics]::FromImage($bmp); $g.CopyFromScreen($r[0], $r[1], 0, 0, (New-Object System.Drawing.Size ($r[2] - $r[0]), ($r[3] - $r[1]))); $bmp } catch { $bmp.Dispose(); throw } finally { if ($g) { $g.Dispose() } } }
     $rect = @(($st.L + 40), ($st.T + 40), ($st.R - 40), ($st.B - 40))
     $vis = & $grab $rect
     [GT]::Hotkey(0x56); Start-Sleep -Milliseconds 1500
@@ -2316,7 +2489,6 @@ function Suite-GameSession {
       $csv = Join-Path $scratch 'presentmon.csv'
       Remove-Item -LiteralPath $csv -ErrorAction SilentlyContinue
       Stop-HUDshell
-      $t0 = Get-Date
       try { Start-Process -FilePath $pm.FullName -ArgumentList @('--process_id', "$gamePid", '--output_file', "`"$csv`"", '--timed', '230', '--terminate_after_timed', '--no_console_stats') -Verb RunAs -WindowStyle Hidden } catch { Warn 'gamesession' "PresentMon could not be started (the prompt was declined?): frame times not measured" }
       $started = Wait-Until { Test-Path -LiteralPath $csv } 90
       if ($started) {
@@ -2325,12 +2497,12 @@ function Suite-GameSession {
         Start-Sleep 70
         $aEnd = Get-Date
         # B: HUDshell shown and idle
-        $null = Start-Process $dbg -ArgumentList @('--term', '--inputtest', '--interactive', '--size', '900,520', '--at', $at, '--delay', '2') -PassThru
+        $null = Start-App $dbg (@('--term', '--inputtest', '--interactive', '--size', '900,520', '--at', $at, '--delay', '2'))
         Start-Sleep 12
         $bStart = Get-Date; Start-Sleep 60; $bEnd = Get-Date
         Stop-HUDshell
         # C: HUDshell shown with a shell printing as fast as it can
-        $null = Start-Process $dbg -ArgumentList @('--term', '--inputtest', '--interactive', '--flood', '--size', '900,520', '--at', $at, '--delay', '2') -PassThru
+        $null = Start-App $dbg (@('--term', '--inputtest', '--interactive', '--flood', '--size', '900,520', '--at', $at, '--delay', '2'))
         Start-Sleep 12
         $cStart = Get-Date; Start-Sleep 60; $cEnd = Get-Date
         Stop-HUDshell
@@ -2367,8 +2539,7 @@ Add-Type -MemberDefinition '[DllImport("user32.dll")] public static extern bool 
 function Suite-ExclReal {
   Write-Host "=== exclreal: the exclusive-fullscreen guard against a real game ==="
   $m = @(Get-Monitors) | Where-Object { $_.Primary } | Select-Object -First 1
-  $isGame = { $fg = [GT]::ForegroundWindow(); $pid_ = [GT]::ForegroundPid(); $l = 0; $t = 0; $r = 0; $b = 0; [void][GT]::WindowRect($fg, [ref]$l, [ref]$t, [ref]$r, [ref]$b); $pr = Get-Process -Id $pid_ -ErrorAction SilentlyContinue
-    $pr -and $pr.ProcessName -notmatch '^(hudshell|explorer|WindowsTerminal|pwsh|powershell|claude|conhost|OpenConsole|ApplicationFrameHost|SystemSettings|msedge|chrome|firefox)$' -and [Math]::Abs($l - $m.L) -le 2 -and [Math]::Abs($t - $m.T) -le 2 -and [Math]::Abs($r - $m.R) -le 2 -and [Math]::Abs($b - $m.B) -le 2 }
+  $isGame = { Test-GameInFront $m }
   Say 'Have the game open in EXCLUSIVE fullscreen on the MAIN screen, in front, in a menu or pause. Then keep your hands off the keyboard and mouse. (waiting up to 10 minutes)'
   if (-not (Wait-Until $isGame 600)) { Warn 'exclreal' 'no full-screen game was found in front on the main screen within 10 minutes: skipped'; return }
   Start-Sleep 3
@@ -2380,7 +2551,7 @@ function Suite-ExclReal {
   try {
     $n = LineCount $log
     $at = "{0},{1}" -f ($m.L + 200), ($m.T + 200)
-    $p = Start-Process $dbg -ArgumentList @('--term', '--inputtest', '--interactive', '--size', '900,520', '--at', $at, '--delay', '2') -PassThru
+    $p = Start-App $dbg (@('--term', '--inputtest', '--interactive', '--size', '900,520', '--at', $at, '--delay', '2'))
     $h = [IntPtr]::Zero
     for ($i = 0; $i -lt 40 -and $h -eq [IntPtr]::Zero; $i++) { Start-Sleep 1; if ($p.HasExited) { break }; $h = [GT]::Find([uint32]$p.Id) }
     Start-Sleep 8
@@ -2412,14 +2583,14 @@ function Suite-ExclReal {
 
 # ---- everything that needs a person or the computer's own state, in one sitting (MANUAL) ------------------------------------------------------
 # Order: layouts and IME, scaling 200% once more, sleep and resume, a real game with frame times, then (with -Sandbox) the real prompts through Claude
-# Code and Codex. The monitor unplug and the taskbar states were done already (`hardware`). Nothing here changes a setting by itself.
+# Code and Codex. The monitor unplug and the taskbar states were done already (`hardware`). It changes real settings (display scaling, the taskbar edge and the taskbar-on-all-displays setting, the installed languages and the keyboard layout list, and it restarts Explorer): each is backed up and put back in a finally block, and a backup left by an interrupted run is applied at the next start.
 # Run the named suites in the current state, each on its own (one that stops with an error does not skip the others).
 # HUDSHELL_EV_ONLY="dpi,snap" runs only those (to repeat part of a state without the rest).
 function Run-State([string[]]$names) {
   $only = @(($env:HUDSHELL_EV_ONLY -split ',') | ForEach-Object { $_.Trim().ToLower() } | Where-Object { $_ })
   foreach ($n in $names) {
     if ($only.Count -gt 0 -and $only -notcontains $n.ToLower()) { continue }
-    try { & ('Suite-' + $n) } catch { Write-Host "suite $n stopped with an error: $_" }
+    Invoke-Suite $n { & ('Suite-' + $n) }
   }
 }
 
@@ -2549,17 +2720,7 @@ function Get-TaskbarEdge {
 }
 
 # The text of the LAST dump with a label (a scenario may dump the same label again and again).
-function Get-LastDump($run, [string]$label) {
-  $i = -1
-  for ($k = $run.Count - 1; $k -ge 0; $k--) { if ($run[$k] -match ("DUMP label=" + [regex]::Escape($label) + '(\s|$)')) { $i = $k; break } }
-  if ($i -lt 0) { return @() }
-  $h = -1
-  for ($k = $i + 1; $k -lt $run.Count; $k++) { if ($run[$k] -match '^\d+ terminal dump:') { $h = $k; break } }
-  if ($h -lt 0) { return @() }
-  $out = New-Object System.Collections.Generic.List[string]
-  for ($j = $h + 1; $j -lt $run.Count; $j++) { if ($run[$j] -match '^\d+ terminal dump:') { break }; if ($run[$j] -match '^\d+   \| ?(.*)$') { $out.Add($Matches[1]) } }
-  return $out.ToArray()
-}
+function Get-LastDump($run, [string]$label) { return Get-Dump $run $label -Last }
 
 function Get-PrimaryScale { $m = @(Get-Monitors) | Where-Object { $_.Primary } | Select-Object -First 1; if ($m) { [int]($m.Dpi * 100 / 96) } else { 0 } }
 
@@ -2574,7 +2735,7 @@ function Hw-State([string]$tag, [string]$prompt, [scriptblock]$reached, [int]$ti
   Write-Host "reached: $tag (letting Windows settle for 8 s; keep your hands off the keyboard and mouse from here on)"
   Start-Sleep 8
   $script:CheckTag = " [$tag]"
-  try { & $tests } catch { Write-Host "a test in this state stopped with an error: $_" } finally { $script:CheckTag = '' }
+  try { & $tests } catch { Check 'runner' "a test in this state stopped with an error" $false "$_" } finally { $script:CheckTag = '' }
 }
 
 # The maximize and the half tiles with maximize_area = work: they must stop at the taskbar. Real mouse. Needs a taskbar that is visible on the primary monitor.
@@ -2589,7 +2750,7 @@ function Suite-MaxWork {
   try {
     $n = LineCount $log
     $at = "{0},{1}" -f ($m.WL + 200), ($m.WT + 150)
-    $p = Start-Process $dbg -ArgumentList @('--term', '--inputtest', '--interactive', '--maximize-area', 'work', '--size', '640,360', '--at', $at, '--delay', '2') -PassThru
+    $p = Start-App $dbg (@('--term', '--inputtest', '--interactive', '--maximize-area', 'work', '--size', '640,360', '--at', $at, '--delay', '2'))
     $st = $null
     for ($i = 0; $i -lt 40 -and -not $st; $i++) { Start-Sleep 1; $st = Last-State @(Cut $log $n) }
     Check 'maxwork' 'the window started' ($null -ne $st)
@@ -2630,7 +2791,7 @@ function Suite-SleepResume {
   $p = $null
   try {
     $n = LineCount $log
-    $p = Start-Process $dbg -ArgumentList @('--term', '--sleeptest', '--delay', '2') -PassThru
+    $p = Start-App $dbg (@('--term', '--sleeptest', '--delay', '2'))
     $ready = Wait-Until { $w = Get-Windows @(Cut $log $n) 'sleep'; $w -and $w.N -eq 2 -and ((@(Get-LastDump @(Cut $log $n) 'beat-one') -join "`n") -match 'BEAT-ONE-([5-9]|\d\d)') } 120
     Check 'sleepresume' 'two windows are open and both shells are printing their heartbeat' $ready
     if (-not $ready) { return }
@@ -2735,7 +2896,7 @@ function Suite-MonitorUnplug {
     $n = LineCount $log
     $at = "{0},{1}" -f ($target.WL + 150), ($target.WT + 100)
     $pat = "{0},{1}" -f ($primary.WL + 300), ($primary.WT + 300)
-    $p = Start-Process $dbg -ArgumentList @('--term', '--monitortest', '--at', $at, '--primary-at', $pat, '--delay', '2') -PassThru
+    $p = Start-App $dbg (@('--term', '--monitortest', '--at', $at, '--primary-at', $pat, '--delay', '2'))
     $inside = { param($w, $ms) $cx = [int](($w.L + $w.R) / 2); $cy = [int](($w.T + $w.B) / 2); @($ms | Where-Object { $cx -ge $_.L -and $cx -lt $_.R -and $cy -ge $_.T -and $cy -lt $_.B }).Count -gt 0 }
     $w0 = $null
     for ($i = 0; $i -lt 90 -and -not ($w0 -and $w0.N -eq 3 -and $w0.Wins.Count -eq 3); $i++) { Start-Sleep 1; $w0 = Get-Windows @(Cut $log $n) 'mon'; if ($w0 -and $w0.N -eq 3) { Start-Sleep 2; $w0 = Get-Windows @(Cut $log $n) 'mon' } }
@@ -2838,7 +2999,7 @@ function Suite-TabsUi {
   try {
     $n = LineCount $log
     $at = "{0},{1}" -f ($m.WL + 200), ($m.WT + 150)
-    $p = Start-Process $dbg -ArgumentList @('--term', '--inputtest', '--interactive', '--tabs', 'always', '--shells', '3', '--size', '900,520', '--at', $at, '--delay', '2') -PassThru
+    $p = Start-App $dbg (@('--term', '--inputtest', '--interactive', '--tabs', 'always', '--shells', '3', '--size', '900,520', '--at', $at, '--delay', '2'))
     $u = $null; $st = $null
     for ($i = 0; $i -lt 60 -and -not ($u -and @($u.rects.tabs).Count -eq 3); $i++) { Start-Sleep 1; $u = Last-Ui @(Cut $log $n); $st = Last-State @(Cut $log $n) }
     Check 'tabsui' 'three tabs are on screen' ($u -and @($u.rects.tabs).Count -eq 3)
@@ -2885,7 +3046,7 @@ function Suite-TileOff {
   try {
     $n = LineCount $log
     $at = "{0},{1}" -f ($m.WL + 200), ($m.WT + 150)
-    $p = Start-Process $dbg -ArgumentList @('--term', '--inputtest', '--interactive', '--no-edge-tiling', '--size', '640,360', '--at', $at, '--delay', '2') -PassThru
+    $p = Start-App $dbg (@('--term', '--inputtest', '--interactive', '--no-edge-tiling', '--size', '640,360', '--at', $at, '--delay', '2'))
     $st = $null
     for ($i = 0; $i -lt 40 -and -not $st; $i++) { Start-Sleep 1; $st = Last-State @(Cut $log $n) }
     Check 'tileoff' 'the window started' ($null -ne $st)
@@ -2899,10 +3060,7 @@ function Suite-TileOff {
 }
 
 function Tree-Memory([int]$rootPid) {
-  $all = Get-CimInstance Win32_Process -Property ProcessId, ParentProcessId, Name
-  $ids = New-Object System.Collections.Generic.HashSet[int]; [void]$ids.Add($rootPid)
-  $grew = $true
-  while ($grew) { $grew = $false; foreach ($x in $all) { if ($ids.Contains([int]$x.ParentProcessId) -and -not $ids.Contains([int]$x.ProcessId)) { [void]$ids.Add([int]$x.ProcessId); $grew = $true } } }
+  $ids = Tree-Ids $rootPid
   $host_ = 0; $total = 0
   foreach ($id in $ids) { $pr = Get-Process -Id $id -ErrorAction SilentlyContinue; if ($pr) { $total += $pr.PrivateMemorySize64; if ($id -eq $rootPid) { $host_ = $pr.PrivateMemorySize64 } } }
   return @($host_, $total)
@@ -2911,7 +3069,7 @@ function Suite-Soak {
   Write-Host "=== soak ($SoakSeconds s of continuous output, memory sampled every 15 s) ==="
   Stop-HUDshell
   $n = LineCount $log
-  $p = Start-Process $dbg -ArgumentList @('--term', '--soak', "$SoakSeconds") -PassThru
+  $p = Start-App $dbg (@('--term', '--soak', "$SoakSeconds"))
   $samples = @(); $t0 = Get-Date
   while (-not $p.HasExited -and ((Get-Date) - $t0).TotalSeconds -lt ($SoakSeconds + 60)) {
     Start-Sleep 15
@@ -2988,13 +3146,19 @@ function Ensure-Neutral {
   Start-Sleep -Milliseconds 300
   if ([HudTest.Neutral]::GetForegroundWindow() -ne $h) {
     # Windows does not let a background program take the foreground (the program in front has it); a real click on the test's own window does. The cursor is put back.
+    # Only click when the window under the click point really is the test's own (the neutral window lives in this process): a click into
+    # whatever else is on top would act on that program.
     Add-Type -AssemblyName System.Windows.Forms -ErrorAction SilentlyContinue
     $old = [System.Windows.Forms.Cursor]::Position
     $o = [GT]::Origin($h)
-    $script:NeutralWhere = "window at $($o.X),$($o.Y); a window of process id $([GT]::PidAt([int]($o.X + 150), [int]($o.Y + 45))) is under the click point (the test's own is $PID)"
-    [GT]::MoveTo([int]($o.X + 150), [int]($o.Y + 45)); Start-Sleep -Milliseconds 150
-    [GT]::MouseDown(); [GT]::MouseUp(); Start-Sleep -Milliseconds 400
-    [System.Windows.Forms.Cursor]::Position = $old
+    $cx = [int]($o.X + 150); $cy = [int]($o.Y + 45)
+    $under = [GT]::PidAt($cx, $cy)
+    $script:NeutralWhere = "window at $($o.X),$($o.Y); a window of process id $under is under the click point (the test's own is $PID)"
+    if ($under -eq $PID) {
+      [GT]::MoveTo($cx, $cy); Start-Sleep -Milliseconds 150
+      [GT]::MouseDown(); [GT]::MouseUp(); Start-Sleep -Milliseconds 400
+      [System.Windows.Forms.Cursor]::Position = $old
+    } else { $script:NeutralWhere += '; no click was made' }
   }
   if ([HudTest.Neutral]::GetForegroundWindow() -ne $h -and -not $script:NeutralWarned) {
     $script:NeutralWarned = $true
@@ -3004,7 +3168,15 @@ function Ensure-Neutral {
 function Stop-Neutral {
   $script:NeutralOn = $false
   if ($script:NeutralSync -and $script:NeutralSync.Handle -ne [IntPtr]::Zero) { [void][HudTest.Neutral]::PostMessage([IntPtr]$script:NeutralSync.Handle, 0x10, [IntPtr]::Zero, [IntPtr]::Zero) }
-  try { if ($script:NeutralPs) { Start-Sleep -Milliseconds 300; $script:NeutralPs.Dispose() } } catch { }
+  try {
+    if ($script:NeutralPs) {
+      Start-Sleep -Milliseconds 300
+      $rs = $script:NeutralPs.Runspace
+      $script:NeutralPs.Dispose()
+      if ($rs) { $rs.Close(); $rs.Dispose() }
+    }
+  } catch { Write-Host "note: the neutral window's runspace did not close cleanly: $_" }
+  $script:NeutralPs = $null; $script:NeutralSync = $null
 }
 # ---- the taskbars of the other monitors: docking and presets on every non-primary monitor, with and without a taskbar there -------------------------------
 # Windows 11 keeps all taskbars on the same edge, so "moving a secondary taskbar" means showing or hiding it: the per-user value MMTaskbarEnabled (0 = only the
@@ -3013,9 +3185,7 @@ function Set-MultiTaskbar($value) {
   $k = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced'
   if ($null -eq $value) { Remove-ItemProperty -Path $k -Name MMTaskbarEnabled -ErrorAction SilentlyContinue }
   else { Set-ItemProperty -Path $k -Name MMTaskbarEnabled -Type DWord -Value $value }
-  Stop-Process -Name explorer -Force -ErrorAction SilentlyContinue
-  Start-Sleep 4
-  if (-not (Get-Process explorer -ErrorAction SilentlyContinue)) { Start-Process explorer.exe }
+  Restart-Explorer
   Start-Sleep 8
 }
 function Suite-TbMulti {
@@ -3024,7 +3194,7 @@ function Suite-TbMulti {
   if ($others.Count -eq 0) { Warn 'tbmulti' 'only one monitor: nothing to test'; return }
   $k = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced'
   $orig = (Get-ItemProperty $k -ErrorAction SilentlyContinue).MMTaskbarEnabled
-  $backup = Join-Path $root '.claude\scratch-archive\mmtaskbar-backup.txt'
+  $backup = $script:MmTaskbarBackup
   New-Item -ItemType Directory -Force (Split-Path $backup) | Out-Null
   [IO.File]::WriteAllText($backup, $(if ($null -eq $orig) { 'absent' } else { [string]$orig }))
   $each = {
@@ -3055,6 +3225,7 @@ function Suite-TbMulti {
     Set-MultiTaskbar $orig
     $now = (Get-ItemProperty $k -ErrorAction SilentlyContinue).MMTaskbarEnabled
     Check 'tbmulti' 'the taskbar-on-all-displays setting is back exactly as it was' ($now -eq $orig) $(if ($null -eq $orig) { 'was absent' } else { "was $orig" })
+    if ($now -eq $orig) { Remove-Item -LiteralPath $backup -Force -ErrorAction SilentlyContinue }
     $back = Wait-Until { @(Get-Monitors | Where-Object { -not $_.Primary } | Where-Object { ($_.WR - $_.WL) * ($_.WB - $_.WT) -lt ($_.R - $_.L) * ($_.B - $_.T) }).Count -eq @($before | Where-Object { $_ }).Count } 20
     Check 'tbmulti' 'the other monitors have their taskbars again as before' $back
   }
@@ -3069,7 +3240,7 @@ function Preflight {
   if ($env:HUDSHELL_SKIP_PREFLIGHT -eq '1') { Write-Host 'preflight skipped (HUDSHELL_SKIP_PREFLIGHT=1)'; return $true }
   $m = @(Get-Monitors) | Where-Object { $_.Primary } | Select-Object -First 1
   $ok = $true
-  $ignore = '^(hudshell|WindowsTerminal|pwsh|powershell|conhost|OpenConsole|explorer|claude|ApplicationFrameHost|TextInputHost|SearchHost|ShellExperienceHost|StartMenuExperienceHost)$'
+  $ignore = $script:ShellProcessRx
   foreach ($pr in @(Get-Process)) {
     if ($pr.MainWindowHandle -eq [IntPtr]::Zero -or $pr.ProcessName -match $ignore) { continue }
     if ([HudTest.Win]::IsIconic($pr.MainWindowHandle)) { continue }
@@ -3083,16 +3254,25 @@ function Preflight {
       $ok = $false
     }
   }
-  $old = @(Get-Process hudshell -ErrorAction SilentlyContinue)
-  if ($old.Count -gt 0) { Write-Host "preflight: $($old.Count) leftover HUDshell process(es) stopped"; Stop-HUDshell }
+  # A HUDshell that is not one of the tests' own (not under this repository or the scratch folder) is the person's copy: report it, never kill it.
+  $other = @(Other-HUDshellProcesses)
+  if ($other.Count -gt 0) {
+    Write-Host ">>> PREFLIGHT: a HUDshell that is not a test copy is running ($(($other | ForEach-Object { "pid $($_.Id) $($_.Path)" }) -join '; ')). It holds the hotkeys and would be in the way: quit it, then start the run again."
+    $ok = $false
+  }
+  $old = @(Test-HUDshellProcesses)
+  if ($old.Count -gt 0) { Write-Host "preflight: $($old.Count) leftover test HUDshell process(es) stopped"; Stop-HUDshell }
   Write-Host ("preflight: main screen {0}x{1}, scaling {2}%, taskbar {3}; {4}" -f ($m.R - $m.L), ($m.B - $m.T), (Get-PrimaryScale), (Get-TaskbarEdge), $(if ($ok) { 'nothing in the way' } else { 'STOPPED' }))
   return $ok
 }
-if (@($want | Where-Object { $manualSuites -notcontains $_ }).Count -gt 0) { if (-not (Preflight)) { Write-Host 'The run did not start (preflight).'; exit 3 } }
+if (@($want | Where-Object { $manualSuites -notcontains $_ -and $_ -ne 'static' }).Count -gt 0) { if (-not (Preflight)) { Write-Host 'The run did not start (preflight).'; exit 3 } }
+if (@($want | Where-Object { $_ -ne 'static' }).Count -gt 0) { Restore-LeftoverSettings }
 
 foreach ($s in $want) {
-  $script:NeutralOn = ($manualSuites -notcontains $s)
+  # The static suite only reads files and runs cargo: it never sends keys or clicks, so it needs no neutral window.
+  $script:NeutralOn = ($manualSuites -notcontains $s -and $s -ne 'static')
   Ensure-Neutral
+  Invoke-Suite $s {
   switch ($s) {
     'static' { Suite-Static }
     'keys' { Suite-Keys }
@@ -3156,7 +3336,8 @@ foreach ($s in $want) {
     'config' { Suite-Config }
     'soak' { Suite-Soak }
     'real' { Suite-Real }
-    default { Write-Host "unknown suite $s" }
+    default { Check 'runner' "suite '$s' exists" $false 'unknown suite name (see the list at the top of this script)' }
+  }
   }
 }
 Stop-HUDshell
@@ -3168,5 +3349,11 @@ $pass = @($script:R | Where-Object Status -eq 'PASS').Count
 $fail = @($script:R | Where-Object Status -eq 'FAIL').Count
 $warn = @($script:R | Where-Object Status -eq 'WARN').Count
 Write-Host "PASS $pass   FAIL $fail   WARN $warn"
-Remove-Item -Recurse -Force $scratch -ErrorAction SilentlyContinue
+if ($pass + $fail -eq 0) { Write-Host 'No check ran at all: that is a failure.'; $fail = 1 }
+# The scratch folder holds the backup of the person's config.json while the config suites run: keep it if a check that
+# restores or compares the config failed, or if the config is not back as it was.
+$keep = @($script:R | Where-Object { $_.Status -eq 'FAIL' -and $_.Suite -in 'release', 'config' }).Count -gt 0
+if ($script:hadCfg -and (Test-Path -LiteralPath $cfgPath) -and $script:cfgHash -and ((Get-FileHash -LiteralPath $cfgPath).Hash -ne $script:cfgHash)) { $keep = $true }
+if ($keep) { Write-Host "Kept $scratch : it holds the backup of your config.json ($($script:cfgBak))" }
+else { Remove-Item -LiteralPath $scratch -Recurse -Force -ErrorAction SilentlyContinue }
 exit $fail

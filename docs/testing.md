@@ -10,7 +10,15 @@ scripts\test-all.ps1 -Suite ui,config     # selected suites
 scripts\test-all.ps1 -Suite real -Sandbox C:\path\to\trusted\folder
 ```
 
-The runner prints PASS / FAIL / WARN per check and exits with the number of failures.
+The runner needs PowerShell 7.0 or later (`#Requires`; the build script needs 7.4). It prints PASS / FAIL / WARN per check and exits with the number of failures.
+A check cannot go missing quietly any more: each suite runs inside a guard that records a FAIL when the suite throws, when it records no result at
+all, or when a script error (indexing `$null`, a method on `$null`) was raised while it ran; a suite name that does not exist is a FAIL too, and so is a
+run in which no check ran. The `static` suite fails (it does not pass) when the release exe, the harness exe or a UI file is missing, and the runner
+sends no key or click for `static`.
+At the start of a run the previous `hudshell-test.log` is set aside as `hudshell-test.log.old` (git ignores it), so the log the checks read stays short.
+A `hudshell.exe` that is not under this repository or the run's scratch folder is the person's own copy: the preflight reports it and stops (exit code 3)
+instead of killing it. If a run is stopped while it changes the taskbar settings, the backup it left is applied at the next start; if the config
+suites fail, the scratch folder with the backup of `config.json` is kept and its path is printed.
 
 **Before you run it:** the `ui`, `clickfocus`, `autotest`, `clipboard`, `hideshow`, `input` and `cost` suites send real hotkeys
 (Ctrl+Alt+letter) and some move and click the real mouse (`input` also drags and resizes the window; `kbd` switches the keyboard layout to German and French while it runs and back at the end, so Windows shows it for every window meanwhile) or paste with the real keyboard, so do not use the
@@ -49,7 +57,7 @@ clipboard text and restores it. `scrollback`, `ghost` and `attention` send no OS
 | `gamepos` | `game_positions` with the program in front faked (no OS input): the window goes back to the place given while that program was in front, a program with no place and the desktop shell leave it alone, no program names in the log, nothing happens with the setting off; the real lookup of the program in front is checked for its shape only |
 | `exclguard` | `exclusive_guard` / `exclusive_programs` with the program in front faked (no OS input): Ctrl+Alt+G is refused for a listed program (tray notice, no program names in the log), works for any other, and works for a listed one with the guard off |
 | `altmove` | a shell in the alternate screen (what full-screen programs use) is detached into its own window: still in the alternate screen, same text (no OS input) |
-| `monitorunplug` | MANUAL, not part of `all`: three windows open (two on one monitor, one on another); a person unplugs that monitor's cable and later plugs it back; checks the windows land on the monitors that are left, the one on another monitor stays, a rescued window keeps its logical size and they are not stacked, nothing crashes, and all stay on screen when the monitor returns. Run: `scripts	est-all.ps1 -Suite monitorunplug` |
+| `monitorunplug` | MANUAL, not part of `all`: three windows open (two on one monitor, one on another); a person unplugs that monitor's cable and later plugs it back; checks the windows land on the monitors that are left, the one on another monitor stays, a rescued window keeps its logical size and they are not stacked, nothing crashes, and all stay on screen when the monitor returns. Run: `scripts\test-all.ps1 -Suite monitorunplug` |
 | `wvbounds` | the web view covers the whole window after resizes, docking, layouts and a detach in two windows (14 states) and the 2-second self-check never had to correct it (no OS input) |
 | `tileoff` | `edge_tiling = false`: with the real mouse, dropping the window on an outer screen edge does not tile it |
 | `costwin` | memory and idle CPU of the process tree with four shells in one window, then the same four shells in four windows (no OS input) |
@@ -102,7 +110,7 @@ warns once (`neutral`); the keys then go to that program. The manual suites do n
 
 ## The hardware session (manual, one sitting)
 
-Some things only a person or the computer's own state can change: the taskbar, display scaling, a monitor's cable, sleep. `scripts	est-all.ps1 -Suite hardware`
+Some things only a person or the computer's own state can change: the taskbar, display scaling, a monitor's cable, sleep. `scripts\test-all.ps1 -Suite hardware`
 covers all of them in one run, so nothing has to be repeated. It never changes these settings itself: it says what to do in Windows' settings (console, a beep and
 a notification), notices by itself when it was done, waits 8 seconds, and runs the tests that belong to that state. A step that is not done within 5 minutes is
 skipped with a warning, never failed. Keep hands off the mouse and keyboard while tests run (they use real input). Put the taskbar and scaling back afterwards.

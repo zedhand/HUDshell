@@ -142,7 +142,7 @@ itself, and put everything back (each restore was checked). The person only acce
 
 ## Hardware session (2026-11-21): taskbar, scaling, real unplug; three defects found and fixed
 
-One manual sitting (`scripts	est-all.ps1 -Suite hardware`, the person changing the taskbar and scaling in Windows' settings and unplugging a cable; the
+One manual sitting (`scripts\test-all.ps1 -Suite hardware`, the person changing the taskbar and scaling in Windows' settings and unplugging a cable; the
 taskbar-edge and sleep parts were skipped: this Windows cannot move the taskbar, and the script was not allowed to put the computer to sleep).
 **55 pass, 7 fail**, all 7 in one state, explained below.
 
