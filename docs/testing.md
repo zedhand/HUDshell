@@ -89,6 +89,8 @@ switches tabs on Ctrl+Alt+1 to 9). The runner therefore keeps a small window of 
 refuses to give it the foreground (a background program may not take it), clicks it with the real mouse (the cursor is put back). If another program's window stays above it (seen once with a browser window in front), even that fails and the run
 warns once (`neutral`); the keys then go to that program. The manual suites do not use it. Leave the window alone while a suite runs.
 
+**Preflight.** Before any default suite the runner stops with exit code 3 and a message if a program's window fills the main screen (a game, a full-screen video), and stops leftover HUDshell processes; `HUDSHELL_SKIP_PREFLIGHT=1` skips it. Its refusal path has not been exercised yet.
+
 ## Games, a controller and sleep (manual)
 
 - `-Suite finale`: the Chinese and Korean input methods (two Windows prompts), then `gamesession` with a controller and frame times, then real sleep (the game and any streaming program must be closed first).

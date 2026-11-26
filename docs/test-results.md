@@ -1,16 +1,23 @@
 # Test results
 
 Machine: Windows 11 build 26300, WebView2 Runtime 157.x, Rust 1.99 (MSVC), PowerShell 7.7, Claude Code 2.1.328 (2.1.329 on 2026-11-20),
-Codex CLI 0.170.0, three displays (all at 100% scaling). Latest full regression: 2026-11-21 with `scripts/test-all.ps1`.
+Codex CLI 0.170.0, three displays (all at 100% scaling). Latest full regression: 2026-11-22 with `scripts/test-all.ps1` (545 pass, 0 fail, 3 warnings).
 "Tested" means observed in a log, a cell-text dump or a screenshot; anything not listed is in [known-gaps.md](known-gaps.md).
+
+## Full run after the exclusive-fullscreen guard and the hotkey change (2026-11-22, `scripts/test-all.ps1`, no sandbox, commit f7cef9e plus the preflight in the script)
+
+**545 pass, 0 fail, 3 warnings** (the two intentional `autotest` skips for the Claude Code and Codex dialogs, and the AltGr+Q limit on the German layout). Per suite: static 16, keys 6, width 3, hideshow 3, clickfocus 3, clipboard 3, autotest 22, ui 33, scrollback 8, ghost 14,
+attention 10, policy 12, place 28, dpi 9, text 13, reload 9, restore 7, recover 6, windows 19, winrestore 9, winmove 11, costwin 5, tileoff 2, tabsedit 6, tabsui 4, gamepos 8, exclguard 6, altmove 3, wvbounds 3, qol 16, sessions 12, shells 34, layout 35, input 26, snap 64, windowsnap 10, kbd 14, cost 5,
+release 20, config 24, soak 4. Run unattended: the person only kept their hands off. The preflight passed (main screen 2560x1440 at 100%, taskbar at the bottom, nothing filling the screen); the neutral window got to the front (no `neutral` warning) with the person's browser on the second screen, and VS Code did not open.
+**Not run:** the real-prompt suite (`real`, skipped on purpose), the manual suites, anything that needs a game, and the **refusal path of the preflight** (it was only run with nothing in the way). The earlier note that the neutral window was not shown to work holds only for a browser window in front.
 
 ## Keys that reached Windows Terminal (2026-11-22): a test hazard and a hotkey change
 
 Twice during `ui` runs VS Code opened by itself (the process was started by Windows Terminal, which opens its defaults file in the default editor on **Ctrl+Alt+,**). The `ui` suite presses that chord for HUDshell's previous-corner hotkey while
 Windows Terminal is in front. A probe with HUDshell running showed the chord reaches Windows Terminal even though HUDshell has registered it (and without HUDshell too); Ctrl+Alt+. , Ctrl+Alt+= and Ctrl+Alt+- did not. Windows Terminal also binds Ctrl+Alt+1 to 9
 (switch tab), which are HUDshell's shell-jump hotkeys (not probed). **Changes:** the default previous-corner hotkey is now Ctrl+Alt+Shift+. (an existing `config.json` keeps whatever it has); Ctrl+Alt+1 to 9 were kept and documented; the runner keeps a neutral window of
-its own in front for the keys. After the change `ui` passed 33 of 33 and VS Code did not open (that run could not bring the neutral window to the front, so the absence of the leak comes from the changed hotkey, not from the neutral window). **The neutral window was not shown to work:** with a browser
-window in front it stayed behind that window even though it is topmost and a real click on it was tried, and the run warned (`neutral`); it has **not** been tried with a normal window (such as Windows Terminal) in front. Run: `ui` 33 pass (1 warning), `static` 16, `config` 24, `hideshow` 3,
+its own in front for the keys. After the change `ui` passed 33 of 33 and VS Code did not open (that run could not bring the neutral window to the front, so the absence of the leak comes from the changed hotkey, not from the neutral window). **The neutral window was not shown to work in that run:** with a browser
+window in front it stayed behind that window even though it is topmost and a real click on it was tried, and the run warned (`neutral`). In the full run later the same day (the browser moved to the second screen) it worked; a window that covers the main screen is the case it cannot handle, which the preflight now refuses. Run: `ui` 33 pass (1 warning), `static` 16, `config` 24, `hideshow` 3,
 the 81 unit tests, clippy clean; the other suites that press hotkeys were not re-run.
 
 ## A game in exclusive fullscreen (2026-11-22, `gamesession` with the person's answers): HUDshell cannot be used over it

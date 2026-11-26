@@ -53,6 +53,7 @@ Everything here is either untested or not implemented. Verified behaviour is in 
 
 ## Partly verified
 
+- The test runner's preflight (stops when a program fills the main screen) passed with nothing in the way; its refusal path was not exercised. The neutral window for the tests' keys worked in the full run of 2026-11-22 but not with a browser window in front.
 - Tray icon: lives in the Windows 11 overflow flyout until pinned; pinned-on-taskbar case not checked.
 - Click-through delivering input to the window underneath is proven by hit-testing, not by a recorded receiver.
 - Light theme (`paper`) with programs that assume a dark background; the 16 ANSI colours are fixed.

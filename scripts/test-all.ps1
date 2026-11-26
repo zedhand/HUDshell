@@ -2994,6 +2994,31 @@ function Stop-Neutral {
 }
 $manualSuites = @('gamesession', 'finale', 'exclreal', 'hardware', 'everything', 'remaining', 'monitorunplug', 'sleepresume', 'kbdany', 'maxwork', 'scaleprobe')
 
+# ---- preflight: things that would make a run with real keys and mouse go wrong -----------------------------------------------------------------------
+# A program whose window fills the main screen (a game, a full-screen video) would get the test's keys and clicks and could cover its windows; a leftover HUDshell
+# from an earlier run would hold the hotkeys. The run stops at once with a message instead of failing halfway. HUDSHELL_SKIP_PREFLIGHT=1 skips it.
+function Preflight {
+  if ($env:HUDSHELL_SKIP_PREFLIGHT -eq '1') { Write-Host 'preflight skipped (HUDSHELL_SKIP_PREFLIGHT=1)'; return $true }
+  $m = @(Get-Monitors) | Where-Object { $_.Primary } | Select-Object -First 1
+  $ok = $true
+  $ignore = '^(hudshell|WindowsTerminal|pwsh|powershell|conhost|OpenConsole|explorer|claude|ApplicationFrameHost|TextInputHost|SearchHost|ShellExperienceHost|StartMenuExperienceHost)$'
+  foreach ($pr in @(Get-Process)) {
+    if ($pr.MainWindowHandle -eq [IntPtr]::Zero -or $pr.ProcessName -match $ignore) { continue }
+    if ([HudTest.Win]::IsIconic($pr.MainWindowHandle)) { continue }
+    $l = 0; $t = 0; $r = 0; $b = 0
+    if (-not [GT]::WindowRect($pr.MainWindowHandle, [ref]$l, [ref]$t, [ref]$r, [ref]$b)) { continue }
+    if ([Math]::Abs($l - $m.L) -le 2 -and [Math]::Abs($t - $m.T) -le 2 -and [Math]::Abs($r - $m.R) -le 2 -and [Math]::Abs($b - $m.B) -le 2) {
+      Write-Host ">>> PREFLIGHT: a window of '$($pr.ProcessName)' fills the main screen. Close it, minimize it or move it to another screen, then start the run again."
+      $ok = $false
+    }
+  }
+  $old = @(Get-Process hudshell -ErrorAction SilentlyContinue)
+  if ($old.Count -gt 0) { Write-Host "preflight: $($old.Count) leftover HUDshell process(es) stopped"; Stop-HUDshell }
+  Write-Host ("preflight: main screen {0}x{1}, scaling {2}%, taskbar {3}; {4}" -f ($m.R - $m.L), ($m.B - $m.T), (Get-PrimaryScale), (Get-TaskbarEdge), $(if ($ok) { 'nothing in the way' } else { 'STOPPED' }))
+  return $ok
+}
+if (@($want | Where-Object { $manualSuites -notcontains $_ }).Count -gt 0) { if (-not (Preflight)) { Write-Host 'The run did not start (preflight).'; exit 3 } }
+
 foreach ($s in $want) {
   $script:NeutralOn = ($manualSuites -notcontains $s)
   Ensure-Neutral
