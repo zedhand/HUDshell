@@ -53,7 +53,7 @@ Everything here is either untested or not implemented. Verified behaviour is in 
 
 ## Partly verified
 
-- The test runner's preflight (stops when a program fills the main screen) passed with nothing in the way; its refusal path was not exercised. The neutral window for the tests' keys worked in the full run of 2026-11-22 but not with a browser window in front.
+- The test runner's preflight (stops when a program fills the main screen) passed with nothing in the way, and refused (exit code 3) with a stand-in window and with a real full-screen program (Edge kiosk) in front; it stops a leftover HUDshell. **Gap:** a maximized window (not exactly screen-sized, e.g. Notepad) is not refused. A real game was not tried. The neutral window for the tests' keys worked in the full run of 2026-11-22 but not with a browser window in front.
 - Tray icon: lives in the Windows 11 overflow flyout until pinned; pinned-on-taskbar case not checked.
 - Click-through delivering input to the window underneath is proven by hit-testing, not by a recorded receiver.
 - Light theme (`paper`) with programs that assume a dark background; the 16 ANSI colours are fixed.

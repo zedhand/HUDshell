@@ -4,12 +4,18 @@ Machine: Windows 11 build 26300, WebView2 Runtime 157.x, Rust 1.99 (MSVC), Power
 Codex CLI 0.170.0, three displays (all at 100% scaling). Latest full regression: 2026-11-22 with `scripts/test-all.ps1` (545 pass, 0 fail, 3 warnings).
 "Tested" means observed in a log, a cell-text dump or a screenshot; anything not listed is in [known-gaps.md](known-gaps.md).
 
+## Preflight refusal path (2026-11-25, `scripts/test-all.ps1 -Suite static`)
+
+A borderless topmost window the size of the main screen (2560x1440), owned by a copy of Windows PowerShell renamed `fakegame.exe` (so the preflight's ignore list did not apply), was put in front. The run printed `>>> PREFLIGHT: a window of 'fakegame' fills the main screen. Close it, minimize it or move it to another screen, then start the run again.`, then `preflight: main screen 2560x1440, scaling 100%, taskbar bottom; STOPPED` and `The run did not start (preflight).`, and exited with code 3. No suite ran. The cover window was closed afterwards. The passing path was already shown by the full run of 2026-11-22.
+Three more cases the same day, in one run (each with `-Suite static`): (1) a real HUDshell running: the preflight printed `1 leftover HUDshell process(es) stopped`, the process was gone afterwards, the run went on and static passed. (2) A real program, Edge in kiosk (full-screen) mode with a throwaway profile: refused, exit code 3, `a window of 'msedge' fills the main screen`. (3) Notepad maximized: **not caught**, the run started (exit 0) because a maximized window leaves the taskbar free and so is not exactly screen-sized. Everything started was closed and the throwaway profile deleted.
+**Not tested:** a real game; whether a maximized window really blocks the neutral window for the tests' keys (the earlier warning with a browser in front suggests it can).
+
 ## Full run after the exclusive-fullscreen guard and the hotkey change (2026-11-22, `scripts/test-all.ps1`, no sandbox, commit f7cef9e plus the preflight in the script)
 
 **545 pass, 0 fail, 3 warnings** (the two intentional `autotest` skips for the Claude Code and Codex dialogs, and the AltGr+Q limit on the German layout). Per suite: static 16, keys 6, width 3, hideshow 3, clickfocus 3, clipboard 3, autotest 22, ui 33, scrollback 8, ghost 14,
 attention 10, policy 12, place 28, dpi 9, text 13, reload 9, restore 7, recover 6, windows 19, winrestore 9, winmove 11, costwin 5, tileoff 2, tabsedit 6, tabsui 4, gamepos 8, exclguard 6, altmove 3, wvbounds 3, qol 16, sessions 12, shells 34, layout 35, input 26, snap 64, windowsnap 10, kbd 14, cost 5,
 release 20, config 24, soak 4. Run unattended: the person only kept their hands off. The preflight passed (main screen 2560x1440 at 100%, taskbar at the bottom, nothing filling the screen); the neutral window got to the front (no `neutral` warning) with the person's browser on the second screen, and VS Code did not open.
-**Not run:** the real-prompt suite (`real`, skipped on purpose), the manual suites, anything that needs a game, and the **refusal path of the preflight** (it was only run with nothing in the way). The earlier note that the neutral window was not shown to work holds only for a browser window in front.
+**Not run:** the real-prompt suite (`real`, skipped on purpose), the manual suites, anything that needs a game, and the refusal path of the preflight (tested separately on 2026-11-25, see above). The earlier note that the neutral window was not shown to work holds only for a browser window in front.
 
 ## Keys that reached Windows Terminal (2026-11-22): a test hazard and a hotkey change
 
