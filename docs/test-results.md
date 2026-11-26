@@ -1,8 +1,12 @@
 # Test results
 
 Machine: Windows 11 build 26300, WebView2 Runtime 157.x, Rust 1.99 (MSVC), PowerShell 7.7, Claude Code 2.1.328 (2.1.329 on 2026-11-20),
-Codex CLI 0.170.0, three displays (all at 100% scaling on 2026-11-26). Latest full regression: 2026-11-26 with `scripts/test-all.ps1` (506 pass, 3 fail, 6 warnings; the three fails are fixed, see the first section).
+Codex CLI 0.170.0, three displays (all at 100% scaling on 2026-11-26). Latest full regression: 2026-11-26 with `scripts/test-all.ps1` (506 pass, 3 fail, 6 warnings; the three fails are fixed, see the next section).
 "Tested" means observed in a log, a cell-text dump or a screenshot; anything not listed is in [known-gaps.md](known-gaps.md).
+
+## Mixed scaling: the left monitor at 150% (2026-11-26, `-Suite mixscale`, new manual suite)
+
+The script set the left 1920x1080 monitor (the one that had been at 100%) to 150% with the same display-scaling call as the older scaling suites (the owner allowed it), ran `place`, `dpi`, `input` and `snap` with the main screen at 100%, and put the left monitor back at 100% (checked: "is back at 100%"). First run: **127 pass, 1 fail**. The fail was a test assumption: `place`'s "dragging far from every edge is left alone" dropped the 900x520 window (1350x780 at 150%) at a fixed y of 300 on a 1080 px monitor, so its bottom edge sat on the work area's bottom and it snapped (in=400,300, out=400,288). The drop point is now y 150 (`src/harness.rs`, the check in the script). Repeat with only `place` at 150% (`HUDSHELL_EV_ONLY=place`): 29 pass, 0 fail, 0 warn. `dpi`, `input` and `snap` ran in the first run only (passed there, with the real mouse across the monitors at mixed scalings); they were not repeated after the small test change, which does not touch them. Other scalings of this monitor (125%, 175%) were not repeated; 150% on the third (480 px) monitor is not offered.
 
 ## Full run after the PowerShell audit fixes (2026-11-26, `scripts/test-all.ps1`, commit 7bec8bd)
 

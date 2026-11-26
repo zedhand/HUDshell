@@ -601,7 +601,7 @@ const PLACE: &[(u64, &str)] = &[
     (10500, "state:font-down"),
     (11000, "dump:font-down"),
     (11300, "moving:5,7"),
-    (11600, "moving:400,300"),
+    (11600, "moving:400,150"),
     (12000, "quit"),
 ];
 

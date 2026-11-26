@@ -88,7 +88,7 @@ the registry setting is reported as such), **sleep and resume** (`sleepresume`),
 is drawn over it, does not take the keyboard, is click-through, Ctrl+Alt+G takes the keyboard and gives it back to the very same game window, the hotkeys work with the game in front;
 then frame times from PresentMon with HUDshell not running, shown and idle, and shown with a shell printing flat out) and the **real prompts** through Claude Code and Codex (`real`).
 PresentMon is Intel's frame-time tool, downloaded from its official GitHub release into a git-ignored folder, its Authenticode signature and hash printed; it needs administrator
-rights, so Windows asks once. `HUDSHELL_HW_SKIP` takes `layouts`, `ime`, `scaling`, `taskbar`, `sleep`, `game`, `real`. `-Suite scaleprobe` shows each screen's scaling (read only). `-Suite tbmulti` (manual, restarts Explorer twice) runs the corner-docking, size-preset and font checks on every non-primary monitor with its taskbar shown and then hidden (the per-user value `MMTaskbarEnabled`, backed up and put back).
+rights, so Windows asks once. `HUDSHELL_HW_SKIP` takes `layouts`, `ime`, `scaling`, `taskbar`, `sleep`, `game`, `real`. `-Suite scaleprobe` shows each screen's scaling (read only). `-Suite mixscale` (manual) sets every other screen that offers 150% to 150% (the main screen is left alone), runs place, dpi, input and snap, and puts each back and checks it (the display-scaling call is the one the older scaling suites use). `-Suite tbmulti` (manual, restarts Explorer twice) runs the corner-docking, size-preset and font checks on every non-primary monitor with its taskbar shown and then hidden (the per-user value `MMTaskbarEnabled`, backed up and put back).
 
 ## Where the test keys go
 

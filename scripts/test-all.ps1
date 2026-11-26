@@ -9,7 +9,7 @@ HUDshell full test runner (PowerShell 7; the script needs 7.0 or later and is no
     restore recover windows winrestore winmove costwin tileoff tabsedit tabsui gamepos exclguard altmove wvbounds qol sessions shells layout
     input snap windowsnap kbd cost release config soak (+ real with -Sandbox).
   Manual suites (named on purpose, never in `all`): exclreal monitorunplug maxwork tbmulti sleepresume hardware kbdany gamesession
-    everything remaining finale scaleprobe. A name that is not a suite is a FAIL of the run (exit code 1 or more), never a silent pass.
+    everything remaining finale scaleprobe mixscale. A name that is not a suite is a FAIL of the run (exit code 1 or more), never a silent pass.
 
 What it touches (read before running):
   * `ui`, `clickfocus`, `autotest`, `clipboard`, `hideshow` send real hotkeys (Ctrl+Alt+<letter>) and some
@@ -926,7 +926,7 @@ function Place-Once([string[]]$extra) {
   Check 'place' 'a bigger font gives fewer columns (the shell is told the new size)' ($cb -gt 0 -and $cu -gt 0 -and $cu -lt $cb) "$cb -> $cu columns"
   $mv = @($run | Where-Object { $_ -match 'MOVING in=' } | ForEach-Object { Strip $_ })
   Check 'place' 'dragging near the top-left corner snaps flush into it (no gap)' ($mv.Count -ge 1 -and $mv[0] -match "in=5,7 out=0,0,\d+,\d+ handled=1") ($mv[0])
-  Check 'place' 'dragging far from every edge is left alone' ($mv.Count -ge 2 -and $mv[1] -match 'in=400,300 out=400,300,\d+,\d+ handled=0') ($mv[1])
+  Check 'place' 'dragging far from every edge is left alone' ($mv.Count -ge 2 -and $mv[1] -match 'in=400,150 out=400,150,\d+,\d+ handled=0') ($mv[1])
 }
 
 function Suite-Qol {
@@ -2594,6 +2594,15 @@ function Run-State([string[]]$names) {
   }
 }
 
+# Mixed scaling by hand-off: every screen that is not the main one and offers 150% is set to 150% (the main screen stays as it is), the suites that need a
+# second scaling run (place, dpi, input, snap), and each screen's own scaling is put back and checked.
+function Suite-MixScale {
+  Write-Host "=== mixscale: the other screens at 150% (set by the script, put back afterwards): place, dpi, input, snap ==="
+  $others = @(Get-DisplayScales | Where-Object { -not ($_.X -eq 0 -and $_.Y -eq 0) -and $_.Max -ge 150 -and $_.Percent -ne 150 })
+  if ($others.Count -eq 0) { Warn 'mixscale' 'no screen besides the main one is able to switch to 150% (or it is at 150% already): nothing tested'; return }
+  foreach ($o in $others) { Auto-ScaleAt $o.X $o.Y 150 ("the screen at $($o.X),$($o.Y)") { Run-State 'Place', 'Dpi', 'Input', 'Snap' } }
+}
+
 # What is left after `everything`: the taskbar on the right edge, another screen at other scalings, the Chinese and Korean input methods. (The game and sleep
 # parts are separate: `-Suite gamesession` with HUDSHELL_GAME_NOFT=1 and `-Suite sleepresume`.)
 function Suite-Remaining {
@@ -3231,7 +3240,7 @@ function Suite-TbMulti {
   }
 }
 
-$manualSuites = @('gamesession', 'finale', 'exclreal', 'hardware', 'everything', 'remaining', 'monitorunplug', 'sleepresume', 'kbdany', 'maxwork', 'scaleprobe', 'tbmulti')
+$manualSuites = @('gamesession', 'finale', 'exclreal', 'hardware', 'everything', 'remaining', 'monitorunplug', 'sleepresume', 'kbdany', 'maxwork', 'scaleprobe', 'tbmulti', 'mixscale')
 
 # ---- preflight: things that would make a run with real keys and mouse go wrong -----------------------------------------------------------------------
 # A program whose window fills the main screen (a game, a full-screen video) would get the test's keys and clicks and could cover its windows; a leftover HUDshell
@@ -3313,6 +3322,7 @@ foreach ($s in $want) {
     'gamesession' { Suite-GameSession }
     'everything' { Suite-Everything }
     'remaining' { Suite-Remaining }
+    'mixscale' { Suite-MixScale }
     'finale' { Suite-Finale }
     'scaleprobe' {
       Write-Host '=== scaleprobe: the display scaling Windows reports (read only), and a write of the same value back (no change) ==='
