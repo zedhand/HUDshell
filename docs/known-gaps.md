@@ -53,7 +53,7 @@ Everything here is either untested or not implemented. Verified behaviour is in 
 
 ## Partly verified
 
-- A window bigger than a short monitor is not made to fit: on a 1920x480 monitor the default 900x520 window docked into a corner with its bottom edge 48-96 px below the work area (and the screen), and the first press of the size hotkey gave 900x432/900x480 instead of the next preset (1280x720 clamped). Found with `tbmulti` on 2026-11-25; the size presets themselves are clamped to the work area. Not fixed yet.
+- On a monitor shorter than the window (the 1920x480 strip), docking cuts the window to fit (900x464) and, because it then fills the height, the top and bottom corners are the same place: the hotkey alternates left and right instead of visiting four corners. The size hotkey's first press from such a window goes to the nearest preset (clamped to the work area) rather than the next one, by design. Fixed 2026-11-25 (docking used to leave the window hanging 48-96 px past the work area); tested on the strip with `tbmulti`, not with a real game.
 - The test runner's preflight (stops when a program fills the main screen) passed with nothing in the way, and refused (exit code 3) with a stand-in window and with a real full-screen program (Edge kiosk) in front; it stops a leftover HUDshell. It also refuses a maximized window (tested with Notepad and a browser). A real game was not tried. The neutral window for the tests' keys worked in the full run of 2026-11-22 but not with a browser window in front.
 - Tray icon: lives in the Windows 11 overflow flyout until pinned; pinned-on-taskbar case not checked.
 - Click-through delivering input to the window underneath is proven by hit-testing, not by a recorded receiver.

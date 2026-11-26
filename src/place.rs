@@ -54,6 +54,12 @@ pub fn corner_pos(corner: usize, w: i32, h: i32, work: Rect, margin: i32) -> (i3
     }
 }
 
+/// The size a `w` x `h` window needs to have to be docked in a corner of a work area `margin` pixels in: unchanged when it fits, otherwise cut to what is left
+/// of the work area, so a window bigger than a short monitor does not hang over its edge.
+pub fn fit_for_docking(w: i32, h: i32, work: Rect, margin: i32) -> (i32, i32) {
+    ((work.w() - 2 * margin).max(1).min(w), (work.h() - 2 * margin).max(1).min(h))
+}
+
 /// The corner `step` places after `from` (clockwise for +1, counter-clockwise for -1).
 pub fn step_corner(from: usize, step: i32) -> usize {
     ((from as i32 + step).rem_euclid(CORNERS as i32)) as usize
@@ -422,6 +428,19 @@ mod tests {
     #[test]
     fn a_window_bigger_than_the_screen_is_pinned_top_left() {
         assert_eq!(corner_pos(2, 5000, 3000, WORK, 8), (8, 8));
+    }
+
+    #[test]
+    fn a_window_taller_than_a_short_monitor_is_cut_to_fit_for_docking() {
+        // a 1920x480 monitor with no taskbar and the default 900x520 window, 8 px margin
+        let strip = Rect::new(0, 0, 1920, 480);
+        assert_eq!(fit_for_docking(900, 520, strip, 8), (900, 464));
+        let (w, h) = fit_for_docking(900, 520, strip, 8);
+        let (_, y) = corner_pos(2, w, h, strip, 8);
+        assert_eq!(y + h, 480 - 8, "the bottom edge sits one margin above the bottom of the work area");
+        // a window that fits is left alone, and so is the width of one that is only too tall
+        assert_eq!(fit_for_docking(640, 360, strip, 8), (640, 360));
+        assert_eq!(fit_for_docking(5000, 400, strip, 8), (1904, 400));
     }
 
     #[test]

@@ -934,11 +934,23 @@ unsafe fn move_to_corner(hwnd: HWND, step: i32) {
     let work = unsafe { work_area(hwnd) };
     let margin = unsafe { scaled(hwnd, cfg().snap_margin) };
     let here = place::corner_of(win, work);
-    let (hx, hy) = place::corner_pos(here, win.w(), win.h(), work, margin);
-    let target = if (win.l - hx).abs() > 4 || (win.t - hy).abs() > 4 { here } else { place::step_corner(here, step) };
-    let (x, y) = place::corner_pos(target, win.w(), win.h(), work, margin);
-    let _ = unsafe { SetWindowPos(hwnd, None, x, y, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE) };
-    log(&format!("corner {} -> {target} at ({x}, {y})", place::corner_of(win, work)));
+    // a window bigger than the work area (a short monitor) is cut to fit; otherwise the size is kept
+    let (w, h) = place::fit_for_docking(win.w(), win.h(), work, margin);
+    let resized = (w, h) != (win.w(), win.h());
+    let (hx, hy) = place::corner_pos(here, w, h, work, margin);
+    let mut target = if resized || (win.l - hx).abs() > 4 || (win.t - hy).abs() > 4 { here } else { place::step_corner(here, step) };
+    // a window as tall (or wide) as the work area has corners that are the same place: go on to the next one that really is somewhere else
+    for _ in 1..place::CORNERS {
+        let (px, py) = place::corner_pos(target, w, h, work, margin);
+        if !resized && (px - win.l).abs() <= 4 && (py - win.t).abs() <= 4 {
+            target = place::step_corner(target, step);
+        } else {
+            break;
+        }
+    }
+    let (x, y) = place::corner_pos(target, w, h, work, margin);
+    let _ = unsafe { SetWindowPos(hwnd, None, x, y, w, h, if resized { SWP_NOZORDER | SWP_NOACTIVATE } else { SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE }) };
+    log(&format!("corner {} -> {target} at ({x}, {y}){}", place::corner_of(win, work), if resized { format!(", cut to {w}x{h} to fit") } else { String::new() }));
     unsafe { save_geometry(hwnd) };
 }
 

@@ -771,10 +771,19 @@ function Place-Once([string[]]$extra) {
   $names = 'top-left', 'top-right', 'bottom-right', 'bottom-left'
   $inCorner = { param($a, $i) $okx = if ($i -eq 0 -or $i -eq 3) { ($a.l - $a.wl) -eq $m } else { ($a.wr - $a.r) -eq $m }; $oky = if ($i -le 1) { ($a.t - $a.wt) -eq $m } else { ($a.wb - $a.b) -eq $m }; $okx -and $oky }
   $a = Rc 'c1'; Check 'place' ("first press docks into the nearest corner (" + $names[$first] + ") with the margin") (& $inCorner $a $first) "margin $m"
-  $a = Rc 'c2'; Check 'place' ("next: " + $names[($first + 1) % 4]) (& $inCorner $a (($first + 1) % 4))
-  $a = Rc 'c3'; Check 'place' ("next: " + $names[($first + 2) % 4]) (& $inCorner $a (($first + 2) % 4))
-  $a = Rc 'c4'; Check 'place' ("next: " + $names[($first + 3) % 4]) (& $inCorner $a (($first + 3) % 4))
-  $a = Rc 'back'; Check 'place' ("previous goes counter-clockwise (" + $names[($first + 2) % 4] + ")") (& $inCorner $a (($first + 2) % 4))
+  $shortMon = (([int]$s['start'].work.Split(',')[3] - [int]$s['start'].work.Split(',')[1]) -lt [int](520 * [double](Rc 'c1').dpi / 96) + 2 * $m)
+  if ($shortMon) {
+    # a monitor shorter than the window: the cut window fills the height, so the top and bottom corners are the same place and the presses go left, right, left, right
+    $p = 'c1', 'c2', 'c3', 'c4'
+    for ($q = 1; $q -lt 4; $q++) { $x0 = Rc $p[$q - 1]; $x1 = Rc $p[$q]; Check 'place' ('press ' + ($q + 1) + ' moves the window to the other side (' + $p[$q] + ')') ($x0.l -ne $x1.l) ('{0} -> {1}' -f $x0.l, $x1.l) }
+    $x1 = Rc 'c4'; $x2 = Rc 'back'; Check 'place' 'previous goes back to the other side' ($x1.l -ne $x2.l) ('{0} -> {1}' -f $x1.l, $x2.l)
+    foreach ($k in 'c1', 'c2', 'c3', 'c4', 'back') { $x = Rc $k; Check 'place' "docked window $k lies inside the work area" (($x.l -ge $x.wl) -and ($x.t -ge $x.wt) -and ($x.r -le $x.wr) -and ($x.b -le $x.wb)) ('{0},{1},{2},{3} in {4},{5},{6},{7}' -f $x.l, $x.t, $x.r, $x.b, $x.wl, $x.wt, $x.wr, $x.wb) }
+  } else {
+    $a = Rc 'c2'; Check 'place' ("next: " + $names[($first + 1) % 4]) (& $inCorner $a (($first + 1) % 4))
+    $a = Rc 'c3'; Check 'place' ("next: " + $names[($first + 2) % 4]) (& $inCorner $a (($first + 2) % 4))
+    $a = Rc 'c4'; Check 'place' ("next: " + $names[($first + 3) % 4]) (& $inCorner $a (($first + 3) % 4))
+    $a = Rc 'back'; Check 'place' ("previous goes counter-clockwise (" + $names[($first + 2) % 4] + ")") (& $inCorner $a (($first + 2) % 4))
+  }
   $c1 = Rc 'c1'; $c3 = Rc 'c3'
   Check 'place' 'docking keeps the window size' ((($c1.r - $c1.l) -eq ($c3.r - $c3.l)) -and (($c1.b - $c1.t) -eq ($c3.b - $c3.t)))
   $d = [double](Rc 'size1').dpi / 96
@@ -782,9 +791,14 @@ function Place-Once([string[]]$extra) {
   $a = Rc 'size1'; $ww = $a.wr - $a.wl; $wh = $a.wb - $a.wt
   $ew = [Math]::Min([int](1280 * $d), $ww); $eh = [Math]::Min([int](720 * $d), $wh)
   $full = ($ew -eq $ww) -or ($eh -eq $wh)
-  Check 'place' 'size hotkey: 900x520 -> 1280x720 (scaled, at most the work area), bottom-right anchored' ((($a.r - $a.l) -eq $ew) -and (($a.b - $a.t) -eq $eh) -and ((($a.wr - $a.r) -eq $m) -or ($ew -eq $ww)) -and ((($a.wb - $a.b) -eq $m) -or ($eh -eq $wh))) ("{0}x{1}" -f ($a.r - $a.l), ($a.b - $a.t))
-  $a = Rc 'size2'; Check 'place' 'size hotkey wraps to the smallest preset (640x360)' ((($a.r - $a.l) -eq [int](640 * $d)) -and (($a.b - $a.t) -eq [int](360 * $d)) -and ((($a.wr - $a.r) -eq $m) -or $full)) ("{0}x{1}" -f ($a.r - $a.l), ($a.b - $a.t))
-  $a = Rc 'size3'; Check 'place' 'and on to 900x520 again' ((($a.r - $a.l) -eq [int](900 * $d)) -and (($a.b - $a.t) -eq [int](520 * $d)))
+  if ($wh -lt [int](520 * $d) + 2 * $m) {
+    # a monitor shorter than the 900x520 window: it is cut to fit when docked, the presets are cut to the work area, and the first press goes to the nearest one; only the fit is checked
+    foreach ($k in 'size1', 'size2', 'size3') { $a = Rc $k; Check 'place' "size hotkey on a short monitor: $k stays inside the work area" (($a.l -ge $a.wl) -and ($a.t -ge $a.wt) -and ($a.r -le $a.wr) -and ($a.b -le $a.wb)) ("{0}x{1} in {2}x{3}" -f ($a.r - $a.l), ($a.b - $a.t), $ww, $wh) }
+  } else {
+    Check 'place' 'size hotkey: 900x520 -> 1280x720 (scaled, at most the work area), bottom-right anchored' ((($a.r - $a.l) -eq $ew) -and (($a.b - $a.t) -eq $eh) -and ((($a.wr - $a.r) -eq $m) -or ($ew -eq $ww)) -and ((($a.wb - $a.b) -eq $m) -or ($eh -eq $wh))) ("{0}x{1}" -f ($a.r - $a.l), ($a.b - $a.t))
+    $a = Rc 'size2'; Check 'place' 'size hotkey wraps to the smallest preset (640x360)' ((($a.r - $a.l) -eq [int](640 * $d)) -and (($a.b - $a.t) -eq [int](360 * $d)) -and ((($a.wr - $a.r) -eq $m) -or $full)) ("{0}x{1}" -f ($a.r - $a.l), ($a.b - $a.t))
+    $a = Rc 'size3'; Check 'place' 'and on to 900x520 again' ((($a.r - $a.l) -eq [int](900 * $d)) -and (($a.b - $a.t) -eq [int](520 * $d)))
+  }
   Check 'place' 'font hotkeys: 14 -> 16 -> 15' (($s['font-up'].font -eq '16') -and ($s['font-down'].font -eq '15')) ("up=" + $s['font-up'].font + " down=" + $s['font-down'].font)
   $fsB = Get-DumpField $run 'font-base' 'fs'; $fsU = Get-DumpField $run 'font-up' 'fs'; $fsD = Get-DumpField $run 'font-down' 'fs'
   Check 'place' 'the page applied the font size (14 -> 16 -> 15)' (($fsB -eq '14') -and ($fsU -eq '16') -and ($fsD -eq '15')) "$fsB,$fsU,$fsD"
