@@ -4,6 +4,13 @@ Machine: Windows 11 build 26300, WebView2 Runtime 157.x, Rust 1.99 (MSVC), Power
 Codex CLI 0.170.0, three displays (all at 100% scaling). Latest full regression: 2026-11-22 with `scripts/test-all.ps1` (545 pass, 0 fail, 3 warnings).
 "Tested" means observed in a log, a cell-text dump or a screenshot; anything not listed is in [known-gaps.md](known-gaps.md).
 
+## Taskbars on the other monitors (2026-11-25, `-Suite tbmulti`, new manual suite, not in the default run)
+
+Runs the `place` checks (corner docking, size presets, font keys, magnetic snap: 14 checks) on each non-primary monitor, first with the taskbars as they are, then with "show taskbar on all displays" turned off (per-user value `MMTaskbarEnabled`; it was absent before and was removed again; Explorer restarted twice). Setting hidden: both other monitors' work areas equalled their screens, the main screen kept its taskbar; setting back: absent again, taskbars back as before.
+- Left monitor 1920x1080 (work area 1920x1032 with a taskbar, 1920x1080 without): 14/14 in both states.
+- Strip monitor 1920x480 (work area 1920x432 / 1920x480): **6 of 14 fail in both states**, the other 8 pass. Cause (from the log, not the taskbar): the default 900x520 window is taller than the work area. Corner docking leaves it 520 px tall, so in the strip's corners its bottom edge ends 96 px (taskbar shown) or 48 px (hidden) past the work area; the size hotkey's first press gave 900x432 / 900x480 (the 900x520 preset clamped) instead of the next preset, and the later presses are shifted. The test's expectations assume a window that fits, so these failures show a real gap (listed in known-gaps), not a test slip. Not fixed.
+**Not tested:** snap, tiling and maximize on the other monitors with their taskbars hidden; a taskbar moved to another edge together with this setting off; a third-party taskbar.
+
 ## Preflight refusal path (2026-11-25, `scripts/test-all.ps1 -Suite static`)
 
 A borderless topmost window the size of the main screen (2560x1440), owned by a copy of Windows PowerShell renamed `fakegame.exe` (so the preflight's ignore list did not apply), was put in front. The run printed `>>> PREFLIGHT: a window of 'fakegame' fills the main screen. Close it, minimize it or move it to another screen, then start the run again.`, then `preflight: main screen 2560x1440, scaling 100%, taskbar bottom; STOPPED` and `The run did not start (preflight).`, and exited with code 3. No suite ran. The cover window was closed afterwards. The passing path was already shown by the full run of 2026-11-22.

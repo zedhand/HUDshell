@@ -2992,7 +2992,61 @@ function Stop-Neutral {
   if ($script:NeutralSync -and $script:NeutralSync.Handle -ne [IntPtr]::Zero) { [void][HudTest.Neutral]::PostMessage([IntPtr]$script:NeutralSync.Handle, 0x10, [IntPtr]::Zero, [IntPtr]::Zero) }
   try { if ($script:NeutralPs) { Start-Sleep -Milliseconds 300; $script:NeutralPs.Dispose() } } catch { }
 }
-$manualSuites = @('gamesession', 'finale', 'exclreal', 'hardware', 'everything', 'remaining', 'monitorunplug', 'sleepresume', 'kbdany', 'maxwork', 'scaleprobe')
+# ---- the taskbars of the other monitors: docking and presets on every non-primary monitor, with and without a taskbar there -------------------------------
+# Windows 11 keeps all taskbars on the same edge, so "moving a secondary taskbar" means showing or hiding it: the per-user value MMTaskbarEnabled (0 = only the
+# main screen has a taskbar). The original value (or its absence) is backed up to a file and put back, with Explorer restarted, in a finally block.
+function Set-MultiTaskbar($value) {
+  $k = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced'
+  if ($null -eq $value) { Remove-ItemProperty -Path $k -Name MMTaskbarEnabled -ErrorAction SilentlyContinue }
+  else { Set-ItemProperty -Path $k -Name MMTaskbarEnabled -Type DWord -Value $value }
+  Stop-Process -Name explorer -Force -ErrorAction SilentlyContinue
+  Start-Sleep 4
+  if (-not (Get-Process explorer -ErrorAction SilentlyContinue)) { Start-Process explorer.exe }
+  Start-Sleep 8
+}
+function Suite-TbMulti {
+  Write-Host "=== tbmulti: docking and presets on every non-primary monitor, with the taskbar shown and hidden there (restarts Explorer; the setting is put back) ==="
+  $others = @(Get-Monitors | Where-Object { -not $_.Primary })
+  if ($others.Count -eq 0) { Warn 'tbmulti' 'only one monitor: nothing to test'; return }
+  $k = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced'
+  $orig = (Get-ItemProperty $k -ErrorAction SilentlyContinue).MMTaskbarEnabled
+  $backup = Join-Path $root '.claude\scratch-archive\mmtaskbar-backup.txt'
+  New-Item -ItemType Directory -Force (Split-Path $backup) | Out-Null
+  [IO.File]::WriteAllText($backup, $(if ($null -eq $orig) { 'absent' } else { [string]$orig }))
+  $each = {
+    param($tag)
+    $script:CheckTag = " [$tag]"
+    try {
+      $i = 0
+      foreach ($o in @(Get-Monitors | Where-Object { -not $_.Primary })) {
+        $i++
+        $sz = "{0}x{1}" -f ($o.WR - $o.WL), ($o.WB - $o.WT)
+        Write-Host ("monitor {0}: bounds {1}x{2}, work area {3}, {4}% scaling" -f $i, ($o.R - $o.L), ($o.B - $o.T), $sz, [int]($o.Dpi * 100 / 96))
+        $script:CheckTag = " [$tag, monitor $i $sz]"
+        Place-Once @('--at', ("{0},{1}" -f ($o.WL + 100), ($o.WT + 60)))
+      }
+    } finally { $script:CheckTag = '' }
+  }
+  try {
+    & $each 'taskbars as they are'
+    $before = @(Get-Monitors | Where-Object { -not $_.Primary } | ForEach-Object { (($_.WR - $_.WL) * ($_.WB - $_.WT)) -lt (($_.R - $_.L) * ($_.B - $_.T)) })
+    if ($before -notcontains $true) { Warn 'tbmulti' 'no other monitor shows a taskbar now: the shown case was not tested' }
+    Set-MultiTaskbar 0
+    $gone = Wait-Until { (@(Get-Monitors | Where-Object { -not $_.Primary } | Where-Object { ($_.WR - $_.WL) -eq ($_.R - $_.L) -and ($_.WB - $_.WT) -eq ($_.B - $_.T) }).Count -eq $others.Count) } 20
+    Check 'tbmulti' 'with "taskbar on all displays" off, the other monitors have no taskbar (work area = monitor)' $gone
+    $pm = @(Get-Monitors | Where-Object { $_.Primary })[0]
+    Check 'tbmulti' 'the main screen keeps its taskbar' (($pm.WR - $pm.WL) -lt ($pm.R - $pm.L) -or ($pm.WB - $pm.WT) -lt ($pm.B - $pm.T) -or (Get-TaskbarEdge) -ne 'hidden')
+    if ($gone) { & $each 'taskbars hidden on the other monitors' } else { Warn 'tbmulti' 'this Windows did not hide the other taskbars: that case was skipped' }
+  } finally {
+    Set-MultiTaskbar $orig
+    $now = (Get-ItemProperty $k -ErrorAction SilentlyContinue).MMTaskbarEnabled
+    Check 'tbmulti' 'the taskbar-on-all-displays setting is back exactly as it was' ($now -eq $orig) $(if ($null -eq $orig) { 'was absent' } else { "was $orig" })
+    $back = Wait-Until { @(Get-Monitors | Where-Object { -not $_.Primary } | Where-Object { ($_.WR - $_.WL) * ($_.WB - $_.WT) -lt ($_.R - $_.L) * ($_.B - $_.T) }).Count -eq @($before | Where-Object { $_ }).Count } 20
+    Check 'tbmulti' 'the other monitors have their taskbars again as before' $back
+  }
+}
+
+$manualSuites = @('gamesession', 'finale', 'exclreal', 'hardware', 'everything', 'remaining', 'monitorunplug', 'sleepresume', 'kbdany', 'maxwork', 'scaleprobe', 'tbmulti')
 
 # ---- preflight: things that would make a run with real keys and mouse go wrong -----------------------------------------------------------------------
 # A program whose window fills the main screen (a game, a full-screen video) would get the test's keys and clicks and could cover its windows; a leftover HUDshell
@@ -3058,6 +3112,7 @@ foreach ($s in $want) {
     'wvbounds' { Suite-WvBounds }
     'monitorunplug' { Suite-MonitorUnplug }
     'maxwork' { Suite-MaxWork }
+    'tbmulti' { Suite-TbMulti }
     'sleepresume' { Suite-SleepResume }
     'hardware' { Suite-Hardware }
     'kbdany' { Suite-KbdAny }

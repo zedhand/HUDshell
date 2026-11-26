@@ -22,7 +22,7 @@ Everything here is either untested or not implemented. Verified behaviour is in 
 | Long, busy sessions at low opacity over a game (readability) | judgement over real use |
 | Whether Claude Code or Codex ring the terminal bell (the census does not count BEL; they sent no OSC 9 / OSC 777 in the real run) | count BEL in the census, or configure the CLIs' own notification setting (not done: it would edit their configuration) |
 | The permission prompt about pasting clipboard text seen once during a policy run | its source was not identified; no WebView2 permission request was logged and a search found no documented Windows prompt of that kind. If it recurs, note the exact wording and the step |
-| Corner docking, size presets, snapping and tiling with the taskbar on the left, top, right or bottom edge (tested 2026-11-21 by setting the registry value and restarting Explorer; the original setting was restored each time); the secondary monitors' taskbars were not moved | the secondary monitors' taskbars |
+| Corner docking, size presets, snapping and tiling with the taskbar on the left, top, right or bottom edge (tested 2026-11-21 by setting the registry value and restarting Explorer; the original setting was restored each time); the other monitors' taskbars were shown and hidden (2026-11-25, `tbmulti`; Windows 11 keeps all taskbars on one edge, so they cannot be moved separately) | the secondary monitors' taskbars |
 | Tab strip while click-through is on (clicks pass through by design) | by hand |
 | A profile's start command timing (typed 0.9 s after the shell starts; a slow profile script could miss it) | try a heavy profile |
 | Clicking an OSC 8 link, the ghost tray menu item, the tray notification for attention requests, keyboard scrollback inside the CLIs | by hand |
@@ -53,6 +53,7 @@ Everything here is either untested or not implemented. Verified behaviour is in 
 
 ## Partly verified
 
+- A window bigger than a short monitor is not made to fit: on a 1920x480 monitor the default 900x520 window docked into a corner with its bottom edge 48-96 px below the work area (and the screen), and the first press of the size hotkey gave 900x432/900x480 instead of the next preset (1280x720 clamped). Found with `tbmulti` on 2026-11-25; the size presets themselves are clamped to the work area. Not fixed yet.
 - The test runner's preflight (stops when a program fills the main screen) passed with nothing in the way, and refused (exit code 3) with a stand-in window and with a real full-screen program (Edge kiosk) in front; it stops a leftover HUDshell. It also refuses a maximized window (tested with Notepad and a browser). A real game was not tried. The neutral window for the tests' keys worked in the full run of 2026-11-22 but not with a browser window in front.
 - Tray icon: lives in the Windows 11 overflow flyout until pinned; pinned-on-taskbar case not checked.
 - Click-through delivering input to the window underneath is proven by hit-testing, not by a recorded receiver.
