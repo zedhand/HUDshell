@@ -31,4 +31,5 @@ Source: an audit of `scripts/build-release.ps1` and `scripts/test-all.ps1`. Numb
 | L6 | Usage line, a wrong comment, a `\t` escape turned into a tab in the docs | done: usage list, the comment and the tab in three docs lines |
 | L7 | Loading the script creates `.claude\scratch-archive\shots` | done: the shots folder is made when the first screenshot is taken |
 | L8 | `Get-States` splits on single spaces | done: split only before a `key=` |
+| (check) | Full run after the audit fixes (2026-11-26) | done: 506 pass, 3 fail, 6 warn; the 3 fails were a drag-restore bug in the product, fixed and re-tested (see test-results) |
 | L9 | `Stop-Process -Name explorer` kills File Explorer windows; taskbar backups never read back | done: open File Explorer folders are reopened; a backup left by an interrupted run is applied at the next start |

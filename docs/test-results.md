@@ -1,8 +1,14 @@
 # Test results
 
 Machine: Windows 11 build 26300, WebView2 Runtime 157.x, Rust 1.99 (MSVC), PowerShell 7.7, Claude Code 2.1.328 (2.1.329 on 2026-11-20),
-Codex CLI 0.170.0, three displays (all at 100% scaling). Latest full regression: 2026-11-22 with `scripts/test-all.ps1` (545 pass, 0 fail, 3 warnings).
+Codex CLI 0.170.0, three displays (all at 100% scaling on 2026-11-26). Latest full regression: 2026-11-26 with `scripts/test-all.ps1` (506 pass, 3 fail, 6 warnings; the three fails are fixed, see the first section).
 "Tested" means observed in a log, a cell-text dump or a screenshot; anything not listed is in [known-gaps.md](known-gaps.md).
+
+## Full run after the PowerShell audit fixes (2026-11-26, `scripts/test-all.ps1`, commit 7bec8bd)
+
+**506 pass, 3 fail, 6 warnings.** The run completed with every suite run; the new guard in the runner gave no false FAIL. The 3 fails were one `snap` check on each of the three monitors: dragging a maximized window down by its top strip restored the right size (640x360) but the window came back flush at the left margin instead of under the cursor (the harness log showed the restore placing it under the cursor, then Windows' next proposed rectangle putting it at x = cursor minus the grab offset taken in the maximized window). The drag code had not changed since the last passing run (2026-11-22), so why it passed before is not known. Fix: `RESTORE_ANCHOR` in `src/main.rs` works out the sideways difference at the first proposal after the restore and applies it for the rest of the drag. After it: `snap` 64 pass, 0 fail, 0 warn (real mouse, three monitors); `input` and `windowsnap` 23 pass, 0 fail, 1 warn.
+Warnings: `place`, `dpi` and `input` found no monitor with a different scaling (the left monitor is now at 100%, so mixed scaling was not tested in this run); `autotest` skipped one step each for Claude Code and Codex (the dialog guard, as before); the AltGr+Q limit on the German layout. The keyboard layout was back to the normal one afterwards and no HUDshell process was left.
+**Not re-run after the fix:** the other suites (the change is in the drag-to-restore path only; `clickfocus`, `ui` and the others passed before the fix and do not use it).
 
 ## Taskbars on the other monitors (2026-11-25, `-Suite tbmulti`, new manual suite, not in the default run)
 

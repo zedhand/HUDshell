@@ -984,6 +984,16 @@ unsafe fn cycle_size(hwnd: HWND) {
 /// before the drag, and whether the drag is a move (not a resize) started on the top strip.
 static SNAP_DRAG: PerWin<Mutex<Option<place::SnapDrag>>> = PerWin::new(|| Mutex::new(None));
 static DRAG_START: PerWin<Mutex<Option<RECT>>> = PerWin::new(|| Mutex::new(None));
+/// After a drag that began on a maximized window: (the cursor's proportional place in the window, the window's width, the sideways
+/// correction). Windows keeps the grab offset it took at the start of the drag, measured in the maximized window, so the rectangles it
+/// proposes afterwards put the restored window at the wrong place (flush left instead of under the cursor); the correction (worked out
+/// at the first proposal after the restore) puts it back under the cursor. Empty outside such a drag.
+static RESTORE_ANCHOR: PerWin<Mutex<Option<RestoreAnchor>>> = PerWin::new(|| Mutex::new(None));
+struct RestoreAnchor {
+    rel: f64,
+    w: i32,
+    shift: Option<i32>,
+}
 static DRAG_IS_MOVE: PerWin<AtomicBool> = PerWin::new(|| AtomicBool::new(false));
 /// The window really moved during this drag (a plain click on the strip must not maximize it at the top edge).
 static DRAG_MOVED: PerWin<AtomicBool> = PerWin::new(|| AtomicBool::new(false));
@@ -1081,9 +1091,17 @@ unsafe fn snap_moving(hwnd: HWND, r: &mut RECT) -> bool {
             *r = RECT { left: nl, top: nt, right: nl + w, bottom: nt + h };
             *lock_or_recover(&SNAP_DRAG) = Some(place::SnapDrag::new(to_rect(r)));
             *lock_or_recover(&DRAG_START) = Some(*r);
+            *lock_or_recover(&RESTORE_ANCHOR) = Some(RestoreAnchor { rel, w, shift: None });
             log(&format!("restored from maximized to {w}x{h} at {nl},{nt}: the drag left the maximized state"));
             return true;
         }
+    }
+    if let Some(a) = lock_or_recover(&RESTORE_ANCHOR).as_mut() {
+        let mut pt = windows::Win32::Foundation::POINT::default();
+        let _ = unsafe { GetCursorPos(&mut pt) };
+        let dx = *a.shift.get_or_insert_with(|| (pt.x as f64 - a.rel * a.w as f64) as i32 - r.left);
+        r.left += dx;
+        r.right += dx;
     }
     let c = cfg();
     let proposed = to_rect(r);
@@ -3348,6 +3366,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 let _ = GetWindowRect(hwnd, &mut wr);
                 *lock_or_recover(&SNAP_DRAG) = Some(place::SnapDrag::new(to_rect(&wr)));
                 *lock_or_recover(&DRAG_START) = Some(wr);
+                *lock_or_recover(&RESTORE_ANCHOR) = None;
                 DRAG_MOVED.store(false, Ordering::SeqCst);
                 begin_group_drag(hwnd, &wr);
                 foreground_note("at size/move start");
@@ -3370,6 +3389,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 }
                 lock_or_recover(&DRAG_GROUP).clear();
                 *lock_or_recover(&DRAG_START) = None;
+                *lock_or_recover(&RESTORE_ANCHOR) = None;
                 save_geometry(hwnd);
                 DefWindowProcW(hwnd, msg, wparam, lparam)
             }
