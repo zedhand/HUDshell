@@ -32,4 +32,5 @@ Source: an audit of `scripts/build-release.ps1` and `scripts/test-all.ps1`. Numb
 | L7 | Loading the script creates `.claude\scratch-archive\shots` | done: the shots folder is made when the first screenshot is taken |
 | L8 | `Get-States` splits on single spaces | done: split only before a `key=` |
 | (check) | Full run after the audit fixes (2026-11-26) | done: 506 pass, 3 fail, 6 warn; the 3 fails were a drag-restore bug in the product, fixed and re-tested (see test-results) |
+| (check) | Mixed scaling re-run (2026-11-26) | done: `mixscale` suite (left monitor at 150%, put back); place, dpi, input and snap pass; one test drop point fixed |
 | L9 | `Stop-Process -Name explorer` kills File Explorer windows; taskbar backups never read back | done: open File Explorer folders are reopened; a backup left by an interrupted run is applied at the next start |

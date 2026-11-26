@@ -52,8 +52,10 @@ Key decisions and why:
   (`maximize_area = monitor`, over the taskbar: the window is also raised within the topmost band so the taskbar does not cover it) or its work
   area (`work`); it is done by resizing the window (never with Windows' own maximize, which would activate it and take the keyboard), and the
   rectangle it had is kept. A maximized window leaves that state on the first actual movement of a drag from its strip (not on a plain
-  click), keeping its proportional place under the cursor, at its earlier size in the scaling of the monitor it is on. The corner and size
-  hotkeys restore it first; the saved window position is the restored rectangle.
+  click), keeping its proportional place under the cursor, at its earlier size in the scaling of the monitor it is on. Windows keeps the
+  grab offset it took in the maximized window and bases every later proposal of the drag on it, which would put the restored window flush
+  left; `RESTORE_ANCHOR` works out the sideways difference at the first proposal after the restore and applies it for the rest of the drag
+  (found 2026-11-26 by the `snap` suite). The corner and size hotkeys restore it first; the saved window position is the restored rectangle.
 - **Grab focus** (hotkey, tray, or clicking the terminal while interactive) clears `NOACTIVATE`, calls
   `SetForegroundWindow` (allowed because a registered hotkey or real input is in progress) and makes the window
   clickable while focused. **Release** restores the previous foreground window and click-through.
